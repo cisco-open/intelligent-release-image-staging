@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
 from iris_installer import application_upgrade as upgrade, upgrade_plan as plan, upgrade_runtime as runtime
 from iris_installer import credential_maintenance, upgrade_state
 from iris_installer import upgrade_boot_guard
+from iris_installer.lifecycle_history import Store
 from iris_installer.state import InstallError, atomic_write
 
 INSTANCE = '1e2ac67b-07c1-4e94-a66b-08b19f8e2d75'
@@ -60,6 +61,10 @@ def transaction(tmp_path, monkeypatch):
             'signing': True, 'guestshell': {'state': 'ok'}}, 'state': 'PRODUCTION_REVIEW_REQUIRED'}
     atomic_write(base / 'compose.json', raw_compose)
     atomic_write(base / 'installation.json', plan.canonical(original))
+    # Current prepare commits this before its immutable review. The real new
+    # worker's initialization at refresh must preserve that same generation.
+    Store(base)
+    original = json.loads((base / 'installation.json').read_bytes())
     operation = upgrade_state.Operation(base, OPERATION, INSTANCE)
     worker = {'record': {'unit': 'iris-lifecycle-' + INSTANCE + '.service'}, 'unit_sha256': 'd' * 64}
     operation.create({'original': original, 'worker_before': worker})
@@ -170,6 +175,7 @@ def transaction(tmp_path, monkeypatch):
                 ('age.txt', 'volume-iris-config/account.age', 'volume-iris-state/replay', 'images/owned.img')}
 
     def refresh(*args):
+        assert Store(base).anchor == original['lifecycle_history']
         control['worker_fenced'] = False
         event('refresh-worker')
         return {'managed': True, 'active': True, 'enabled': True}
@@ -198,6 +204,7 @@ def transaction(tmp_path, monkeypatch):
 
 
 def assert_preserved(tx):
+    assert Store(tx.base).anchor == tx.original['lifecycle_history']
     assert (tx.base / 'age.txt').read_bytes() == b'existing service identity'
     assert (tx.base / 'volume-iris-config/account.age').read_bytes() == b'existing encrypted owner'
     assert (tx.base / 'volume-iris-state/replay').read_bytes() == b'epoch=17;high_water=900'

@@ -10,6 +10,7 @@ import {familyLabels, topologyLabels, activeJobs} from './worker-lifecycle-model
 import {trustFamilies} from './deployment-trust-model.mjs';
 import {maintenanceAction, activeMaintenance} from './key-maintenance-model.mjs';
 import {deploymentGuidance, trustState} from './certificate-guidance.mjs';
+import {upgradeArchivePhases} from './backup-retention-model.mjs';
 
 function WorkerLifecycle({controller: c, roots}) {
   const s = useSyncExternalStore(c.subscribe, c.snapshot), focus = useRef(null), outcomes = useRef({});
@@ -147,6 +148,16 @@ function WorkerLifecycle({controller: c, roots}) {
     <p className="muted">Restore stops this deployment, verifies the backup against current security authority, replaces saved content and checks restarted services. Changed credentials or missing instruction history prevent cutover. Use the host recovery window if the Console is offline.</p>
     {retention && <div id="backup-archive-retention"><h4>Saved backups</h4>
       <p id="backup-storage-capacity">{retention.capacity.backup_used} of {retention.capacity.backup_limit} backups saved on this host. Deleting a backup removes its deployment and recovery archives.</p>
+      {retention.protected_upgrade_backups?.length > 0 && <details id="backup-upgrade-archives">
+        <summary>{retention.capacity.protected_upgrade_used} protected upgrade {retention.capacity.protected_upgrade_used === 1 ? 'backup' : 'backups'}</summary>
+        <p>These archives also use host storage. They stay with their upgrade recovery records and cannot be deleted here.</p>
+        <ul>{retention.protected_upgrade_backups.map(row => <li key={row.operation_id + ':' + row.attempt}>
+          <span className="machine">{row.operation_id}</span> · Attempt {row.attempt} · {upgradeArchivePhases[row.phase]}<br />
+          {row.deployment_archive && row.recovery_archive ? 'Deployment and identity recovery archives present.'
+            : row.deployment_archive ? 'Deployment archive present; identity recovery archive absent.'
+              : 'Identity recovery archive present; deployment archive absent.'}
+        </li>)}</ul>
+      </details>}
       <label className="worker-field">Saved backup to delete<select id="backup-delete-selected" disabled={s.busy || !c.ready('backups')} value={s.backupDeleteSelected} onChange={event => c.field('backupDeleteSelected', event.target.value)}><option value="">Choose a saved backup</option>{retention.backups.map(row => <option key={row.backup_id} value={row.backup_id}>{(row.created_at === null ? 'Date unavailable' : c.services.formatDate(row.created_at)) + ' · ' + row.backup_id}</option>)}</select></label>
       <p className="worker-actions"><button className="btn danger" id="backup-delete" disabled={!c.canRetire('delete-backup')} onClick={() => c.retire('delete-backup')}>Delete selected backup</button></p>
       {s.backupDeleteSelected && retention.backups.find(row => row.backup_id === s.backupDeleteSelected && !row.delete_allowed)?.delete_reason && <p id="backup-delete-reason" className="muted">{retention.backups.find(row => row.backup_id === s.backupDeleteSelected).delete_reason}</p>}

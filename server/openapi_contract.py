@@ -2310,14 +2310,23 @@ def _retention_schema():
     return _schedule_object({'schema': {'const': 1}, 'revision': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
         'busy': {'type': 'boolean'}, 'capacity': _schedule_object({
             'history_used': {'type': 'integer', 'minimum': 0, 'maximum': 100}, 'history_limit': {'const': 100},
-            'backup_used': {'type': 'integer', 'minimum': 0}, 'backup_limit': {'const': 20}}),
+            'backup_used': {'type': 'integer', 'minimum': 0}, 'backup_limit': {'const': 20},
+            'protected_upgrade_used': {'type': 'integer', 'minimum': 0}},
+            required=['history_used', 'history_limit', 'backup_used', 'backup_limit']),
         'jobs': {'type': 'array', 'maxItems': 100, 'items': _schedule_object({
             'id': {'type': 'string', 'format': 'uuid'}, 'action': {'type': 'string'}, 'state': {'type': 'string'},
             'backup_id': {'type': ['string', 'null'], 'format': 'uuid'}, 'family': {'type': ['string', 'null']},
             'finished_at': {'type': ['integer', 'null']}, 'retire_allowed': {'type': 'boolean'}, 'retire_reason': {'type': 'string'}})},
         'backups': {'type': 'array', 'items': _schedule_object({'backup_id': {'type': 'string', 'format': 'uuid'},
             'created_at': {'type': ['integer', 'null']}, 'delete_allowed': {'type': 'boolean'}, 'delete_reason': {'type': 'string'}})},
-        'operation': {'oneOf': [_retention_operation_schema(), {'type': 'null'}]}})
+        'protected_upgrade_backups': {'type': 'array', 'items': _schedule_object({
+            'operation_id': {'type': 'string', 'format': 'uuid'}, 'attempt': {'type': 'integer', 'minimum': 1, 'maximum': 3},
+            'phase': {'enum': ['building', 'prepared', 'fencing', 'backing-up', 'stopped', 'publishing',
+                              'published', 'starting', 'verifying', 'worker', 'finishing', 'upgraded',
+                              'cancelled', 'recovery-required']},
+            'deployment_archive': {'type': 'boolean'}, 'recovery_archive': {'type': 'boolean'}})},
+        'operation': {'oneOf': [_retention_operation_schema(), {'type': 'null'}]}},
+        required=['schema', 'revision', 'busy', 'capacity', 'jobs', 'backups', 'operation'])
 
 
 def _json_success_example(route):

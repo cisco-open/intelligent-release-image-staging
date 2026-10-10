@@ -20,6 +20,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Allow finished maintenance history and unneeded saved backups to be cleared
   separately, preserving recovery records and protection against request replay.
   Failed backup attempts without saved files no longer consume backup slots.
+  Keep owned upgrade recovery archives visible and protected, and
+  preserve maintenance replay history through reviewed application upgrades.
 
 - Clarify that aborting onboarding during connection checks waits for those
   checks to finish and prevents the installer from starting.

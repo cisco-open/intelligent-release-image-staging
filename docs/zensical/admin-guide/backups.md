@@ -77,6 +77,12 @@ worker and its transport credentials must remain available during downtime.
 and 20 saved backups. Failed attempts use history space. An attempt that leaves
 no saved files does not use a backup slot.
 
+**Protected upgrade backups** are listed separately. They also use host storage
+but stay with their upgrade recovery records, outside the 20 ordinary backup
+slots. The list shows which archives are present. Use the recorded upgrade
+operation on the installer host to review recovery; these archives cannot be
+deleted from the Console.
+
 Use **Clear finished history** to remove up to 25 finished records from the
 recent list. The worker keeps saved backups, security records, recovery records
 and the evidence that prevents old requests from running again. Records still

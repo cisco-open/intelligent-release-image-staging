@@ -62,6 +62,32 @@ test('operation acknowledgements bind exact request, action, count and backup', 
   assert.ok(matchingRetention(operation('delete-backup'), {action: 'resume-delete', request_id: third, backup_id: id}));
   assert.equal(matchingRetention(operation('delete-backup'), {action: 'delete-backup', request_id: third, backup_id: other}), false);
 });
+test('protected upgrade archives are optional, exact and separately counted', () => {
+  const value = retained();
+  value.protected_upgrade_backups = [{operation_id: third, attempt: 1, phase: 'upgraded', deployment_archive: true, recovery_archive: true}];
+  value.capacity.protected_upgrade_used = 1;
+  assert.deepEqual(retentionStatus(value), value);
+  const partial = structuredClone(value); partial.protected_upgrade_backups[0].recovery_archive = false;
+  assert.ok(retentionStatus(partial));
+  for (const mutate of [v => {delete v.capacity.protected_upgrade_used;}, v => {delete v.protected_upgrade_backups;},
+    v => {v.capacity.protected_upgrade_used = 0;}, v => {v.capacity.protected_upgrade_used = true;},
+    v => {v.protected_upgrade_backups[0].attempt = 0;}, v => {v.protected_upgrade_backups[0].attempt = 4;},
+    v => {v.protected_upgrade_backups[0].phase = 'unknown';}, v => {v.protected_upgrade_backups[0].operation_id = '../foreign';},
+    v => {v.protected_upgrade_backups[0].deployment_archive = false; v.protected_upgrade_backups[0].recovery_archive = false;},
+    v => {v.protected_upgrade_backups[0].delete_allowed = true;},
+    v => {v.protected_upgrade_backups.push({...v.protected_upgrade_backups[0]}); v.capacity.protected_upgrade_used++;}]) {
+    const bad = structuredClone(value); mutate(bad); assert.equal(retentionStatus(bad), null);
+  }
+});
+test('protected upgrade backups never become selectable deletion or restore targets', async () => {
+  const {c, f} = await setup();
+  f.backups.retention.protected_upgrade_backups = [{operation_id: third, attempt: 2,
+    phase: 'upgraded', deployment_archive: true, recovery_archive: false}];
+  f.backups.retention.capacity.protected_upgrade_used = 1; await c.refresh('backups');
+  assert.equal(c.state.valid.backups, true); assert.equal(c.canBackup('backup'), true);
+  c.field('backupDeleteSelected', third); assert.equal(c.canRetire('delete-backup'), false);
+  c.field('backupSelected', third); assert.equal(c.canBackup('restore'), false);
+});
 test('clear history uses a reviewed revision and bounded exact finished IDs', async () => {
   const {c, f} = await setup(); await c.retire('retire-history');
   assert.deepEqual(f.writes, [{action: 'retire-history', request_id: third, expected_revision: hash, job_ids: [other]}]);

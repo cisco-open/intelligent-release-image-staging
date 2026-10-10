@@ -125,10 +125,21 @@ try {
   assert.equal(await page.locator('#backup-history-retention').count(), 0, 'Older worker has no unsupported cleanup controls');
   fixtures.backups.jobs.push({...job('backup', 'captured'), id: accepted, backup_id: accepted});
   fixtures.backups.retention = {schema: 1, revision: hash, busy: false,
-    capacity: {history_used: 1, history_limit: 100, backup_used: 1, backup_limit: 20},
+    capacity: {history_used: 1, history_limit: 100, backup_used: 1, backup_limit: 20, protected_upgrade_used: 2},
+    protected_upgrade_backups: [
+      {operation_id: other, attempt: 1, phase: 'upgraded', deployment_archive: true, recovery_archive: true},
+      {operation_id: other, attempt: 2, phase: 'cancelled', deployment_archive: false, recovery_archive: true}],
     jobs: [{id: other, action: 'verify', state: 'failed', backup_id: accepted, family: null, finished_at: now, retire_allowed: true, retire_reason: ''}],
     backups: [{backup_id: accepted, created_at: now, delete_allowed: true, delete_reason: ''}], operation: null};
   await page.locator('#backup-refresh').click(); await idle();
+  const protectedArchives = page.locator('#backup-upgrade-archives');
+  assert.equal(await protectedArchives.locator('summary').innerText(), '2 protected upgrade backups');
+  await protectedArchives.locator('summary').focus(); await page.keyboard.press('Enter');
+  assert.notEqual(await protectedArchives.getAttribute('open'), null);
+  assert.match(await protectedArchives.innerText(), /Upgrade complete/);
+  assert.match(await protectedArchives.innerText(), /Identity recovery archive present; deployment archive absent/);
+  assert.equal(await protectedArchives.locator('button, select, input').count(), 0, 'Protected archives have no mutation control');
+  assert.equal(await page.locator(`#backup-delete-selected option[value="${other}"]`).count(), 0);
   await page.locator('#backup-history-clear').focus(); await page.keyboard.press('Enter'); await idle();
   assert.equal(writes.at(-1).action, 'retire-history'); assert.deepEqual(writes.at(-1).job_ids, [other]);
   assert.match(await page.locator('#backup-operation-result').innerText(), /Cleared 1 finished history record\..*Saved backups/);

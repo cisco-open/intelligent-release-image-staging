@@ -157,12 +157,25 @@ class Retention:
             raise InstallError('Managed backup custody does not match this deployment')
 
     def backup_ids(self):
+        return self.backup_inventory()[0]
+
+    def backup_inventory(self):
+        from .upgrade_state import protected_backups
+        upgrades, upgrading = protected_backups(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir)
         found = set()
+        protected = {}
         for kind, root in (('backup', self.worker.backup_dir), ('recovery', self.worker.recovery_dir)):
             backup_archive.private_directory(root)
             for path in root.iterdir():
                 if path.name == '.iris-storage.json':
                     self._storage_marker(path, kind)
+                    continue
+                if str(path) in upgrades:
+                    backup_archive.private_directory(path)
+                    public, side = upgrades[str(path)]
+                    key = (public['operation_id'], public['attempt'])
+                    row = protected.setdefault(key, dict(public, deployment_archive=False, recovery_archive=False))
+                    row[side] = True
                     continue
                 if (path.name.startswith(('.iris-backup-', '.iris-verify-', '.iris-restore-'))
                         and (self.store.pending() or any(row.get('state') == 'running' for row in self.worker.jobs))):
@@ -174,13 +187,15 @@ class Retention:
                 identifier(path.name)
                 backup_archive.private_directory(path)
                 found.add(path.name)
-        return found
+        if protected_backups(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir) != (upgrades, upgrading):
+            raise InstallError('Application upgrade backup custody changed during storage observation')
+        return found, [protected[key] for key in sorted(protected)], upgrading
 
     def status(self, request_id=None):
         pending = self.store.pending()
-        physical = self.backup_ids()
+        physical, upgrades, upgrading = self.backup_inventory()
         jobs = []
-        busy = bool(pending) or any(row.get('state') in ('running', 'recovery-required') for row in self.worker.jobs)
+        busy = upgrading or bool(pending) or any(row.get('state') in ('running', 'recovery-required') for row in self.worker.jobs)
         for row in self.worker.jobs:
             allowed, reason = self.eligible(row)
             jobs.append({'id': row['id'], 'action': row['action'], 'state': row['state'],
@@ -210,11 +225,14 @@ class Retention:
             backups.append({'backup_id': backup_id, 'created_at': owners[0].get('finished_at') if owners else None,
                             'delete_allowed': allowed,
                             'delete_reason': reason})
-        revision = digest({'jobs': self.worker.jobs, 'backups': backups, 'pending': pending})
+        revision = digest({'jobs': self.worker.jobs, 'backups': backups, 'pending': pending,
+                           'protected_upgrade_backups': upgrades})
         return {'schema': 1, 'revision': revision, 'busy': busy,
                 'capacity': {'history_used': len(self.worker.jobs), 'history_limit': 100,
-                             'backup_used': len(physical), 'backup_limit': 20},
-                'jobs': jobs, 'backups': backups, 'operation': public_operation(self.store.operation(request_id))}
+                             'backup_used': len(physical), 'backup_limit': 20,
+                             'protected_upgrade_used': len(upgrades)},
+                'jobs': jobs, 'backups': backups, 'protected_upgrade_backups': upgrades,
+                'operation': public_operation(self.store.operation(request_id))}
 
     def submit(self, request):
         action = request.get('action')

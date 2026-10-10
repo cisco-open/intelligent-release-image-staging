@@ -36094,6 +36094,10 @@
                             },
                             "backup_limit": {
                               "const": 20
+                            },
+                            "protected_upgrade_used": {
+                              "type": "integer",
+                              "minimum": 0
                             }
                           },
                           "required": [
@@ -36186,6 +36190,55 @@
                               "created_at",
                               "delete_allowed",
                               "delete_reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "protected_upgrade_backups": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "operation_id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "attempt": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 3
+                              },
+                              "phase": {
+                                "enum": [
+                                  "building",
+                                  "prepared",
+                                  "fencing",
+                                  "backing-up",
+                                  "stopped",
+                                  "publishing",
+                                  "published",
+                                  "starting",
+                                  "verifying",
+                                  "worker",
+                                  "finishing",
+                                  "upgraded",
+                                  "cancelled",
+                                  "recovery-required"
+                                ]
+                              },
+                              "deployment_archive": {
+                                "type": "boolean"
+                              },
+                              "recovery_archive": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "operation_id",
+                              "attempt",
+                              "phase",
+                              "deployment_archive",
+                              "recovery_archive"
                             ],
                             "additionalProperties": false
                           }
@@ -78379,6 +78432,10 @@
                             },
                             "backup_limit": {
                               "const": 20
+                            },
+                            "protected_upgrade_used": {
+                              "type": "integer",
+                              "minimum": 0
                             }
                           },
                           "required": [
@@ -78471,6 +78528,55 @@
                               "created_at",
                               "delete_allowed",
                               "delete_reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "protected_upgrade_backups": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "operation_id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "attempt": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 3
+                              },
+                              "phase": {
+                                "enum": [
+                                  "building",
+                                  "prepared",
+                                  "fencing",
+                                  "backing-up",
+                                  "stopped",
+                                  "publishing",
+                                  "published",
+                                  "starting",
+                                  "verifying",
+                                  "worker",
+                                  "finishing",
+                                  "upgraded",
+                                  "cancelled",
+                                  "recovery-required"
+                                ]
+                              },
+                              "deployment_archive": {
+                                "type": "boolean"
+                              },
+                              "recovery_archive": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "operation_id",
+                              "attempt",
+                              "phase",
+                              "deployment_archive",
+                              "recovery_archive"
                             ],
                             "additionalProperties": false
                           }

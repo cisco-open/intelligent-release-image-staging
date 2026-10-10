@@ -12,6 +12,21 @@ const text = value => typeof value === 'string' && value.length <= 1024;
 const unique = values => new Set(values).size === values.length;
 const actions = ['backup', 'verify', 'extract', 'restore', 'rotate', 'renew-transport'];
 const states = ['running', 'recovery-required', 'failed', 'captured', 'verified-files', 'verified-isolated-files', 'restored', 'rotated', 'renewed'];
+export const upgradeArchivePhases = Object.freeze({
+  building: 'Preparing upgrade', prepared: 'Ready to upgrade', fencing: 'Stopping new work',
+  'backing-up': 'Saving recovery archives', stopped: 'Services stopped', publishing: 'Updating files',
+  published: 'Updated files ready', starting: 'Starting services', verifying: 'Checking deployment',
+  worker: 'Updating maintenance worker', finishing: 'Completing upgrade', upgraded: 'Upgrade complete',
+  cancelled: 'Upgrade cancelled', 'recovery-required': 'Needs recovery',
+});
+
+function protectedUpgradeBackups(value) {
+  if (!Array.isArray(value) || !unique(value.map(row => row?.operation_id + ':' + row?.attempt))) return false;
+  return value.every(row => exact(row, 'operation_id attempt phase deployment_archive recovery_archive') &&
+    requestId(row.operation_id) && count(row.attempt, 3) && row.attempt > 0 && Object.hasOwn(upgradeArchivePhases, row.phase) &&
+    typeof row.deployment_archive === 'boolean' && typeof row.recovery_archive === 'boolean' &&
+    (row.deployment_archive || row.recovery_archive));
+}
 
 export function retentionOperation(value) {
   if (!exact(value, 'request_id action state retired_count backup_id') || !requestId(value.request_id) ||
@@ -22,9 +37,12 @@ export function retentionOperation(value) {
 }
 
 export function retentionStatus(value) {
-  if (!exact(value, 'schema revision busy capacity jobs backups operation') || value.schema !== 1 ||
+  const upgraded = object(value) && Object.hasOwn(value, 'protected_upgrade_backups');
+  if (!exact(value, 'schema revision busy capacity jobs backups operation' + (upgraded ? ' protected_upgrade_backups' : '')) || value.schema !== 1 ||
       typeof value.revision !== 'string' || !/^[a-f0-9]{64}$/.test(value.revision) || typeof value.busy !== 'boolean' ||
-      !exact(value.capacity, 'history_used history_limit backup_used backup_limit') ||
+      !exact(value.capacity, 'history_used history_limit backup_used backup_limit' + (upgraded ? ' protected_upgrade_used' : '')) ||
+      (upgraded && (!protectedUpgradeBackups(value.protected_upgrade_backups) ||
+        value.capacity.protected_upgrade_used !== value.protected_upgrade_backups.length)) ||
       value.capacity.history_limit !== 100 || value.capacity.backup_limit !== 20 ||
       !count(value.capacity.history_used, 100) || !count(value.capacity.backup_used, Number.MAX_SAFE_INTEGER) ||
       !Array.isArray(value.jobs) || value.jobs.length !== value.capacity.history_used || !unique(value.jobs.map(row => row?.id)) ||

@@ -10,7 +10,7 @@ from pathlib import Path
 import stat
 
 from .state import InstallError, atomic_write, regular_bytes
-from .upgrade_plan import canonical, identifier, sha256
+from .upgrade_plan import SCHEMA, canonical, identifier, sha256
 
 PHASES = frozenset(('building', 'prepared', 'fencing', 'backing-up', 'stopped',
     'publishing', 'published', 'starting', 'verifying', 'worker', 'finishing',
@@ -118,6 +118,62 @@ def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=Non
         return pending
     except OSError:
         raise InstallError('Application upgrade custody is unavailable; preserve state') from None
+
+
+def protected_backups(state_dir, backup_dir, recovery_dir):
+    """Observe only exact approved upgrade capture paths; never adopt or delete.
+
+    These archives have separate recovery authority and are not ordinary UUID
+    worker backups. A prefix alone grants no exception to the storage census.
+    """
+    base = private_directory(state_dir)
+    installation = read(base / 'installation.json')
+    instance = identifier(installation.get('id'))
+    pending = bool(guard(base, instance_id=instance, inspection=True))
+    directory = base / 'application-upgrades'
+    if not directory.exists():
+        return {}, pending
+    result = {}
+    for child in sorted(directory.iterdir()):
+        private_directory(child)
+        operation = Operation(base, identifier(child.name), instance)
+        operation.record = validate(read(operation.path), operation_id=operation.id, instance_id=instance)
+        attempts = operation.record.get('backup_attempts', [])
+        if not isinstance(attempts, list) or len(attempts) > 3:
+            raise InstallError('Invalid application upgrade backup attempts; preserve custody')
+        if not attempts:
+            continue
+        review = operation.plan(operation.record.get('plan_sha256'))
+        worker = review.get('worker_before', {}).get('record', {})
+        if (review.get('schema') != SCHEMA or review.get('original', {}).get('id') != instance
+                or canonical(review.get('original')) != canonical(operation.record.get('original'))
+                or canonical(review.get('worker_before')) != canonical(operation.record.get('worker_before'))
+                or worker.get('instance_id') != instance or worker.get('state_dir') != str(base)
+                or worker.get('unit') != 'iris-lifecycle-' + instance + '.service'
+                or any(worker.get('storage', {}).get(kind, {}).get('directory') != str(path)
+                       for kind, path in (('backup', backup_dir), ('recovery', recovery_dir)))):
+            raise InstallError('Application upgrade backup ownership differs from its approved plan')
+        verified = operation.record.get('backup')
+        if verified is not None and (not isinstance(verified, dict) or verified.get('paths') not in attempts):
+            raise InstallError('Application upgrade verified backup differs from its recorded attempts')
+        for index, attempt in enumerate(attempts, 1):
+            suffix = 'upgrade-' + operation.id + '-' + str(index)
+            expected = {'data': str(Path(backup_dir) / suffix), 'identity': str(Path(recovery_dir) / suffix)}
+            if attempt != expected:
+                raise InstallError('Application upgrade archive path differs from its exact owned attempt')
+            if verified is not None and verified['paths'] == attempt:
+                for path in expected.values():
+                    # A successful authenticated capture cannot silently lose
+                    # a side and become an apparently unused storage slot.
+                    private_directory(path)
+            public = {'operation_id': operation.id, 'attempt': index, 'phase': operation.record['phase']}
+            for name, path in expected.items():
+                result[path] = (public, 'deployment_archive' if name == 'data' else 'recovery_archive')
+        if canonical(read(operation.path)) != canonical(operation.record):
+            raise InstallError('Application upgrade authority changed during backup observation')
+    if bool(guard(base, instance_id=instance, inspection=True)) != pending:
+        raise InstallError('Application upgrade state changed during backup observation')
+    return result, pending
 
 
 class Operation:

@@ -21,6 +21,7 @@ import uuid
 from . import backup, deploy, managed_worker, restore, restore_storage as storage
 from . import upgrade_candidate as candidate, upgrade_plan as plan, upgrade_runtime as runtime
 from .upgrade_state import Operation, guard, read
+from .lifecycle_history import Store
 from .state import InstallError, Journal, atomic_write, regular_bytes
 
 
@@ -59,6 +60,23 @@ def prepare(args):
                          'Both existing services must be healthy and running before preparation')
             selection, proof = candidate.selected_source(install, args.source, args.source_proof,
                                                         args.source_proof_sha256, args.source_commit)
+            before_history = copy.deepcopy(journal.document)
+        # A prior worker may predate retention. Establish its independent
+        # replay commitment before approving an immutable upgrade generation,
+        # never for an unauthenticated candidate or under a nested Journal lock.
+        history = Store(base)
+        plan.require(runtime.equal(runtime.worker_state(base), worker),
+                     'The managed worker changed during upgrade preparation')
+        with Journal(base).locked() as journal:
+            expected = dict(before_history, lifecycle_history=history.anchor)
+            plan.require(runtime.equal(journal.document, expected),
+                         'The deployment changed while preparing maintenance history')
+            _idle(journal)
+            install = deploy.DockerInstall(journal)
+            sources, volumes, containers = backup.capture_plan(install)
+            runtime.drain(install)
+            plan.require(all(row['running'] for row in containers),
+                         'Both existing services must remain running during preparation')
             original = copy.deepcopy(journal.document)
             compose = regular_bytes(install.compose_file).decode('utf-8')
             operation = Operation(base, str(uuid.uuid4()), original['id'])
