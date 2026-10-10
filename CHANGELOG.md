@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Build both Guest Shell static-helper sets in the application upgrade's own
+  directory before packing bundles, preserving the verified source snapshot.
+
 - Correct seeder-rotation guidance for header authentication, unchanged torrent
   URLs, quarantine release and the two-previous-credential limit. When that
   limit is reached, explain that rotation must wait for a credential to expire.

@@ -122,17 +122,29 @@ def build(install, operation, selection, source):
                IRIS_DEVICE_PLATFORMS='linux/amd64,linux/arm64',
                IRIS_INSTRUCTION_ROOTS_DIR=str(install.base / 'roots'),
                XDG_CACHE_HOME=str(cache), IOXCLIENT=str(binary / 'ioxclient'))
-    def run(arguments):
-        return install.runner([str(value) for value in arguments], env=env, timeout=7200)
+    def run(arguments, **overrides):
+        return install.runner([str(value) for value in arguments],
+                              env=dict(env, **overrides), timeout=7200)
     run(['bash', candidate_source / 'tools/get-ioxclient.sh', binary])
     for architecture in ('arm64', 'amd64'):
         run(['bash', candidate_source / 'tools/stage-iox-package.sh', '--arch', architecture,
              '--artifacts-dir', artifacts])
     run(['bash', candidate_source / 'tools/build-xr-package.sh', '--out', artifacts])
-    for architecture, filename in (('x86_64', 'iris-agent.tgz'), ('aarch64', 'iris-agent-arm64.tgz')):
+    # The server image contains these helpers, but the host packer cannot read
+    # that image's filesystem. Export both architectures beside the operation,
+    # never into the immutable candidate source or current served directory.
+    helpers = binary / 'guest-helpers'
+    helpers.mkdir(mode=0o755)
+    run(['bash', candidate_source / 'tools/build-ssh-verifiers.sh', helpers])
+    run(['bash', candidate_source / 'tools/build-instruction-crypto.sh', helpers],
+        IRIS_CRYPTO_ARCHES='amd64 arm64')
+    for architecture, helper_arch, filename in (('x86_64', 'amd64', 'iris-agent.tgz'),
+                                               ('aarch64', 'arm64', 'iris-agent-arm64.tgz')):
         run(['bash', candidate_source / 'server/pack-agent-bundle.sh', candidate_source / 'device',
              candidate_source / 'deliverables' / ('aria2c-' + architecture), artifacts / filename,
-             '--instruction-roots-dir', install.base / 'roots'])
+             '--ssh-keygen', helpers / ('ssh-keygen-' + helper_arch),
+             '--instruction-roots-dir', install.base / 'roots'],
+            IRIS_AEAD_HELPER=str(helpers / ('iris-aead-' + helper_arch)))
     outputs = {name: deploy.digest(artifacts / name) for name in plan.BUILD_FILES}
     plan.file_manifest(outputs, expected=plan.BUILD_FILES)
     from .upgrade_runtime import verify_files
