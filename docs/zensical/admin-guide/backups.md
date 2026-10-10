@@ -27,7 +27,7 @@ even while the Console is stopped.
 
 **Verify backup** checks the signature, decryption and every captured file in
 both sets. **Extract for isolated recovery** writes to a new protected directory.
-The operator must provision recovery access on the worker first. Keep encrypted
+First configure recovery access on the worker. Keep encrypted
 copies and the trusted backup public key off the deployment host.
 
 The Ubuntu installer starts the worker as a managed host service for all three
@@ -64,7 +64,7 @@ the connection certificates need renewal.
     a separate operation. See
     [Install the Ubuntu package](../install/managed-package.md) for managed deployment setup.
 
-Split Docker also captures encrypted Console custody from the recorded remote
+Split Docker also captures the Console's protected configuration from the recorded remote
 host. Kubernetes stops every Console replica and the server, checks clean writer
 shutdown evidence tied to the exact pod and process start, then captures the
 server PVC. A vanished or forcibly terminated pod is not sufficient evidence.
@@ -158,17 +158,20 @@ files, project names and volume paths, then verify ownership and Console access.
 
 ## Repair volume ownership after a restore
 
-If restored files carry the wrong owner, the Images screen reports `not readable by the server`. The server owns its state, configuration, and uploads volumes as uid and gid `10001`. Volume names carry the Compose project prefix `server_`; check yours with `docker volume ls`. Stop the stack and repair:
+If restored files carry the wrong owner, the Images screen may report
+`not readable by the server`. The server uses uid and gid `10001` for its
+state, configuration and uploads. Private files also require restrictive modes.
 
-```bash
-docker compose -f server/docker-compose.yml stop
-docker run --rm -u 0 \
-  -v server_iris-state:/var/lib/iris \
-  -v server_iris-config:/etc/iris \
-  -v server_iris-images:/var/lib/iris-images \
-  iris:latest chown -R 10001:10001 /var/lib/iris /etc/iris /var/lib/iris-images
-docker compose -f server/docker-compose.yml up -d
-```
+Use the deployment's recorded project, volumes and paths; `server_` is not a
+universal volume prefix. Stop its writers before repairing storage. Compare
+the affected files with trusted ownership and mode records, then repair only
+the verified paths. Never use recursive `chmod` or `chown` on the whole store.
+See [Repair changed file permissions](recovery.md#recover-a-volume-whose-private-modes-were-changed)
+for the Kubernetes checks.
+
+For an installer-managed restore, preserve the operation files and use its
+recovery controls. Do not run a separate Compose stack or bypass a stopped
+restore to change permissions.
 
 ## Reset and relocation
 

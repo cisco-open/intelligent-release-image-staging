@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Correct the backup guide's permission-repair procedure to preserve the
+  recorded deployment and private file modes instead of changing whole stores.
+
 - Add reviewed, forward-recoverable application upgrades for source-built
   single-host Docker installations, preserving accounts, keys and storage.
   Split Docker, Kubernetes and prebuilt-release upgrades remain unsupported.

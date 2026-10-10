@@ -2108,3 +2108,16 @@ def test_signing_guides_distinguish_root_approval_from_instruction_signing():
     assert "Online signing certificate" not in signing
     assert "owner-selected local storage" in roots
     assert "sign every instruction the server sends" not in roots
+
+
+def test_backup_permission_repair_preserves_recorded_storage_and_private_modes():
+    repair = " ".join(_section(_page("admin-guide/backups.md"),
+                              "Repair volume ownership after a restore").split())
+    for phrase in ("recorded project, volumes and paths", "Stop its writers",
+                   "repair only the verified paths", "Never use recursive",
+                   "preserve the operation files", "Do not run a separate Compose stack"):
+        assert phrase in repair, phrase
+    assert "chown -R" not in repair
+    assert "chmod -R" not in repair
+    assert "docker run" not in repair
+    assert "server_iris-state" not in repair
