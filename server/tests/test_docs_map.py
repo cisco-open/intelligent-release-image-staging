@@ -750,6 +750,13 @@ def test_docs_state_phase_zero_recovery_and_interface_boundaries():
         "`partial`",
         "persists both the accepted revision and its epoch",
     ])
+    recovery = " ".join(_section(
+        _page("user-guide/roles.md"), "When a role change half-succeeds").split())
+    assert "Preview the remaining change again with the current revision" in recovery
+    assert "An earlier revision or confirmation can be refused after a partial write" in recovery
+    assert "send the same request again" not in recovery
+    help_server = " ".join(Path(REPO, "server/webroot/help-server.html").read_text().split())
+    assert "Preview the remaining change with the current revision" in help_server
     _require("reference/peer-policy-api.md", [
         "preview returns 200 JSON",
         "committed DELETE returns 204",

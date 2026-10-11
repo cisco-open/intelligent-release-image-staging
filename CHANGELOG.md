@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Correct partial role-change recovery guidance: refresh both stores and review
+  a fresh preview with the current policy revision before confirming again.
+
 - Remove exact IRIS temporary upload files during router undeploy after an
   interrupted Guest Shell publication. Verify their absence while preserving
   unrelated files in the shared directory.

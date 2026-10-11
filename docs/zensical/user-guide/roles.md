@@ -248,8 +248,10 @@ refusal on these routes has an entry in
 A role change writes two stores: the inventory and the sharing policy. When one
 write lands and the other fails, the response is `partial`. That is not a
 rollback. A later policy restore changes policy content only and
-does not roll back a completed Fleet write. Repair the failed store and send the
-same request again; the request is idempotent.
+does not roll back a completed Fleet write. Repair the failed store, then refresh
+the inventory and policy. Review the applied, failed and drift results. Preview
+the remaining change again with the current revision before confirming it.
+An earlier revision or confirmation can be refused after a partial write.
 
 Rolling policy content back is a reviewed maintenance step, not a button. The
 internal primitive copies reviewed historical content into a

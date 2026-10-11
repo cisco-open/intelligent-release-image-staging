@@ -13,7 +13,76 @@ import subprocess
 
 import pytest
 
+import gui_fleet
+
 from test_schedule_api import schedule_api, _request
+
+
+def test_partial_role_recovery_requires_a_fresh_revision_and_preview(
+        schedule_api, monkeypatch):
+    """Real HTTP/store regression; the one write failure is deliberately injected."""
+    server, _app, auth = schedule_api
+    path = "/api/devices/edge-1/role"
+    # This fixture starts with declared roles but no compiled memberships.
+    # Establish agreement first, so clearing edge-1 really is a relaxation.
+    for device_id, role in (("edge-1", "boat"), ("edge-2", "fiber")):
+        status, _, raw = _request(server, "GET", "/api/peer-policy/roles", headers=auth)
+        assert status == 200
+        revision = json.loads(raw)["revision"]
+        headers = {**auth, "If-Match": f'"iris-peer-policy-{revision}"'}
+        member_path = f"/api/devices/{device_id}/role"
+        status, _, raw = _request(server, "POST", member_path + "?dry_run=1",
+                                  {"role": role}, headers)
+        assert status == 200
+        commit = {"role": role, "confirm_token": json.loads(raw)["confirm_token"]}
+        status, _, raw = _request(server, "POST", member_path, commit, headers)
+        assert status == 200
+        assert json.loads(raw)["applied"] == 1
+    status, _, raw = _request(server, "GET", "/api/peer-policy/roles", headers=auth)
+    assert status == 200
+    original_revision = json.loads(raw)["revision"]
+    original_headers = {**auth, "If-Match": f'"iris-peer-policy-{original_revision}"'}
+    status, _, raw = _request(server, "POST", path + "?dry_run=1",
+                              {"role": None}, original_headers)
+    assert status == 200
+    original_commit = {"role": None, "confirm_token": json.loads(raw)["confirm_token"]}
+    write = gui_fleet.FleetStore.bulk_upsert
+    attempts = []
+
+    def fail_first_fleet_write(fleet, device_ids, fields):
+        attempts.append((device_ids, fields))
+        if len(attempts) == 1:
+            raise gui_fleet.FleetStateError("injected fleet write failure")
+        return write(fleet, device_ids, fields)
+
+    monkeypatch.setattr(gui_fleet.FleetStore, "bulk_upsert", fail_first_fleet_write)
+    status, _, raw = _request(server, "POST", path, original_commit, original_headers)
+    assert status == 503
+    partial = json.loads(raw)
+    assert partial["partial"] is True
+    assert partial["revision"] > original_revision
+    assert partial["role_drift"]["device_ids"] == ["edge-1"]
+
+    # Policy committed first, so blindly replaying the earlier request is stale.
+    status, _, _ = _request(server, "POST", path, original_commit, original_headers)
+    assert status == 412
+    assert len(attempts) == 1
+    status, _, raw = _request(server, "GET", "/api/peer-policy/roles", headers=auth)
+    assert status == 200
+    current_revision = json.loads(raw)["revision"]
+    assert current_revision == partial["revision"]
+    current_headers = {**auth, "If-Match": f'"iris-peer-policy-{current_revision}"'}
+    status, _, raw = _request(server, "POST", path + "?dry_run=1",
+                              {"role": None}, current_headers)
+    assert status == 200
+    reviewed = {"role": None, "confirm_token": json.loads(raw)["confirm_token"]}
+    status, _, raw = _request(server, "POST", path, reviewed, current_headers)
+    assert status == 200
+    recovered = json.loads(raw)
+    assert recovered["ok"] is True and recovered["partial"] is False
+    assert recovered["role_drift"]["count"] == 0
+    assert recovered["revision"] == current_revision
+    assert len(attempts) == 2
 
 
 def test_policies_editor_csv_delete_and_conflict_against_real_stores(schedule_api):

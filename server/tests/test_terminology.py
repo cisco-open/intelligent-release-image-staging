@@ -201,6 +201,10 @@ ALLOWLIST = [
      "pins router-install.sh's NETWORK_ATTACHMENT tripwire message"),
     ("device/tests/test_router_uninstall.bats", _TRIPWIRE_TEST_ANCHORS,
      "pins router-uninstall.sh's NETWORK_ATTACHMENT tripwire message"),
+    ("server/tests/test_router_pending_cleanup.py",
+     ('"IRIS_FORCE_AGENT_ONLY", "NETWORK_ATTACHMENT", "NAT_INTERFACE")}',),
+     "test environment removes the retired variable so the real cleanup "
+     "script's stale-wrapper tripwire cannot inherit the caller's value"),
     ("device/iox/tests/test_iox_install_output.bats", _TRIPWIRE_TEST_ANCHORS,
      "pins iox/install.sh's NETWORK_ATTACHMENT tripwire message"),
     ("device/iox/tests/test_iox_uninstall.bats", _TRIPWIRE_TEST_ANCHORS,

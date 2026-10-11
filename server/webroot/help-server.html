@@ -153,6 +153,10 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       before another preview. Bulk quarantine stops on an uncertain result;
       devices marked <strong>not attempted</strong> were left unchanged by
       that batch.</li>
+      <li>A partial role change is not a rollback. Repair the reported store
+      failure, refresh inventory and policy, and review applied, failed and
+      drift results. Preview the remaining change with the current revision
+      before confirming; an earlier confirmation can be refused.</li>
       <li>In Policies, preview a role definition before saving. An uncertain
       save needs a refresh and review; <strong>Reload current definition</strong>
       discards your draft. Role CSV exports include seeder and leecher timing
