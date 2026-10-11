@@ -72,6 +72,10 @@ Undeploying a router-nat device clears only the NAT translations whose inside-lo
 
 Each device holds what its agent needs: the catalog token, the aria2 secret, and, on IOx, the password for the app's SSH session back to IOS. Each file is readable only by the agent.
 
+The agent verifies catalog HTTPS against its provisioned CA and refuses HTTP
+redirects. A redirect cannot forward its bearer credential or replay a request
+at another destination, even another path on the same server.
+
 > **Residual risk: device login held in cleartext.** The generated `iris-agent.conf` holds the SSH-to-self password in cleartext on the app's persistent storage, mode `0600`. Device administrators and anyone holding an offline storage copy can read it. Restrict the VTY ACL to the IRIS app subnet. Test any AAA command restrictions against discovery, verification, placement and cleanup: the agent also uses `show`, `verify`, `rename` and `delete`. The supplied installer uses password authentication. Rotate the credential by re-onboarding with the new value.
 
 The app's SSH-to-self host-key checks are separate from the server's SSH policy. See [Device agent configuration](../reference/device-configuration.md) for the `device_ssh_known_hosts` setting and its default.

@@ -39,6 +39,13 @@ class CatalogError(Exception):
     pass
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward a bearer or replay a write at a redirect destination,
+        # including another path on the same authenticated catalog origin.
+        return None
+
+
 class CatalogClient:
     def __init__(self, base_url, token, context=None, tracker_bearer=False):
         self.base = base_url.rstrip("/")
@@ -140,7 +147,9 @@ class CatalogClient:
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=15, context=self.context) as r:
+            opener = urllib.request.build_opener(
+                _NoRedirect(), urllib.request.HTTPSHandler(context=self.context))
+            with opener.open(req, timeout=15) as r:
                 status = r.status
                 payload = self._read_limited(r, max_response_bytes)
                 response_headers = self._headers_dict(r.headers)

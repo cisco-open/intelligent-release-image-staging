@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Refuse redirects on authenticated device catalog requests, preventing bearer
+  forwarding and request replay at redirect destinations, including plaintext
+  URLs. Preserve pinned TLS verification and bounded response handling.
+
 - Correct Kubernetes token-rotation file paths and explain saved versus applied
   browser certificates, including checks for each Console instance. Use the
   actual Inventory navigation for scheduled management credential checks.
