@@ -91,13 +91,13 @@ The agent verifies the signature and authenticates the envelope before parsing p
 ### The two root keys
 
 Exactly two distinct offline-root public keys form the trust set. With separate
-key holders, each person keeps one private half in a separate location.
+key holders, each person keeps one private root key in a separate location.
 [Automatic local setup](../install/managed-package.md#guided-local-setup)
 instead keeps both private keys and their random passphrase files in a protected
 folder on the deployment host. A host compromise can expose both keys. Only
 the public root keys enter deployment containers and volumes in either workflow.
 
-Lose one half and the surviving root issues the next online certificate. The unified IOx and IOS-XR appmgr image embeds both public root files read-only, so with a natively signed package and platform verification enforced those roots are pinned in the image. Guest Shell holds the same two files in a bundle on replaceable flash, which is tamper-evidence rather than a pin.
+Lose one private root key and the surviving root issues the next online certificate. The unified IOx and IOS-XR appmgr image embeds both public root files read-only, so with a natively signed package and platform verification enforced those roots are pinned in the image. Guest Shell holds the same two files in a bundle on replaceable flash, which is tamper-evidence rather than a pin.
 
 The online signing private key is stored encrypted on the server and exists as plaintext only in the server's runtime directory while the server runs. Each device also holds a key for its own last known good copy, the LKG key, which the device creates itself. No current/prior instruction key, LKG key, online signing private key or offline-root private key enters IOx `run-opts`, XR `docker-run-opts`, installer arguments, or device platform configuration. Only an authenticated refresh returns the current and bounded prior instruction keys into the agent's private configuration file.
 

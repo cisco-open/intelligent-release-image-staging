@@ -139,7 +139,8 @@ def test_security_distinguishes_separate_holders_from_automatic_local_keys():
     setup = (ROOT / "tools/iris_installer/local_setup.py").read_text()
     assert 'for name in ("root-a", "root-b"):' in setup
     assert 'automatic_keys.create_root(name, folder / name)' in setup
-    assert "each person keeps one private half in a separate location" in page
+    assert "each person keeps one private root key in a separate location" in page
+    assert "Lose one private root key and the surviving root" in page
     assert "both private keys and their random passphrase files in a protected folder on the deployment host" in page
     assert "A host compromise can expose both keys" in page
     assert "Only the public root keys enter deployment containers and volumes" in page
