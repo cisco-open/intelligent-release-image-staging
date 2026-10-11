@@ -84,10 +84,11 @@ The applet is named `IRIS-AGENT` and fires every 60 seconds. A device that
 carries no such applet did not finish the install. The confirmation steps are in
 [What a device needs before onboarding](device-requirements.md).
 
-An upload confirmation proves that complete inputs were published. Bootstrap
-records its later bundle decision in `bundle-outcome.json` inside the Guest
-Shell working directory. Check the latest heartbeat separately to confirm that
-the agent runs and reaches the catalog. See
+The installer's `inputs published` confirmation proves that all eight complete
+inputs were published. A file-copy confirmation alone does not prove this.
+Bootstrap records its later bundle decision in `bundle-outcome.json` inside
+the Guest Shell working directory. Check the latest heartbeat separately to
+confirm that the agent runs and reaches the catalog. See
 [Guest Shell troubleshooting](../user-guide/troubleshooting.md#guest-shell).
 
 ## Next steps

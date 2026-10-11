@@ -131,3 +131,27 @@ def test_scheduled_management_credential_check_uses_inventory_navigation():
     assert "scheduled management credential replacement" in help_text
     assert "<strong>Inventory</strong> and verify every Console" in help_text
     assert "<strong>Retire previous credential</strong>" in help_text
+
+
+def test_security_distinguishes_separate_holders_from_automatic_local_keys():
+    page = " ".join(_document("architecture/security-model.md").split())
+    runbook = " ".join((ROOT / "docs/dev/ai-assisted-deployment.md").read_text().split())
+    setup = (ROOT / "tools/iris_installer/local_setup.py").read_text()
+    assert 'for name in ("root-a", "root-b"):' in setup
+    assert 'automatic_keys.create_root(name, folder / name)' in setup
+    assert "each person keeps one private half in a separate location" in page
+    assert "both private keys and their random passphrase files in a protected folder on the deployment host" in page
+    assert "A host compromise can expose both keys" in page
+    assert "Only the public root keys enter deployment containers and volumes" in page
+    assert "both locally stored keys and their passphrases" in runbook
+    assert "Two people hold the two private halves, in two places, and neither half reaches the server" not in page
+
+
+def test_guest_shell_distinguishes_publication_marker_from_file_copy_and_readiness():
+    page = " ".join(_document("install/guest-shell.md").split())
+    publisher = (ROOT / "device/guestshell-publish.sh").read_text()
+    assert 'marker="IRIS-INPUTS-PUBLISHED:$CAP:${expected[7]#*:}"' in publisher
+    assert "Guest Shell inputs published; bundle acceptance and runtime startup are separate checks" in publisher
+    assert "installer's `inputs published` confirmation" in page
+    assert "A file-copy confirmation alone does not prove this" in page
+    assert "later bundle decision" in page and "latest heartbeat separately" in page
