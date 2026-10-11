@@ -174,16 +174,22 @@ A new onboarding is blocked while an older deployment still holds an SCP claim. 
 
 ## Uninstall from the device by hand
 
-When you cannot reach the device through the Console, run its uninstall script.
+When the Console is unavailable, run the matching Guest Shell or IOS-XR
+uninstall script from the server host.
 
 | Platform | Script |
 | --- | --- |
 | Catalyst 9000 series switches, where the agent runs in Guest Shell | `device/device-uninstall.sh` |
 | Catalyst 8000 series routers | `device/router-uninstall.sh` |
-| The IOx app, on Industrial Ethernet switches with app hosting and on Catalyst 9000 series switches with app-hosting storage | `device/iox/uninstall.sh` |
 | Cisco 8000 series and NCS routers, in the IOS-XR appmgr container (NCS-540 undeploy is not yet lab-validated; see [Supported devices and platforms](../install/supported-devices.md)) | `device/xr-uninstall.sh` |
 
-Arguments for each script are in [Helper commands](../reference/tools.md). On IOS-XR you can repeat an undeploy: it skips whatever is already gone.
+For an IOx app, use **Undeploy** in the Console, the undeploy API, or
+`submit-uninstall` in the [IOx control CLI](../reference/tools.md#iox-control-cli).
+The IOx shell script requires the controller's private channel and cannot run
+standalone.
+
+See [Helper commands](../reference/tools.md). On IOS-XR you can repeat an
+undeploy: it skips whatever is already gone.
 
 ## Related
 

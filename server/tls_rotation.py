@@ -188,7 +188,7 @@ def _validate_certificate(record, certificate, private, *, admission=True):
 
 
 def status():
-    with gui_tls.rotation_lock():
+    with gui_tls.rotation_lock(shared=True):
         return _view(_load())
 
 

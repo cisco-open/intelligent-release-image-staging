@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Allow simultaneous browser certificate status reads while keeping certificate
+  changes exclusive and refusing reads during an active change.
+
+- Correct IOx removal commands, XR onboarding transfer details and browser
+  certificate address guidance to match the implemented workflows.
+
 - Build both Guest Shell static-helper sets in the application upgrade's own
   directory before packing bundles, preserving the verified source snapshot.
 

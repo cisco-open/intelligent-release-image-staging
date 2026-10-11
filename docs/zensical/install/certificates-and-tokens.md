@@ -18,7 +18,11 @@ sections when you replace a certificate or configure monitoring.
 
 The default browser identity is generated and stored encrypted in `tls/console-fallback.pem.age`, and reused on restart. Separate Docker hosts and Kubernetes mount their own.
 
-A browser warns about it the first time. Add it to each client's trust store after you check it through a channel you already trust, or install your own certificate. A certificate is tied to one address. Install a matching one whenever the address operators browse to changes.
+A browser warns about it the first time. Add it to each client's trust store
+after you check it through a channel you already trust, or install your own
+certificate. The certificate must cover every DNS name or IP address operators
+use. If an address changes, replace the certificate unless it already covers
+the new address.
 
 On one Docker host, export only the public certificate through an authenticated
 host connection. Run from the repository root:

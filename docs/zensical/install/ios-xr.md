@@ -73,11 +73,11 @@ onboarding enrolls a fresh peer identity with the selected deployment. See
 
 ## How the transfer is verified
 
-The router fetches `iris-xr.rpm` and the catalog certificate over authenticated
-HTTPS, with certificate verification enforced and insecure mode never used.
-Before it registers the package, it checks both downloads against SHA-256
-values taken from server-side snapshots, so a corrupted or tampered transfer
-is refused instead of installed.
+The server supplies the public catalog certificate through SSH with host-key
+verification. The router uses that certificate to fetch `iris-xr.rpm` and the
+encrypted bootstrap instruction over authenticated HTTPS. Before registering
+the package, it checks both downloads against SHA-256 values from server-side
+snapshots. A corrupted or tampered transfer is refused instead of installed.
 
 ## Verify
 

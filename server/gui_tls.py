@@ -33,7 +33,7 @@ import trust
 
 
 @contextmanager
-def rotation_lock():
+def rotation_lock(*, shared=False):
     directory = _tls_config_dir()
     os.makedirs(directory, mode=0o700, exist_ok=True)
     if os.path.islink(directory):
@@ -43,7 +43,7 @@ def rotation_lock():
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError('unsafe TLS rotation lock')
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError('TLS maintenance is busy; refresh shortly') from None
         yield
