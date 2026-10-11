@@ -85,7 +85,7 @@ series routers. On switches with app-hosting storage, use the IOx app instead.
 | --- | --- | --- |
 | Guest Shell reports `bundle rejected (trust-unreadable)` | The guest user could not read a trust file | IRIS rolls back to the previous bundle. Remove the IRIS app through **Devices**, then onboard it with the current bundle. Check file access from Guest Shell. |
 | Guest Shell stages files but instructions report `verifier_missing` | The agent package is outdated or damaged: its bundled signature verifier did not install or pass its runtime probe | The Guest Shell agent bundle carries its own signature verifier, so every device checks instruction signatures once the current package is deployed. Redeploy the current bootstrap and an architecture-matched bundle. See [Upgrade to a new release](../admin-guide/upgrade.md). |
-| Onboarding reports incomplete upload or unknown publication | A copy or its confirmation failed | Preserve the job log and temporary `.iris-upload-*` files. Inspect the published files and bundle outcome before retrying; an unknown confirmation may follow a completed publication. |
+| Onboarding reports incomplete upload or unconfirmed publication | A copy or its confirmation failed | Preserve the job log and temporary `.iris-upload-*` files. Use the logged category to distinguish a busy bootstrap, a Guest Shell error or an unconfirmed result. Inspect the published files and bundle outcome before retrying; an unknown confirmation may follow a completed publication. |
 
 Inside Guest Shell, `bundle-outcome.json` in the working directory records the
 latest bundle decision: `accepted` or `rejected`, a fixed reason, the expected

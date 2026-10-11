@@ -51,8 +51,38 @@ for index,path in enumerate(sys.argv[1:]):
   fi
 }
 
+guest_publication_failure() {
+  # Classify only a bounded prefix of the already captured response. Never
+  # copy arbitrary device output, paths or exception details into job logs.
+  python3 -c 'import re,sys
+marker=sys.argv[1].encode("ascii"); status=int(sys.argv[2])
+raw=sys.stdin.buffer.read(65537); oversized=len(raw)>65536
+raw=raw[:65536].replace(b"\r",b"")
+count=raw.split(b"\n").count(marker)
+category="missing-marker"
+if oversized: category="oversized-response"
+elif count>1: category="duplicate-marker"
+elif b"IRIS-BOOTSTRAP: input publication lock busy; no inputs published" in raw:
+ category="bootstrap-lock-busy"
+elif b"IRIS-BOOTSTRAP: input publication refused; inspect retained inputs" in raw:
+ category="bootstrap-refused"
+elif b"IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" in raw:
+ category="stage-unwritable"
+elif re.search(br"% (?:Invalid input|Incomplete command|Ambiguous command)",raw):
+ category="ios-command-rejected"
+elif re.search(br"(?m)^(?:PermissionError|FileNotFoundError|OSError|ValueError|SyntaxError|TypeError|NameError):",raw):
+ category="python-error"
+elif count==0 and marker in raw.replace(b"\n",b""):
+ category="marker-framing"
+elif status: category="transport-error"
+label="outcome unknown" if status else "not proved"
+print("ERROR: Guest Shell publication %s (category=%s, marker-count=%s, transport-status=%d); inspect before retrying" %
+ (label,category,"unknown" if oversized else count,status),file=sys.stderr)
+' "$1" "$2"
+}
+
 publish_guest_inputs() {
-  local metadata pair src dst pending attempt out ok command marker row
+  local metadata pair src dst pending attempt out ok command marker row status
   local expected=()
   metadata="$(guest_input_metadata)" \
     || { echo "ERROR: cannot fingerprint staged Guest Shell inputs" >&2; return 1; }
@@ -87,11 +117,14 @@ publish_guest_inputs() {
   command="guestshell run bash $GUEST_INPUT_ROOT/.iris-upload-$CAP-bootstrap.sh --publish-inputs $CAP"
   for row in "${expected[@]}"; do command="$command $row"; done
   [ "${#command}" -le 1024 ] || return 1
-  out="$(printf '%s\n' "$command" | "$HERE/../lab/device-run.sh" "$DEVICE_IP")" \
-    || { echo "ERROR: Guest Shell publication outcome unknown; inspect before retrying" >&2; return 1; }
   marker="IRIS-INPUTS-PUBLISHED:$CAP:${expected[7]#*:}"
-  [ "$(printf '%s\n' "$out" | tr -d '\r' | grep -Fxc "$marker")" -eq 1 ] \
-    || { echo "ERROR: Guest Shell publication not proved; inspect before retrying" >&2; return 1; }
+  status=0
+  out="$(printf '%s\n' "$command" | "$HERE/../lab/device-run.sh" "$DEVICE_IP")" || status=$?
+  if [ "$status" -ne 0 ] \
+      || [ "$(printf '%s\n' "$out" | tr -d '\r' | grep -Fxc "$marker")" -ne 1 ]; then
+    printf '%s\n' "$out" | guest_publication_failure "$marker" "$status"
+    return 1
+  fi
   echo "  Guest Shell inputs published; bundle acceptance and runtime startup are separate checks"
 }
 

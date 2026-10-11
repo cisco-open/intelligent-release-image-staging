@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Include a bounded, credential-free failure category when Guest Shell input
+  publication cannot be confirmed, distinguishing transport, bootstrap and
+  command errors while retaining the original failure.
+
 - Upload Guest Shell onboarding inputs under temporary names, then verify and
   atomically publish each complete file under the bootstrap lock, with the
   bundle last. Failed copies preserve published inputs. Retain a bounded

@@ -34,9 +34,35 @@ if '--publish-inputs ' in commands:
     assert args[3] == expected_root + '.iris-upload-' + os.environ['IRIS_STAGING_CAPABILITY'] + '-bootstrap.sh'
     assert len(commands.strip()) <= 1024
     path = guest / pathlib.Path(args[3]).name
+    # IOS can return a successful SSH session even when guestshell reports a
+    # command failure. Echo/prompt framing is not a child process exit code.
+    marker = 'IRIS-INPUTS-PUBLISHED:' + args[5] + ':' + args[-1].split(':')[1]
+    if mode.startswith('ssh-zero-') and mode != 'ssh-zero-bootstrap-refused':
+        print('router#' + commands.strip())
+        print('synthetic-private-response-do-not-log')
+        if mode == 'ssh-zero-cli': print('% Invalid input detected at marker.')
+        elif mode == 'ssh-zero-python': print('PermissionError: synthetic-private-response-do-not-log')
+        elif mode == 'ssh-zero-wrapped': print(marker[:50] + '\n' + marker[50:])
+        elif mode == 'ssh-zero-duplicate': print(marker + '\n' + marker)
+        elif mode == 'ssh-zero-oversized': print('x' * 70000)
+        else: assert mode == 'ssh-zero-missing'
+        print('router#')
+        raise SystemExit(0)
     # Match guestshell run: no installer-side SRC/STAGE is exported. The
     # pending script derives its own actual guest-share root and stage.
     environment = {key: value for key, value in os.environ.items() if key not in ('SRC', 'STAGE')}
+    if mode == 'ssh-zero-bootstrap-refused':
+        # Execute the actual publisher with changed owned input, then frame
+        # its rejection as the real IOS transport does: successful SSH.
+        with (guest / ('.iris-upload-' + args[5] + '-bundle.tgz')).open('ab') as stream:
+            stream.write(b'changed')
+        result = subprocess.run(['bash', str(path), *args[4:]],
+            env=environment, capture_output=True, text=True)
+        assert result.returncode != 0
+        print('router#' + commands.strip())
+        print(result.stdout + result.stderr)
+        print('router#')
+        raise SystemExit(0)
     result = subprocess.run(['bash', str(path), *args[4:]],
         env=environment,
         stdout=subprocess.DEVNULL if mode == 'lost-result' else None)
@@ -173,6 +199,31 @@ def test_actual_installer_custom_stage_cannot_redirect_pending_publication(tmp_p
     assert command.startswith("guestshell run bash /flash/guest-share/.iris-upload-")
     assert "custom" not in command
     assert "stage_dir = /flash/guest-share/custom" in (tmp_path / "guest-share/iris-agent.conf").read_text()
+
+
+@pytest.mark.parametrize("mode,category,count", [
+    ("ssh-zero-cli", "ios-command-rejected", "0"),
+    ("ssh-zero-python", "python-error", "0"),
+    ("ssh-zero-bootstrap-refused", "bootstrap-refused", "0"),
+    ("ssh-zero-wrapped", "marker-framing", "0"),
+    ("ssh-zero-missing", "missing-marker", "0"),
+    ("ssh-zero-duplicate", "duplicate-marker", "2"),
+    ("ssh-zero-oversized", "oversized-response", "unknown"),
+])
+def test_successful_ssh_does_not_prove_guest_publication(tmp_path, mode, category, count):
+    env = fixture(tmp_path, "router", mode)
+    result = subprocess.run(["bash", str(tmp_path / "device/router-install.sh")],
+                            env=env, capture_output=True, text=True, timeout=20)
+    assert result.returncode != 0
+    assert not (tmp_path / "saved").exists()
+    assert f"category={category}, marker-count={count}, transport-status=0" in result.stderr
+    assert "publication not proved" in result.stderr
+    assert "synthetic-private-response-do-not-log" not in result.stdout + result.stderr
+    assert "synthetic-private-value" not in result.stdout + result.stderr
+    for name in NAMES:
+        assert (tmp_path / "guest-share" / name).read_bytes() == b"old input:" + name.encode()
+    assert (tmp_path / "commands").read_text().count("--publish-inputs ") == 1
+    assert int((tmp_path / "copy-count").read_text()) == 1
 
 
 @pytest.mark.parametrize("remote", [False, True])
