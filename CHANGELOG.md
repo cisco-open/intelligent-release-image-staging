@@ -18,7 +18,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 - Correct Kubernetes token-rotation file paths and explain saved versus applied
-  browser certificates, including checks for each Console instance.
+  browser certificates, including checks for each Console instance. Use the
+  actual Inventory navigation for scheduled management credential checks.
 
 - Preserve the selected retention request when reading managed worker status,
   so completed history clearing and backup deletion remain observable.

@@ -72,7 +72,7 @@ Keep manual maintenance separate from scheduled work.
 ### On one Docker host
 
 The server and Console share their management credential files. After a scheduled
-replacement, load **Devices** and verify other Console instances, if present.
+replacement, open **Inventory** and verify other Console instances, if present.
 Retirement requires your confirmation and an API request authenticated with
 the replacement credential. An old credential cannot authorize its own removal.
 

@@ -121,3 +121,13 @@ def test_browser_import_distinguishes_saved_override_from_each_live_listener():
     assert "saved but reload was not confirmed" in help_text
     assert "Restart other Console instances too" in help_text
     assert "new trusted connection to each instance" in help_text
+
+
+def test_scheduled_management_credential_check_uses_inventory_navigation():
+    page = _document("admin-guide/key-maintenance.md")
+    help_text = " ".join((ROOT / "server/webroot/help-server.html").read_text().split())
+    assert "replacement, open **Inventory**" in page
+    assert "load **Devices**" not in page
+    assert "scheduled management credential replacement" in help_text
+    assert "<strong>Inventory</strong> and verify every Console" in help_text
+    assert "<strong>Retire previous credential</strong>" in help_text
