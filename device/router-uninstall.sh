@@ -40,6 +40,79 @@ IOS_ROOT="bootflash:guest-share"
 # exactly what the collision preflight refuses on the next onboard.
 IRIS_DIR="$IOS_ROOT/iris"
 
+# Uploads are published only after all eight inputs are complete. A failed
+# publication can therefore leave these reserved leaves beside the runtime.
+# Parse a complete, bounded listing; never send a wildcard to IOS or treat
+# a missing/truncated response as an empty directory.
+pending_inputs() {
+  python3 -c 'import re, sys
+text = sys.stdin.buffer.read(262145)
+def refuse():
+    raise SystemExit("ERROR: could not identify IRIS pending inputs safely")
+if len(text) > 262144 or b"\x00" in text:
+    refuse()
+try:
+    lines = text.decode("ascii").replace("\r\n", "\n").splitlines()
+except UnicodeError:
+    refuse()
+if len(lines) > 4096:
+    refuse()
+starts = [(i, re.fullmatch(r"([A-Za-z0-9_./:-]+#)dir bootflash:guest-share", line.strip()))
+          for i, line in enumerate(lines)]
+starts = [(i, match.group(1)) for i, match in starts if match]
+if len(starts) != 1:
+    refuse()
+start, prompt = starts[0]
+body = lines[start + 1:]
+ends = [i for i, line in enumerate(body) if line.strip() in (prompt, prompt + "exit")]
+if len(ends) != 1 or any(line.strip() for line in body[ends[0] + 1:]):
+    refuse()
+body = body[:ends[0]]
+headers = [i for i, line in enumerate(body)
+           if line.strip() in ("Directory of bootflash:/guest-share/",
+                               "Directory of bootflash:/guest-share")]
+if not headers:
+    if [line.strip() for line in body if line.strip()] == [
+            "%Error opening bootflash:/guest-share (No such file or directory)"]:
+        raise SystemExit(0)
+    refuse()
+footers = [i for i, line in enumerate(body)
+           if re.fullmatch(r"\s*[0-9]+ bytes total \([0-9]+ bytes free\)\s*", line)]
+if len(headers) != 1 or len(footers) != 1 or headers[0] >= footers[0]:
+    refuse()
+if any(line.strip() for line in body[:headers[0]] + body[footers[0] + 1:]):
+    refuse()
+names = ("bootstrap.sh", "iris-agent.conf", "rpc-secret", "iris-catalog.pem",
+         "iris-signers.allowed_signers", "iris-instructions.bootstrap",
+         "bundle.tgz.sha256", "bundle.tgz")
+owned = re.compile(r"\.iris-upload-[0-9a-f]{32}-(?:" +
+                   "|".join(re.escape(name) for name in names) + r")")
+selected = set()
+mode = sys.argv[1]
+if mode not in ("pending", "all"):
+    refuse()
+for line in body[headers[0] + 1:footers[0]]:
+    fields = line.split()
+    if not fields or not (owned.fullmatch(fields[-1]) or
+                          (mode == "all" and fields[-1] in names)):
+        continue
+    if (len(fields) < 5 or not fields[0].isdigit() or
+            not re.fullmatch(r"-[rwx-]{3}", fields[1]) or
+            not fields[2].isdigit() or fields[-1] in selected):
+        refuse()
+    selected.add(fields[-1])
+if len(selected) > 128:
+    refuse()
+print("\n".join(sorted(selected)), end="\n" if selected else "")' "${1:-pending}"
+}
+
+read_pending_inputs() {
+  # IOS.sh echo is not available on every router. The exact command echo,
+  # directory footer and returned privileged prompt delimit this one read.
+  printf 'terminal width 512\ndir %s\n' "$IOS_ROOT" \
+    | "$RUN" "$DEVICE_IP" | pending_inputs "${1:-pending}"
+}
+
 case "$MANAGEMENT_TYPE" in
   router-routed) ;;
   router-nat)
@@ -297,12 +370,14 @@ if [ "$DRY" -eq 1 ]; then
               iris-instructions.bootstrap; do
     echo "delete /force $IOS_ROOT/$name"
   done
+  echo "Enumerate and remove only complete IRIS pending-input leaf names; verify their absence"
   echo "===== Save startup-config ====="
   echo "copy running-config startup-config"
   exit 0
 fi
 
 RUN="$HERE/../lab/device-run.sh"
+PENDING_INPUTS="$(read_pending_inputs)" || exit 1
 
 echo "[1/5] remove IRIS timers on $DEVICE_IP"
 { echo "configure terminal"; config_teardown; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
@@ -515,7 +590,15 @@ echo "[5/5] remove IRIS files"
               iris-instructions.bootstrap; do
     printf 'delete /force %s/%s\n' "$IOS_ROOT" "$name"
   done
+  while IFS= read -r name; do
+    [ -z "$name" ] || printf 'delete /force %s/%s\n' "$IOS_ROOT" "$name"
+  done <<< "$PENDING_INPUTS"
 } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+PENDING_REMAINING="$(read_pending_inputs all)" || exit 1
+if [ -n "$PENDING_REMAINING" ]; then
+  echo "ERROR: IRIS publication inputs remain after undeploy" >&2
+  exit 1
+fi
 
 # One SSH login for all three read-only verify checks instead of three --
 # same consolidation as _default_router_preflight in server/gui_onboard.py.
@@ -548,7 +631,8 @@ if not match:
     sys.exit(1)
 sys.stdout.write(match.group(1))' "$1"
 }
-VERIFY_OUT="$(verify_request | "$RUN" "$DEVICE_IP" || true)"
+VERIFY_OUT="$(verify_request | "$RUN" "$DEVICE_IP")" \
+  || { echo "ERROR: undeploy verify session failed; refusing to declare the device clean" >&2; exit 1; }
 RUNNING_RAW="$(printf '%s' "$VERIFY_OUT" | verify_section RUNNING)" \
   || { echo "ERROR: undeploy verify did not return running-config; refusing to declare the device clean" >&2; exit 1; }
 RUNNING="$(printf '%s' "$RUNNING_RAW" | grep -v '#' || true)"
@@ -599,11 +683,8 @@ case "$FILES" in
   *"Directory of bootflash:/guest-share/iris"*)
     forbidden="${forbidden}${forbidden:+, }bootflash:guest-share/iris" ;;
 esac
-for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz \
-            bundle.tgz.sha256 iris-catalog.pem iris-signers.allowed_signers \
-            iris-instructions.bootstrap; do
-  case "$FILES" in *"$name"*) forbidden="${forbidden}${forbidden:+, }$IOS_ROOT/$name" ;; esac
-done
+# Exact final and pending leaves were independently checked above. A foreign
+# file merely containing an IRIS filename is not ours to delete or reject.
 
 if [ "$MANAGEMENT_TYPE" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
   for artifact in \

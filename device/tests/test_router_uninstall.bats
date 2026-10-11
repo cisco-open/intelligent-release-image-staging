@@ -365,6 +365,13 @@ case "$cmds" in
 esac
 
 case "$cmds" in
+  "terminal width 512"$'\n'"dir bootflash:guest-share")
+    echo "iris8kv-1#dir bootflash:guest-share"
+    echo "Directory of bootflash:/guest-share/"
+    echo "No files in directory"
+    echo "1000000 bytes total (900000 bytes free)"
+    echo "iris8kv-1#exit"
+    ;;
   *"__IRIS_VERIFY_RUNNING__"*)
     echo "terminal width 512"
     if [ "${FAKE_VERIFY_OMIT_RUNNING:-no}" != "yes" ]; then

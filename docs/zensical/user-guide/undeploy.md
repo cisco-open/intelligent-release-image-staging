@@ -22,6 +22,9 @@ a fresh peer identity for the selected server.
 ## In the Console
 
 Undeploy runs from the deployment record, the record of what IRIS applied.
+On Catalyst 8000 series routers, it also removes IRIS temporary upload files
+left by an interrupted Guest Shell publication and verifies their absence.
+Unrelated files in the shared directory stay in place.
 
 ### Undeploy one device
 

@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Remove exact IRIS temporary upload files during router undeploy after an
+  interrupted Guest Shell publication. Verify their absence while preserving
+  unrelated files in the shared directory.
+
 - Publish Guest Shell inputs through a prompt-aware session, keeping the full
   integrity-check command inside Guest Shell and waiting for its confirmation
   before closing SSH. Unconfirmed publication is never retried automatically.
