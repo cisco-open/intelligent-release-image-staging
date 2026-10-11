@@ -718,8 +718,8 @@ def serve_managed(args):
             # detached; it never captures or decrypts a backup.
             return super().submit_transport(request)
 
-        def status(self):
-            result = super().status()
+        def status(self, retention_request_id=None):
+            result = super().status(retention_request_id)
             ready = True
             try:
                 check_storage(state, record)

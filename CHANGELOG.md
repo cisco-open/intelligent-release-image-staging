@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Preserve the selected retention request when reading managed worker status,
+  so completed history clearing and backup deletion remain observable.
+
 - Add an explicit `--observability` option to managed installation and guided
   setup for authenticated metrics on Docker, split Docker and Kubernetes.
   The default stays off; resume and application upgrades retain the selection.

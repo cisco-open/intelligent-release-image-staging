@@ -5,6 +5,7 @@
 import json
 import os
 import threading
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -13,13 +14,46 @@ from jsonschema import Draft202012Validator
 from test_lifecycle_retention import worker, finished, request
 from test_lifecycle_network import custody
 from test_gui_server import _serve_full, _auth, _req
-from iris_installer import lifecycle_worker, lifecycle_network, cli, maintenance
+from iris_installer import lifecycle_worker, lifecycle_network, managed_worker, cli, maintenance
 import lifecycle_client
 import openapi_contract
 
 
+def managed_instance(worker, monkeypatch):
+    """Use the actual nested managed class; no service or host provisioning."""
+    original = lifecycle_worker.Worker
+    record = {'storage': {kind: {'directory': str(path)} for kind, path in
+                          (('backup', worker.backup_dir), ('recovery', worker.recovery_dir))},
+              'recovery_identity': None, 'listen_address': '127.0.0.1',
+              'storage_layout': 'colocated-filesystem'}
+    (worker.state_dir / 'isolated-restores').mkdir(mode=0o700)
+    storage_checks = []
+    monkeypatch.setattr(managed_worker, '_root', lambda: None)
+    monkeypatch.setattr(managed_worker, '_apply_recovery_intent', lambda state: None)
+    monkeypatch.setattr(managed_worker, '_load', lambda state: record)
+    monkeypatch.setattr(managed_worker, '_runtime', lambda state, selected: None)
+    monkeypatch.setattr(managed_worker, 'check_storage',
+                        lambda state, selected: storage_checks.append((state, selected)))
+    monkeypatch.setattr(managed_worker, 'wait_ready', lambda *args, **kwargs: None)
+    monkeypatch.delenv('NOTIFY_SOCKET', raising=False)
+
+    def instantiate(args):
+        return lifecycle_worker.Worker(args.state_dir, args.backup_dir, args.recovery_dir,
+                                       identity=args.recovery_identity, extract_dir=args.extract_dir)
+
+    monkeypatch.setattr(lifecycle_worker, 'serve', instantiate)
+    result = managed_worker.serve_managed(SimpleNamespace(state_dir=worker.state_dir))
+    assert type(result).__name__ == 'ManagedWorker'
+    assert type(result).__bases__ == (original,)
+    assert lifecycle_worker.Worker is original
+    return result, storage_checks
+
+
+@pytest.mark.parametrize('managed', [False, True])
 @pytest.mark.parametrize('transport', ['unix', 'mtls'])
-def test_real_transport_retirement_cas_and_exact_request_reconciliation(worker, tmp_path, monkeypatch, custody, transport):
+def test_real_transport_retirement_cas_and_exact_request_reconciliation(worker, tmp_path, monkeypatch, custody, transport, managed):
+    if managed:
+        worker, storage_checks = managed_instance(worker, monkeypatch)
     worker.jobs = [finished()]; worker.save()
     if transport == 'unix':
         endpoint = tmp_path / 'worker.sock'
@@ -33,6 +67,11 @@ def test_real_transport_retirement_cas_and_exact_request_reconciliation(worker, 
             monkeypatch.setenv('IRIS_LIFECYCLE_' + variable, str(custody[name]))
     thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
     try:
+        ordinary = lifecycle_client.status()
+        assert ordinary['available'] is True and ordinary['retention']['operation'] is None
+        if managed:
+            assert ordinary['managed_service'] == {'managed': True, 'storage_ready': True,
+                'custody': 'colocated-filesystem', 'off_host_protection': 'not-proven'}
         selected = request(worker)
         with pytest.raises(lifecycle_client.LifecycleConflict):
             lifecycle_client.call(dict(selected, expected_revision='0' * 64))
@@ -41,6 +80,14 @@ def test_real_transport_retirement_cas_and_exact_request_reconciliation(worker, 
         assert result['retention_operation']['state'] == 'completed'
         status = lifecycle_client.call({'action': 'retention-status', 'request_id': selected['request_id']})
         assert status['retention']['operation'] == result['retention_operation']
+        assert status['retention']['capacity']['history_used'] == 0
+        assert status['retention']['jobs'] == []
+        assert status['retention']['busy'] is False
+        assert lifecycle_client.status(selected['request_id']) == status
+        assert lifecycle_client.status(str(uuid.uuid4()))['retention']['operation'] is None
+        if managed:
+            assert status['managed_service'] == ordinary['managed_service']
+            assert len(storage_checks) >= 7
         assert lifecycle_client.call(selected) == result
     finally:
         server.shutdown(); server.server_close(); thread.join(3)
