@@ -84,7 +84,7 @@ def _finalized_package_hashes(directory, receipt, finalization_sha256):
     return hashes
 
 
-def _publish_prebuilt_packages(source, destination, hashes):
+def _publish_prebuilt_packages(source, destination, hashes, *, predecessor=None):
     """Finish an interrupted publication without replacing existing artifacts."""
     from . import device_finalize as f
     destination = f._path(destination)
@@ -93,10 +93,18 @@ def _publish_prebuilt_packages(source, destination, hashes):
         held = os.fstat(parent)
         for name in sorted(NATIVE_FILES):
             path = destination / name
+            replacing = None
             if path.exists() or path.is_symlink():
-                if _native_hash(path) != hashes[name]:
+                before = path.lstat()
+                actual = _native_hash(path)
+                f._unchanged(path, before)
+                if actual == hashes[name]:
+                    continue
+                if predecessor is None or actual != predecessor[name]:
                     raise InstallError("An existing native artifact differs; preserve it before resuming")
-                continue
+                replacing = before
+            elif predecessor is not None:
+                raise InstallError("A previous native artifact is missing; preserve the root transition")
             with tempfile.TemporaryDirectory(prefix=".iris-native-", dir=Path('/proc/self/fd') / str(parent)) as temporary:
                 snapshot = Path(temporary) / name
                 actual, _, _ = f._snapshot(source / name, snapshot, f.MAX_ARCHIVE)
@@ -108,7 +116,12 @@ def _publish_prebuilt_packages(source, destination, hashes):
                 current = destination.lstat()
                 if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                     raise InstallError("Native artifacts directory changed during publication")
-                f._publish(parent, Path(temporary).name + "/" + name, name)
+                if replacing is None:
+                    f._publish(parent, Path(temporary).name + "/" + name, name)
+                else:
+                    f._unchanged(path, replacing)
+                    os.replace(Path(temporary).name + "/" + name, name, src_dir_fd=parent, dst_dir_fd=parent)
+                    os.fsync(parent)
     finally:
         os.close(parent)
 
@@ -483,6 +496,7 @@ class DockerInstall:
         from . import device_context as context, device_finalize as f
         from .prebuilt_device import prepare_runtime
         from .prebuilt_install import _kit
+        from .prebuilt_trust import predecessor_packages
         tool = self.journal.document.get("prebuilt_ioxclient")
         if (not isinstance(tool, str) or not Path(tool).is_absolute()
                 or any(ord(char) < 32 for char in tool)):
@@ -491,6 +505,7 @@ class DockerInstall:
         kit = _kit(self)
         completed = self.journal.document["completed"]
         artifacts = self.base / "artifacts"
+        predecessor = predecessor_packages(self)
         with ExitStack() as scope:
             inputs_fd = os.open(self.base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             scope.callback(os.close, inputs_fd)
@@ -513,8 +528,11 @@ class DockerInstall:
                 raise InstallError("Recorded native packaging inputs changed; preserve the journal")
             if previous is None:
                 if ("packages" in completed or "prebuilt-package-generated" in completed
-                        or any((artifacts / name).exists() or (artifacts / name).is_symlink() for name in NATIVE_FILES)):
+                        or (predecessor is None and any((artifacts / name).exists() or (artifacts / name).is_symlink()
+                                                      for name in NATIVE_FILES))):
                     raise InstallError("Unrecorded native artifacts exist; refusing to replace or adopt them")
+                if predecessor is not None and {name: _native_hash(artifacts / name) for name in NATIVE_FILES} != predecessor:
+                    raise InstallError("Published native artifacts differ from the retained root predecessor")
                 # Verify the licensed local program before recording build intent.
                 local_tool = context.prepare_ioxclient(tool, scratch / "ioxclient", expected_sha256=inputs.ioxclient_sha256)
                 self.journal.checkpoint("prebuilt-package-intent", intent)
@@ -593,7 +611,12 @@ class DockerInstall:
                 if completed["packages"] != hashes or _finalized_package_hashes(artifacts, receipt, finalization_sha256) != hashes:
                     raise InstallError("Published native package checkpoint changed")
                 return
-            _publish_prebuilt_packages(cache, artifacts, hashes)
+            if predecessor is None:
+                _publish_prebuilt_packages(cache, artifacts, hashes)
+            else:
+                if predecessor_packages(self) != predecessor:
+                    raise InstallError("Retained native predecessor changed before publication")
+                _publish_prebuilt_packages(cache, artifacts, hashes, predecessor=predecessor)
             if _finalized_package_hashes(artifacts, receipt, finalization_sha256) != hashes:
                 raise InstallError("Published native packages changed during verification")
             self.journal.checkpoint("packages", hashes)

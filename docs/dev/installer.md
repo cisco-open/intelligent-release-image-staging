@@ -262,6 +262,11 @@ backup; it preserves and refuses altered or incomplete existing directories.
 A backup without these caches needs the originals to remain intact. Keep the
 release kit, verifier and independent trust files at their recorded locations.
 
+Root replacement selects a new runtime and package generation for the approved
+request. Resume reuses that generation and keeps the original caches. A completed
+successor can be restored from its own backup without earlier cache directories.
+Before publication completes, recovery still requires the exact predecessor caches.
+
 The current publication workflow supplies source-build artifacts. Complete kit
 publication and offline topology qualification remain release gates. A local
 candidate does not prove publisher authentication or native Cisco signature acceptance.

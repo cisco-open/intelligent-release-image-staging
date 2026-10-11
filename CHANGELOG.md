@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Keep separate, request-bound native package generations when replacing
+  instruction roots on a prebuilt installation. Recovery retains the original
+  caches and resumes only the approved successor generation.
+
 - Publish the Guest Shell launch-failure timestamp atomically with private
   permissions, replacing stale writable markers without following symlinks.
   A marker write failure still allows the agent to report its status.

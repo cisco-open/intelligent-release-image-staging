@@ -16,7 +16,7 @@ import re
 import stat
 
 from . import device_context, device_finalize as finalizer, prebuilt_device
-from . import prebuilt_install, release_kit, restore_storage as storage
+from . import prebuilt_install, prebuilt_trust, release_kit, restore_storage as storage
 from .state import InstallError, regular_bytes
 
 
@@ -44,6 +44,7 @@ def authority(installation):
     selection = prebuilt_install.public_selection(document)
     kit = prebuilt_install._kit(installation)
     completed = document['completed']
+    generation = prebuilt_trust.selected(installation)
     if any(name not in completed for name in STAGES):
         fail('complete recorded native generation is required')
     intent = prebuilt_device._intent(installation, kit)
@@ -76,6 +77,7 @@ def authority(installation):
         fail('recorded native generation is invalid')
     return deepcopy({**selection, 'id': document['id'], 'source_manifest': document['source_manifest'],
                      'root_digests': document['root_digests'],
+                     **({prebuilt_trust.FIELD: document[prebuilt_trust.FIELD]} if generation is not None else {}),
                      'completed': {name: completed[name] for name in STAGES}})
 
 
@@ -83,7 +85,7 @@ def _specifications(installation, identity):
     completed = identity['completed']
     result, generated = completed[RUNTIME], completed['prebuilt-package-generated']
     return {
-        RUNTIME: (installation.base / RUNTIME,
+        RUNTIME: (installation.base / prebuilt_trust.runtime_name(identity),
                   {prebuilt_device.ARCHIVE: result['archive_sha256'],
                    prebuilt_device.RECEIPT: result['finalization_sha256']}),
         NATIVE: (installation.base / generated['directory'], generated['hashes']),
@@ -131,6 +133,9 @@ def _check_components(paths, identity, *, allow_missing=False):
 
 
 def capture_sources(installation, *, allow_missing=False):
+    recovering = prebuilt_trust.recovery_sources(installation)
+    if recovering is not None:
+        return recovering
     identity = authority(installation)
     if identity is None:
         return {}
@@ -151,6 +156,8 @@ def assert_archive_authority(installation, archived):
         return None
     recorded = {**selected, 'id': archived.get('id'), 'source_manifest': archived.get('source_manifest'),
                 'root_digests': archived.get('root_digests'),
+                **({'prebuilt_trust_generations': archived['prebuilt_trust_generations']}
+                   if 'prebuilt_trust_generations' in archived else {}),
                 'completed': {name: archived.get('completed', {}).get(name) for name in STAGES}}
     if recorded != current:
         fail('backup selection or generation differs from this deployment')

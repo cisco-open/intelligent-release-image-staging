@@ -110,7 +110,9 @@ def prepare_runtime(installation):
     intent = _intent(installation, kit)
     completed = installation.journal.document['completed']
     pending, stage = 'prebuilt-device-intent', 'prebuilt-device-runtime'
-    output = installation.base / OUTPUT
+    from .prebuilt_trust import selected, runtime_name
+    selected(installation)
+    output = installation.base / runtime_name(installation.journal.document)
     if pending in completed and completed[pending] != intent:
         raise InstallError('Device finalization inputs changed; preserve the existing journal')
     saved = completed.get(stage)
