@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Publish Guest Shell inputs through a prompt-aware session, keeping the full
+  integrity-check command inside Guest Shell and waiting for its confirmation
+  before closing SSH. Unconfirmed publication is never retried automatically.
+
 - Include a bounded, credential-free failure category when Guest Shell input
   publication cannot be confirmed, distinguishing transport, bootstrap and
   command errors while retaining the original failure.

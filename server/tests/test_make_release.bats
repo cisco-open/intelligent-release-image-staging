@@ -54,6 +54,7 @@
     iris/fleet/roles.csv.example \
     iris/fleet/schedules.csv.example \
     iris/lab/device-run.sh \
+    iris/lab/guest-publish.py \
     iris/lab/xr-run.sh \
     iris/lab/xr-dialogue.pl \
     iris/lab/iris-ssh-policy.sh \
@@ -201,6 +202,7 @@ _make_release_fixture() {
   # spares next to them stay ignored and must never reach the tarball
   echo "stale" > "$FIX/deliverables/aria2c-x86_64.old-6patch"
   echo "# run" > "$FIX/lab/device-run.sh"; echo "# run" > "$FIX/lab/xr-run.sh"
+  cp "$repo/lab/guest-publish.py" "$FIX/lab/guest-publish.py"
   cp "$repo/lab/xr-dialogue.pl" "$FIX/lab/xr-dialogue.pl"
   echo "# policy" > "$FIX/lab/iris-ssh-policy.sh"
   echo "kind: Namespace" > "$FIX/kubernetes/namespace.yaml"
@@ -249,7 +251,7 @@ _make_release_fixture() {
   # structural placeholders
   for present in iris/server/tracker.py iris/server/certs/cisco_bulkhash_verify.pem \
                  iris/tools/aria2c-patches/0001.patch iris/fleet/devices.csv.example \
-                 iris/lab/iris-ssh-policy.sh \
+                 iris/lab/iris-ssh-policy.sh iris/lab/guest-publish.py \
                  iris/bin/aria2c iris/deliverables/aria2c-x86_64 \
                  iris/deliverables/aria2c-aarch64 \
                  iris/bin/.gitkeep iris/artifacts/.gitkeep iris/MANIFEST.txt; do

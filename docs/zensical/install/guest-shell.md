@@ -85,7 +85,9 @@ carries no such applet did not finish the install. The confirmation steps are in
 [What a device needs before onboarding](device-requirements.md).
 
 The installer's `inputs published` confirmation proves that all eight complete
-inputs were published. A file-copy confirmation alone does not prove this.
+inputs were published. The installer waits inside Guest Shell for the exact
+publication confirmation and prompt before closing its session. A file-copy
+confirmation alone does not prove this.
 Bootstrap records its later bundle decision in `bundle-outcome.json` inside
 the Guest Shell working directory. Check the latest heartbeat separately to
 confirm that the agent runs and reaches the catalog. See

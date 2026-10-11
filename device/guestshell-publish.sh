@@ -82,7 +82,7 @@ print("ERROR: Guest Shell publication %s (category=%s, marker-count=%s, transpor
 }
 
 publish_guest_inputs() {
-  local metadata pair src dst pending attempt out ok command marker row status
+  local metadata pair src dst pending attempt out ok marker row status
   local expected=()
   metadata="$(guest_input_metadata)" \
     || { echo "ERROR: cannot fingerprint staged Guest Shell inputs" >&2; return 1; }
@@ -112,16 +112,16 @@ publish_guest_inputs() {
     [ "$ok" -eq 1 ] \
       || { echo "ERROR: incomplete Guest Shell upload; existing inputs retained" >&2; return 1; }
   done < <(guest_input_pairs)
-  # A short typed command, with no token or arbitrary path argument. The
+  # The fixed command contains no token or arbitrary path argument. The
   # completed bootstrap checks its own bytes as well as the other seven files.
-  command="guestshell run bash $GUEST_INPUT_ROOT/.iris-upload-$CAP-bootstrap.sh --publish-inputs $CAP"
-  for row in "${expected[@]}"; do command="$command $row"; done
-  [ "${#command}" -le 1024 ] || return 1
   marker="IRIS-INPUTS-PUBLISHED:$CAP:${expected[7]#*:}"
   status=0
-  out="$(printf '%s\n' "$command" | "$HERE/../lab/device-run.sh" "$DEVICE_IP")" || status=$?
-  if [ "$status" -ne 0 ] \
-      || [ "$(printf '%s\n' "$out" | tr -d '\r' | grep -Fxc "$marker")" -ne 1 ]; then
+  # Keep the IOS editor out of the long typed publication line. This closed
+  # helper enters Guest Shell and waits for both the marker and its prompt
+  # before exiting; it reports bounded classifications, never raw replies.
+  out="$(python3 "$HERE/../lab/guest-publish.py" "$DEVICE_IP" "$GUEST_INPUT_ROOT" "$CAP" "${expected[@]}")" || status=$?
+  [ "$status" -eq 0 ] || return 1
+  if [ "$(printf '%s\n' "$out" | tr -d '\r' | grep -Fxc "$marker")" -ne 1 ]; then
     printf '%s\n' "$out" | guest_publication_failure "$marker" "$status"
     return 1
   fi

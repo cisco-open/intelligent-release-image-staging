@@ -118,6 +118,29 @@ elif 'more ' in commands: pass
 else: print('bytes free')
 '''
 
+# The installer/actual bootstrap tests replace only the new prompt transport.
+# Its real terminal-shaped tests live in test_guest_publish_transport.py.
+PUBLISHER = r'''import importlib.util, pathlib, subprocess, sys
+source = SOURCE_FILE
+spec = importlib.util.spec_from_file_location('guest_publish', source)
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+def publish(host, root, capability, expected):
+    command, marker = module.request(host, root, capability, expected)
+    result = subprocess.run([str(pathlib.Path(__file__).with_name('device-run.sh')), host],
+                            input='guestshell run ' + command + '\n',
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise module.PublicationError('transport-error', 0, result.returncode)
+    text = result.stdout.replace('\r', '')
+    if len(result.stdout.encode()) + len(result.stderr.encode()) > module.MAX_OUTPUT:
+        raise module.PublicationError('oversized-response', 'unknown', 0)
+    if text.splitlines().count(marker) != 1:
+        raise module.failure(text, marker)
+    return marker
+module.publish = publish
+raise SystemExit(module.main())
+'''
+
 
 def executable(path, content):
     path.write_text(content)
@@ -131,6 +154,8 @@ def fixture(tmp_path, kind, mode):
         shutil.copyfile(ROOT / "device" / name, tmp_path / "device" / name)
     shutil.copyfile(ROOT / "server/time_preflight.py", tmp_path / "server/time_preflight.py")
     executable(tmp_path / "lab/device-run.sh", IOS)
+    executable(tmp_path / "lab/guest-publish.py", PUBLISHER.replace(
+        "SOURCE_FILE", repr(str(ROOT / "lab/guest-publish.py"))))
     executable(tmp_path / "bin/curl", "#!/bin/sh\nexit 0\n")
     executable(tmp_path / "bin/sleep", "#!/bin/sh\nexit 0\n")
     artifacts = tmp_path / "artifacts"

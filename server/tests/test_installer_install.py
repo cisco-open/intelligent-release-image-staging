@@ -492,6 +492,7 @@ def test_package_allowlist_excludes_agent_notes_and_credentials():
     for path in ("agentinfo/HANDOFF.md", "AGENTS.md", "creds/password", "fleet/real.csv"):
         assert not module.selected(path)
     assert module.selected("fleet/devices.csv.example")
+    assert module.selected("lab/guest-publish.py")
     assert module.selected("tools/iris_installer/deploy.py")
 
 
@@ -565,6 +566,9 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
                     ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(REPO / "tools/irisctl", repo / "tools/irisctl")
     shutil.copy2(REPO / "tools/iris-key-setup", repo / "tools/iris-key-setup")
+    (repo / "lab").mkdir()
+    for name in ("guest-publish.py", "iris-ssh-policy.sh"):
+        shutil.copy2(REPO / "lab" / name, repo / "lab" / name)
     (repo / "docs/dev").mkdir(parents=True)
     (repo / "docs/dev/installer.md").write_text("Candidate installer\n")
     for name, content in (("VERSION", "2026.09.23"), ("LICENSE", "Apache-2.0"), ("NOTICE", "Notices")):
@@ -582,6 +586,8 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
     extracted = tmp_path / "extracted"
     subprocess.run(["dpkg-deb", "--extract", str(artifact), str(extracted)], check=True)
     assert not (extracted / "usr/lib/iris-installer/source/server/.env").exists()
+    for name in ("guest-publish.py", "iris-ssh-policy.sh"):
+        assert (extracted / "usr/lib/iris-installer/source/lab" / name).read_bytes() == (REPO / "lab" / name).read_bytes()
     assert (extracted / "usr/lib/iris-installer/iris_installer/cli.py").stat().st_mode & 0o777 == 0o644
     assert (extracted / "usr/lib/iris-installer").stat().st_mode & 0o777 == 0o755
     result = subprocess.run([str(extracted / "usr/bin/irisctl"), "install", "--help"],

@@ -27,7 +27,8 @@ ROOT_FILES = {"VERSION", "LICENSE", "NOTICE", ".dockerignore", ".gitignore",
               "zensical.toml", "CONTRIBUTING.md", "DEVELOPMENT.md", "TESTING.md",
               "SECURITY.md", "CODE_OF_CONDUCT.md"}
 TREES = {"server", "device", "tools", "docs", "kubernetes", "bin", "deliverables"}
-LAB_FILES = {"lab/device-run.sh", "lab/xr-run.sh", "lab/xr-dialogue.pl", "lab/iris-ssh-policy.sh"}
+LAB_FILES = {"lab/device-run.sh", "lab/guest-publish.py", "lab/xr-run.sh",
+             "lab/xr-dialogue.pl", "lab/iris-ssh-policy.sh"}
 
 
 def selected(name):
