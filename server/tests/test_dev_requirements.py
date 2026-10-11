@@ -15,6 +15,9 @@ import style from drifting apart again.
 import glob
 import os
 import re
+import shlex
+
+import yaml
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 REQ = os.path.join(ROOT, "requirements-dev.txt")
@@ -71,3 +74,30 @@ def test_no_test_module_skips_itself_over_a_declared_dependency():
             if re.search(r"importorskip\(\s*['\"]yaml['\"]", body):
                 offenders.append(os.path.relpath(path, ROOT))
     assert offenders == [], offenders
+
+
+def test_documented_python_recipe_builds_its_generated_map_first():
+    with open(os.path.join(ROOT, "TESTING.md"), encoding="utf-8") as stream:
+        text = stream.read()
+    recipe = re.findall(r"```bash\n(.*?)```", text, re.S)[0]
+    assert "Node 24" in text
+    assert recipe.index("npm --prefix server/console-ui ci --no-audit --no-fund") < \
+        recipe.index("npm --prefix server/console-ui run build:map") < \
+        recipe.index("python3 -m pytest")
+
+
+def test_documented_privileged_checks_match_the_finite_ci_step():
+    with open(os.path.join(ROOT, "TESTING.md"), encoding="utf-8") as stream:
+        text = stream.read()
+    recipes = re.findall(r"```bash\n(.*?)```", text, re.S)
+    privileged = [recipe for recipe in recipes if "sudo env" in recipe]
+    assert len(privileged) == 1
+    with open(WORKFLOW, encoding="utf-8") as stream:
+        workflow = yaml.safe_load(stream)
+    steps = workflow["jobs"]["test"]["steps"]
+    actual = next(step["run"] for step in steps
+                  if step.get("name") == "Managed-worker custody and private-umask regressions")
+    commands = lambda source: [shlex.split(line) for line in source.replace("\\\n", " ").splitlines()
+                               if line.strip()]
+    assert commands(privileged[0]) == commands(actual)
+    assert len(commands(privileged[0])) == 3
