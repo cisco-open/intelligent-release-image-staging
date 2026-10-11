@@ -1689,13 +1689,25 @@ fi
 # regression into a silent device (the 2026-08-20 empty-rpc-secret incident
 # was invisible for exactly this reason). Record the failure and continue —
 # the agent tolerates a down RPC and heartbeats stage_error instead.
+record_launch_failure() (
+  # Keep the caller's umask and bundle-lock traps unchanged. Rename a fresh
+  # private file so stale writable markers and symlinks are never followed.
+  umask 077
+  marker_tmp="$(mktemp "$STAGE/.aria2c-launch-failed.XXXXXX")" || return 1
+  trap 'rm -f -- "$marker_tmp"' EXIT
+  chmod 600 "$marker_tmp" \
+    && date -u '+%Y-%m-%dT%H:%M:%SZ' > "$marker_tmp" \
+    && mv -fT -- "$marker_tmp" "$STAGE/aria2c-launch-failed"
+)
+
 if [ -f "$STAGE/guestshell-start.sh" ]; then
   # aria2c can daemonize; do not let it inherit the bootstrap transaction lock.
   if bash "$STAGE/guestshell-start.sh" 9>&-; then
     rm -f "$STAGE/aria2c-launch-failed"
   else
     echo "IRIS-BOOTSTRAP: failed to launch aria2c; continuing so the agent still heartbeats" >&2
-    date -u '+%Y-%m-%dT%H:%M:%SZ' > "$STAGE/aria2c-launch-failed" 2>/dev/null || :
+    record_launch_failure 2>/dev/null \
+      || echo "IRIS-BOOTSTRAP: could not record aria2c launch failure; continuing" >&2
   fi
 fi
 

@@ -110,6 +110,11 @@ otherwise the copy can fail because the old binary is still running. Copy
 and launch failures show up in the bootstrap output instead of being
 silently dropped.
 
+After a failed Guest Shell launch, bootstrap atomically publishes the UTC
+timestamp in `aria2c-launch-failed` using a fresh, guest-owned file with mode
+`0600`. A marker write failure preserves the previous marker and still lets
+the agent run and report its status. A healthy launch removes the marker.
+
 The container supervisor tracks aria2 by its child process id. To restart
 it, the supervisor sends TERM, waits up to five seconds, then sends KILL if
 the process has not exited, and reaps it. The container uses the same

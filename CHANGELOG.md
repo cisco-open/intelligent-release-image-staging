@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Publish the Guest Shell launch-failure timestamp atomically with private
+  permissions, replacing stale writable markers without following symlinks.
+  A marker write failure still allows the agent to report its status.
+
 - Correct partial role-change recovery guidance: refresh both stores and review
   a fresh preview with the current policy revision before confirming again.
 

@@ -583,6 +583,88 @@ PY
   [ -f "$TMP/agent-invoked" ]
 }
 
+prepare_marker_failure() {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STAGE/guestshell-start.sh"
+  mkdir -p "$STAGE/agent"
+  printf 'import os\nopen(r"%s/agent-invoked", "w").write(oct(os.umask(0)))\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+}
+
+@test "launch marker atomically replaces writable stale files with fresh private metadata" {
+  prepare_marker_failure
+  for mask in 0000 0002 0022 0077; do
+    printf 'stale\n' > "$STAGE/aria2c-launch-failed"
+    chmod 664 "$STAGE/aria2c-launch-failed"
+    prior_inode="$(stat -c %i "$STAGE/aria2c-launch-failed")"
+    run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash -c 'umask "$1"; exec bash "$2"' _ "$mask" "$BATS_TEST_DIRNAME/bootstrap.sh"
+    [ "$status" -eq 0 ] || return 1
+    [ "$(stat -c %a "$STAGE/aria2c-launch-failed")" = 600 ] || return 1
+    [ "$(stat -c %u "$STAGE/aria2c-launch-failed")" = "$(id -u)" ] || return 1
+    [ "$(stat -c %h "$STAGE/aria2c-launch-failed")" = 1 ] || return 1
+    [ "$(stat -c %i "$STAGE/aria2c-launch-failed")" != "$prior_inode" ] || return 1
+    [[ "$(cat "$STAGE/aria2c-launch-failed")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+    [ -f "$TMP/agent-invoked" ] || return 1
+    [ -z "$(find "$STAGE" -maxdepth 1 -name '.aria2c-launch-failed.*' -print)" ] || return 1
+  done
+  [ "$(cat "$TMP/agent-invoked")" = 0o77 ]
+}
+
+@test "launch marker replaces symlinks without modifying their file or directory targets" {
+  prepare_marker_failure
+  printf 'operator file\n' > "$TMP/operator-file"
+  mkdir "$TMP/operator-directory"
+  for target in "$TMP/operator-file" "$TMP/operator-directory"; do
+    rm -f "$STAGE/aria2c-launch-failed"
+    ln -s "$target" "$STAGE/aria2c-launch-failed"
+    run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+    [ "$status" -eq 0 ] || return 1
+    [ ! -L "$STAGE/aria2c-launch-failed" ] || return 1
+    [ "$(stat -c %a "$STAGE/aria2c-launch-failed")" = 600 ] || return 1
+    [ "$(cat "$TMP/operator-file")" = 'operator file' ] || return 1
+    [ -z "$(ls -A "$TMP/operator-directory")" ] || return 1
+  done
+}
+
+@test "launch marker write failures preserve the old marker and do not stop the agent" {
+  prepare_marker_failure
+  for failed in mktemp chmod date mv; do
+    printf 'stale\n' > "$STAGE/aria2c-launch-failed"
+    chmod 664 "$STAGE/aria2c-launch-failed"
+    prior_inode="$(stat -c %i "$STAGE/aria2c-launch-failed")"
+    printf '#!/usr/bin/env bash\ncase "$*" in *aria2c-launch-failed*|*%%Y-%%m-%%dT%%H:%%M:%%SZ*) exit 1 ;; esac\nexec /usr/bin/%s "$@"\n' "$failed" > "$BIN/$failed"
+    chmod +x "$BIN/$failed"
+    rm -f "$TMP/agent-invoked"
+    run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"could not record aria2c launch failure; continuing"* ]] || return 1
+    [ "$(cat "$STAGE/aria2c-launch-failed")" = stale ] || return 1
+    [ "$(stat -c %i "$STAGE/aria2c-launch-failed")" = "$prior_inode" ] || return 1
+    [ "$(stat -c %a "$STAGE/aria2c-launch-failed")" = 664 ] || return 1
+    [ -f "$TMP/agent-invoked" ] || return 1
+    [ -z "$(find "$STAGE" -maxdepth 1 -name '.aria2c-launch-failed.*' -print)" ] || return 1
+    rm "$BIN/$failed"
+  done
+}
+
+@test "launch marker helper preserves caller traps and umask" {
+  # Execute the actual helper in a shell with an existing lock-cleanup trap.
+  helper="$(sed -n '/^record_launch_failure() (/,/^)/p' "$BATS_TEST_DIRNAME/bootstrap.sh")"
+  run env STAGE="$STAGE" bash -c '
+    eval "$1"
+    trap ": caller-lock-cleanup" EXIT
+    before=$(trap -p EXIT)
+    umask 0002
+    record_launch_failure
+    [ "$(trap -p EXIT)" = "$before" ] && [ "$(umask)" = 0002 ]
+  ' _ "$helper"
+  [ "$status" -eq 0 ]
+}
+
 @test "a healthy aria2c launch clears a stale launch-failure marker" {
   printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
