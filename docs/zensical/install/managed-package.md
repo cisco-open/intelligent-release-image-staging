@@ -121,6 +121,11 @@ sudo irisctl install --instance my-iris \
   --accept-changes
 ```
 
+Add `--observability` to a new `irisctl setup` or `irisctl install` command to
+enable authenticated `/metrics` on port 9101 in any layout. It is off by default.
+The choice is saved for resume. Set the scraper token through
+[Rotate telemetry credentials](../admin-guide/console-credentials.md#replace-the-metrics-scraping-token).
+
 ### Docker on one host
 
 The default is `--target docker`. The Console listens on `127.0.0.1:8080` over

@@ -26,7 +26,7 @@ import time
 from types import SimpleNamespace
 import uuid
 
-from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, WAITING_APPROVAL, digest, run
+from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, WAITING_APPROVAL, digest, run, observability_enabled
 from .state import InstallError, atomic_write, regular_bytes
 
 
@@ -66,6 +66,9 @@ def _container_incarnation(pod, name):
 
 def validate_config(config):
     from .deploy import validate_config as docker_validate
+    if isinstance(config, dict) and 'observability' in config:
+        observability_enabled(config)
+        config = {key: value for key, value in config.items() if key != 'observability'}
     if not isinstance(config, dict) or set(config) != COMMON | FIELDS or config.get("target") != "kubernetes":
         raise InstallError("Kubernetes installation configuration is incomplete")
     docker_validate(dict({k: config[k] for k in COMMON}, target="docker"))
@@ -465,6 +468,7 @@ class KubeInstall(DockerInstall):
                 key, value = line.split("=", 1)
                 server_env[key] = value
         server_env.update(IRIS_HOST_IP=self.config["host"], IRIS_AGE_RECIPIENTS=recipient + "," + self.config["recovery_recipient"],
+                          IRIS_OBSERVABILITY="1" if observability_enabled(self.config) else "",
                           IRIS_PEER_TLS_MODE=self.config["peer_tls"], IRIS_AGE_KEY_FILE="/run/secrets/age/identity",
                           IRIS_MANAGEMENT_API_TOKEN_FILE="/data/config/tier/current.json", IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE="/data/config/tier/previous.json",
                           IRIS_MANAGEMENT_API_CERT="/run/secrets/management/tls.crt", IRIS_MANAGEMENT_API_KEY="/run/secrets/management/tls.key",

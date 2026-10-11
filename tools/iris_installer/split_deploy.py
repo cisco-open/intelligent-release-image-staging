@@ -21,7 +21,7 @@ import stat
 import subprocess
 import tempfile
 
-from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, check_tcp_endpoint, digest, run
+from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, check_tcp_endpoint, digest, run, observability_enabled
 from .state import InstallError, atomic_write, regular_bytes
 
 
@@ -33,6 +33,9 @@ SPLIT_FIELDS = {
 
 def validate_split_config(config):
     """Validate the transport separately from the common deployment fields."""
+    if isinstance(config, dict) and 'observability' in config:
+        observability_enabled(config)
+        config = {key: value for key, value in config.items() if key != 'observability'}
     if not SPLIT_FIELDS.issubset(config):
         raise InstallError('Split Docker requires explicit SSH transport and Console custody settings')
     base = {'target', 'instance', 'host', 'console_bind', 'console_port', 'recovery_recipient', 'peer_tls'}

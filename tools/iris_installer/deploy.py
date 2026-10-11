@@ -145,7 +145,18 @@ def run(command, *, env=None, input=None, timeout=7200, capture=False):
     return result.stdout if capture else b""
 
 
+def observability_enabled(config):
+    """Old journals omit this opt-in; never coerce a stored string or integer."""
+    value = config.get('observability', False)
+    if type(value) is not bool:
+        raise InstallError('Observability must be an explicit boolean')
+    return value
+
+
 def validate_config(config):
+    if isinstance(config, dict) and 'observability' in config:
+        observability_enabled(config)
+        config = {key: value for key, value in config.items() if key != 'observability'}
     if isinstance(config, dict) and 'image_root' in config:
         from .image_storage import validate_name
         validate_name(config['image_root'])
@@ -336,6 +347,7 @@ class DockerInstall:
             "IRIS_GUI_PUBLISH": str(self.config["console_port"]),
             "IRIS_CONSOLE_URL": f'https://{self.config["console_bind"]}:{self.config["console_port"]}/',
             "IRIS_PEER_TLS_MODE": self.config["peer_tls"],
+            "IRIS_OBSERVABILITY": "1" if observability_enabled(self.config) else "",
             "IRIS_IMAGE_ROOT": str(import_root),
             "IRIS_ARTIFACTS_HOST_DIR": str(self.base / "artifacts"),
         }
@@ -883,6 +895,7 @@ def start(args):
     ubuntu.check_platform()
     config = {name: getattr(args, name) for name in (
         "target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls")}
+    config['observability'] = getattr(args, 'observability', False)
     if getattr(args, 'image_root', None) is not None:
         config['image_root'] = str(args.image_root)
     if args.target == 'docker-split':

@@ -78,6 +78,8 @@ def parser():
     install.add_argument("--console-bind", default="127.0.0.1", help="loopback by default; restrict remote access before exposing first claim")
     install.add_argument("--console-port", type=int, default=8080)
     install.add_argument("--peer-tls", choices=("required", "disabled"), default="required")
+    install.add_argument('--observability', action='store_true',
+                         help='enable the authenticated metrics endpoint; off by default')
     install.add_argument('--image-root', type=Path, help='dedicated host image folder for Docker; included in backup and restore')
     image_root = commands.add_parser('image-root', help='connect a host image folder to an existing one-host Docker install')
     image_root.add_argument('--state-dir', type=Path, required=True)

@@ -71,6 +71,7 @@ def template(install, source):
         IRIS_GUI_PUBLISH=str(install.config['console_port']),
         IRIS_CONSOLE_URL=f'https://{install.config["console_bind"]}:{install.config["console_port"]}/',
         IRIS_PEER_TLS_MODE=install.config['peer_tls'],
+        IRIS_OBSERVABILITY='1' if deploy.observability_enabled(install.config) else '',
         IRIS_IMAGE_ROOT=str(image_root(install)),
         IRIS_ARTIFACTS_HOST_DIR=str(install.base / 'artifacts'))
     value = json.loads(install.runner(['docker', 'compose', '--env-file', str(install.base / 'compose.env'),

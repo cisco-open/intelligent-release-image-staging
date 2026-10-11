@@ -30,6 +30,13 @@ page covers metrics and observability, not proof of what staged. For that, see
 2. Set the OTLP endpoint and turn the OTLP flag on. Both are needed. The
    change applies within seconds.
 
+### With the managed package
+
+For a new managed-package installation, add `--observability` to `irisctl setup`
+or `irisctl install`. This enables `/metrics` for Docker, split Docker and
+Kubernetes and records the choice for resume. See
+[Install with the managed package](../install/managed-package.md).
+
 ### In the deployment files
 
 Set both values on the IRIS host:
@@ -49,8 +56,10 @@ Variable names and defaults are in
 
 ### Authenticate the Prometheus scrape
 
-The `/metrics` endpoint requires authentication. Create the scrape token and
-give Compose or Kubernetes its path first: see
+The `/metrics` endpoint requires authentication. For a managed-package install,
+set the token in **Settings → Certificates & keys → Rotate telemetry credentials**
+and save it in your scraper. For deployment-file installations, create the token
+and give Compose or Kubernetes its path: see
 [Set up certificates and tokens](../install/certificates-and-tokens.md). To
 replace it, see [Rotate credentials and certificates](../admin-guide/rotations.md).
 

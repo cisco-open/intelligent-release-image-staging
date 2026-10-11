@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Add an explicit `--observability` option to managed installation and guided
+  setup for authenticated metrics on Docker, split Docker and Kubernetes.
+  The default stays off; resume and application upgrades retain the selection.
+
 - Allow simultaneous browser certificate status reads while keeping certificate
   changes exclusive and refusing reads during an active change.
 
