@@ -68,6 +68,7 @@ RPC_SECRET=""   # NOT baked: the agent fetches it on its first token-refresh
 CPU="${CPU:-1110}"; MEM="${MEM:-512}"; PERSIST="${PERSIST:-256}"
 HOST_USER="${HOST_USER:-}"; HOST_PASS="${HOST_PASS:-}"   # required only when STAGE_HOST is REMOTE (enforced at the ssh path below)
 STAGE="${STAGE:-/flash/guest-share/iris}"
+GUEST_INPUT_ROOT="/flash/guest-share"
 [[ "$STAGE" =~ ^/[A-Za-z0-9._/-]+$ ]] \
   && [[ "$STAGE" != *"//"* ]] && [[ "/$STAGE/" != *"/../"* ]] \
   && [[ "/$STAGE/" != *"/./"* ]] \
@@ -91,6 +92,8 @@ CONF="iris-agent-$DEVICE_ID-$CAP.conf"
 RPC_SECRET_FILE="rpc-secret-$CAP"
 INSTRUCTION_ENVELOPE="iris-instructions-$DEVICE_ID-$CAP.envelope"
 BUNDLE_DIGEST_FILE="bundle-sha256-$CAP"
+# shellcheck source=device/guestshell-publish.sh
+. "$HERE/guestshell-publish.sh"
 
 # --- Model-aware config: the ONE place the install path branches by device ---
 # Catalyst 9300 and IE-3x00 differ in (a) the app-hosting port, (b) the writable
@@ -263,18 +266,7 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== Agent configuration ====="; agent_conf
   echo "===== Copy agent files over HTTPS ====="
   IOS_ROOT="${IOS_FS}/guest-share"
-  echo "delete /force $IOS_ROOT/bundle.tgz"
-  echo "delete /force $IOS_ROOT/bundle.tgz.sha256"
-  for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
-              "staging/$RPC_SECRET_FILE:rpc-secret" \
-              "iris-catalog.pem:iris-catalog.pem" \
-              "iris-signers.pem:iris-signers.allowed_signers" \
-              "staging/$INSTRUCTION_ENVELOPE:iris-instructions.bootstrap" \
-              "staging/$BUNDLE_DIGEST_FILE:bundle.tgz.sha256" \
-              "$BUNDLE:bundle.tgz"; do
-    src="${pair%%:*}"; dst="${pair##*:}"
-    printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst"
-  done
+  render_guest_inputs
   echo "===== Start Guest Shell ====="
   echo "===== Save startup-config ====="
   echo "copy running-config startup-config"
@@ -630,35 +622,10 @@ if ! artifact_preflight; then
   echo "  Is the server container up, did you run tools/make-agent-bundle.sh, and is IRIS_CRT_FILE the server's crt.pem?" >&2
   exit 1
 fi
-# IMPORTANT: files go to the guest-share ROOT, not a subdirectory. Preserve the
-# live Guest Shell work directory and its LKG/runtime state. Only stale incoming
-# archive evidence at the root is safe to clear before the ordered copy.
+# Pending inputs stay outside the live Guest Shell work directory. Bootstrap
+# publishes their final root names only after every complete-file check.
 IOS_ROOT="${IOS_FS}/guest-share"
-printf 'delete /force %s/bundle.tgz\ndelete /force %s/bundle.tgz.sha256\n' \
-  "$IOS_ROOT" "$IOS_ROOT" \
-  | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
-for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
-            "staging/$RPC_SECRET_FILE:rpc-secret" \
-            "iris-catalog.pem:iris-catalog.pem" \
-            "iris-signers.pem:iris-signers.allowed_signers" \
-            "staging/$INSTRUCTION_ENVELOPE:iris-instructions.bootstrap" \
-            "staging/$BUNDLE_DIGEST_FILE:bundle.tgz.sha256" \
-            "$BUNDLE:bundle.tgz"; do
-  src="${pair%%:*}"; dst="${pair##*:}"; ok=0
-  for attempt in 1 2 3; do
-    # capture THEN match — `grep -q` on a live pipe SIGPIPEs ssh at first match
-    # and (with pipefail) falsely reports a successful copy as failed.
-    # https:// (not http://) — the trustpoint configured above lets IOS validate
-    # the server cert; the credentials in iris-agent.conf/rpc-secret no longer
-    # travel in cleartext.
-    out="$(printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst" \
-            | "$HERE/../lab/device-run.sh" "$DEVICE_IP" || true)"
-    case "$out" in *"bytes copied"*) ok=1; break ;; esac
-    echo "  copy of $src failed (attempt $attempt/3), retrying..."
-    sleep 10
-  done
-  [ "$ok" -eq 1 ] || { echo "  ERROR: copy of $src failed after 3 attempts" >&2; exit 1; }
-done
+publish_guest_inputs || exit 1
 
 echo "[6/6] save startup-config"
 save_out="$(printf 'copy running-config startup-config\n' \

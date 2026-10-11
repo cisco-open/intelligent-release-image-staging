@@ -75,6 +75,7 @@ import fcntl
 import os
 import stat
 import sys
+import time
 
 
 def fail():
@@ -163,11 +164,25 @@ try:
             or opened.st_size != 0
             or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
         fail()
-    try:
-        fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as lock_error:
-        if lock_error.errno in (errno.EACCES, errno.EAGAIN):
-            raise SystemExit(0)
+    publishing = arguments[:1] == ["--publish-inputs"]
+    deadline = time.monotonic() + 120
+    while True:
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as lock_error:
+            if lock_error.errno not in (errno.EACCES, errno.EAGAIN):
+                fail()
+            if not publishing:
+                raise SystemExit(0)
+            if time.monotonic() >= deadline:
+                sys.stderr.write("IRIS-BOOTSTRAP: input publication lock busy; no inputs published\n")
+                raise SystemExit(75)
+            time.sleep(0.1)
+    # The publisher may have waited. A replaced lock pathname must not split
+    # publication from the normal tick's lock, even if both files are valid.
+    named = os.stat(lock_path, follow_symlinks=False)
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
         fail()
     if lock_descriptor != 9:
         os.dup2(lock_descriptor, 9)
@@ -188,6 +203,134 @@ release_bundle_lock() {
 }
 trap release_bundle_lock EXIT
 trap 'exit 1' HUP INT TERM
+
+# The installers upload only capability-scoped siblings. This fixed mode is
+# invoked from the completed pending bootstrap, never from the timer. It holds
+# the same lock as normal collection until all final names have been read back.
+if [ "${1:-}" = --publish-inputs ]; then
+  python3 - "$SRC" "${@:2}" <<'PY'
+import hashlib
+import os
+import re
+import stat
+import sys
+
+FILES = (("bootstrap.sh", 262144), ("iris-agent.conf", 65536),
+         ("rpc-secret", 65536), ("iris-catalog.pem", 65536),
+         ("iris-signers.allowed_signers", 65536),
+         ("iris-instructions.bootstrap", 262144),
+         ("bundle.tgz.sha256", 65), ("bundle.tgz", 33554432))
+
+
+def identity(value):
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
+            value.st_ctime_ns, value.st_mode, value.st_uid, value.st_gid,
+            value.st_nlink)
+
+
+def directory_identity(value):
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+            value.st_gid, value.st_nlink)
+
+
+def check(descriptor, path, expected, maximum, minimum):
+    opened = os.fstat(descriptor)
+    named = os.stat(path, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode) \
+            or opened.st_nlink != 1 or identity(opened) != identity(named) \
+            or not minimum <= opened.st_size <= maximum:
+        raise ValueError()
+    size, digest = expected.split(":")
+    if str(opened.st_size) != size:
+        raise ValueError()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    actual = hashlib.sha256()
+    remaining = opened.st_size
+    while remaining:
+        block = os.read(descriptor, min(65536, remaining))
+        if not block:
+            raise ValueError()
+        remaining -= len(block)
+        actual.update(block)
+    if os.read(descriptor, 1) or actual.hexdigest() != digest \
+            or identity(os.fstat(descriptor)) != identity(opened) \
+            or identity(os.stat(path, dir_fd=directory_fd, follow_symlinks=False)) != identity(opened):
+        raise ValueError()
+    return identity(opened)
+
+
+held = []
+directory_fd = None
+try:
+    source, capability = sys.argv[1:3]
+    expected = sys.argv[3:]
+    if not re.fullmatch(r"[0-9a-f]{32}", capability) or len(expected) != len(FILES) \
+            or any(not re.fullmatch(r"(?:0|[1-9][0-9]{0,7}):[0-9a-f]{64}", row)
+                   for row in expected):
+        raise ValueError()
+    directory = os.lstat(source)
+    if not stat.S_ISDIR(directory.st_mode):
+        raise ValueError()
+    directory_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if directory_identity(os.fstat(directory_fd)) != directory_identity(directory):
+        raise ValueError()
+    for (name, maximum), row in zip(FILES, expected):
+        pending = ".iris-upload-" + capability + "-" + name
+        descriptor = os.open(pending, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        minimum = 0 if name == "rpc-secret" else 1
+        # Retain the descriptor even if validation fails, for the final close.
+        held.append([descriptor, pending, name, maximum, minimum, row, None])
+        held[-1][-1] = check(descriptor, pending, row, maximum, minimum)
+        os.fsync(descriptor)
+    # Every input is complete before any old input is replaced. In particular,
+    # a copy failure cannot truncate the launcher or a live private input.
+    if directory_identity(os.lstat(source)) != directory_identity(directory):
+        raise ValueError()
+    for item in held:
+        descriptor, pending, name, maximum, minimum, row, before = item
+        if check(descriptor, pending, row, maximum, minimum) != before:
+            raise ValueError()
+        os.replace(pending, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        after = check(descriptor, name, row, maximum, minimum)
+        # Rename can update ctime, but never ownership, permissions or bytes.
+        if before[:4] + before[5:] != after[:4] + after[5:]:
+            raise ValueError()
+        item[-1] = after
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        # The shared-flash mount may not implement directory fsync.
+        import errno
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+            raise
+    for descriptor, pending, name, maximum, minimum, row, after in held:
+        try:
+            os.stat(pending, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError()
+        if check(descriptor, name, row, maximum, minimum) != after:
+            raise ValueError()
+    if directory_identity(os.fstat(directory_fd)) != directory_identity(directory) \
+            or directory_identity(os.lstat(source)) != directory_identity(directory):
+        raise ValueError()
+    print("IRIS-INPUTS-PUBLISHED:" + capability + ":" + expected[-1].split(":")[1])
+except Exception:
+    sys.stderr.write("IRIS-BOOTSTRAP: input publication refused; inspect retained inputs\n")
+    sys.exit(1)
+finally:
+    for descriptor, *_ in held:
+        os.close(descriptor)
+    if directory_fd is not None:
+        os.close(directory_fd)
+PY
+  exit "$?"
+fi
+if [ "$#" -ne 0 ]; then
+  echo "IRIS-BOOTSTRAP: unsupported arguments" >&2
+  exit 1
+fi
 
 collect_file() {
   _name="$1"
@@ -423,6 +566,8 @@ bundle_transaction() {
   python3 - "$@" <<'PY'
 import hashlib
 import gzip
+import datetime
+import json
 import os
 import re
 import shutil
@@ -515,6 +660,51 @@ def write_phase(tx, value):
         os.fsync(stream.fileno())
     os.replace(tmp, os.path.join(tx, "phase"))
     fsync_dir(tx)
+
+
+def write_outcome(stage, status, reason):
+    # This describes bundle acceptance, not daemon startup or catalog contact.
+    # Keep a fixed, bounded public diagnostic before removing rejected inputs.
+    reasons = ("bundle-committed", "missing-digest", "invalid-digest",
+               "digest-mismatch", "invalid-archive", "invalid-signer",
+               "signer-mismatch", "trust-unreadable", "install-failed")
+    if status not in ("accepted", "rejected") or reason not in reasons \
+            or (status == "accepted") != (reason == "bundle-committed"):
+        raise BundleError("invalid-outcome")
+    expected = None
+    try:
+        stream, identity = open_regular(os.path.join(stage, "bundle.tgz.sha256"), 65)
+        with stream:
+            raw = stream.read(66)
+            if stream_identity(stream) == identity \
+                    and re.fullmatch(br"[0-9a-f]{64}\n", raw):
+                expected = raw[:64].decode("ascii")
+    except (OSError, BundleError):
+        pass
+    value = {"schema": "iris-bootstrap-bundle-outcome-v1", "status": status,
+             "reason": reason, "expectedArchiveSha256": expected,
+             "at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    descriptor, temporary = tempfile.mkstemp(prefix=".bundle-outcome-", dir=stage)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, os.path.join(stage, "bundle-outcome.json"))
+        descriptor = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            try:
+                os.fsync(descriptor)
+            except OSError as exc:
+                import errno
+                if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+                    raise
+        finally:
+            os.close(descriptor)
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
 
 
 def read_phase(tx):
@@ -1295,6 +1485,8 @@ def main():
         commit(stage)
     elif operation == "finalize":
         finalize(stage)
+    elif operation == "outcome":
+        write_outcome(stage, sys.argv[3], sys.argv[4])
     else:
         raise BundleError("transaction-invalid")
 
@@ -1332,6 +1524,8 @@ case "$recovery" in
   committed)
     sync_eem_bootstrap \
       || { echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1; }
+    bundle_transaction outcome "$STAGE" accepted bundle-committed >/dev/null \
+      || { echo "IRIS-BOOTSTRAP: cannot record bundle outcome" >&2; exit 1; }
     bundle_transaction finalize "$STAGE" >/dev/null \
       || { echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1; }
     rm -f "$STAGE/bundle.tgz" "$STAGE/bundle.tgz.sha256" \
@@ -1342,6 +1536,8 @@ esac
 
 reject_bundle() {
   _reason="$1"
+  bundle_transaction outcome "$STAGE" rejected "$_reason" >/dev/null \
+    || { echo "IRIS-BOOTSTRAP: cannot record bundle outcome; retaining inputs" >&2; exit 1; }
   rm -f "$STAGE/bundle.tgz" "$STAGE/bundle.tgz.sha256" \
         "$STAGE/.incoming-iris-signers.allowed_signers" \
         "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256" \
@@ -1388,6 +1584,8 @@ if [ -e "$STAGE/bundle.tgz" ] || [ -L "$STAGE/bundle.tgz" ]; then
         echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2
         exit 1
       else
+        bundle_transaction outcome "$STAGE" accepted bundle-committed >/dev/null \
+          || { echo "IRIS-BOOTSTRAP: cannot record bundle outcome" >&2; exit 1; }
         rm -f "$STAGE/bundle.tgz" "$STAGE/bundle.tgz.sha256" \
               "$STAGE/.incoming-iris-signers.allowed_signers" 2>/dev/null || true
         bundle_transaction finalize "$STAGE" >/dev/null \

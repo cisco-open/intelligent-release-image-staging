@@ -60,9 +60,14 @@ show logging | include IRIS</pre>
     <code>iris-agent.conf</code>, the public <code>iris-catalog.pem</code>, and
     any <code>aria2c-launch-failed</code> marker there. Keep configuration and
     secret-file contents out of shared logs.</p>
-    <p>Dropping a fresh <code>bundle.tgz</code> into the guest-share root upgrades
-    the agent on the next tick. Console upgrades use <strong>Undeploy</strong>,
-    then <strong>Onboard</strong>; preflight refuses an already-running agent.</p>
+    <p>The installer uploads temporary files, then checks and publishes complete
+    inputs under the bootstrap lock, with <code>bundle.tgz</code> last. A copy
+    confirmation does not prove runtime startup. The working directory's
+    <code>bundle-outcome.json</code> records the latest bundle acceptance or
+    rejection, a fixed reason, the expected archive hash when available, and
+    the time. Keep it with the job log after a failure, and check the fresh
+    heartbeat separately. Console upgrades use <strong>Undeploy</strong>, then
+    <strong>Onboard</strong>; preflight refuses an already-running agent.</p>
 
     <h2>IOx agents</h2>
     <pre class="log">show app-hosting list</pre>

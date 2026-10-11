@@ -165,14 +165,14 @@ setup() {
   [ "$status" -eq 0 ] || return 1
   mapfile -t copies < <(printf '%s\n' "$output" | grep '^copy https://')
   [ "${#copies[@]}" -eq 8 ] || return 1
-  [[ "${copies[0]}" == *"/bootstrap.sh flash:/guest-share/bootstrap.sh" ]] || return 1
-  [[ "${copies[1]}" == *"/staging/iris-agent-203.0.113.3-$cap.conf flash:/guest-share/iris-agent.conf" ]] || return 1
-  [[ "${copies[2]}" == *"/staging/rpc-secret-$cap flash:/guest-share/rpc-secret" ]] || return 1
-  [[ "${copies[3]}" == *"/iris-catalog.pem flash:/guest-share/iris-catalog.pem" ]] || return 1
-  [[ "${copies[4]}" == *"/iris-signers.pem flash:/guest-share/iris-signers.allowed_signers" ]] || return 1
-  [[ "${copies[5]}" == *"/staging/iris-instructions-203.0.113.3-$cap.envelope flash:/guest-share/iris-instructions.bootstrap" ]] || return 1
-  [[ "${copies[6]}" == *"/staging/bundle-sha256-$cap flash:/guest-share/bundle.tgz.sha256" ]] || return 1
-  [[ "${copies[7]}" == *"/iris-agent.tgz flash:/guest-share/bundle.tgz" ]]
+  [[ "${copies[0]}" == *"/bootstrap.sh flash:/guest-share/.iris-upload-$cap-bootstrap.sh" ]] || return 1
+  [[ "${copies[1]}" == *"/staging/iris-agent-203.0.113.3-$cap.conf flash:/guest-share/.iris-upload-$cap-iris-agent.conf" ]] || return 1
+  [[ "${copies[2]}" == *"/staging/rpc-secret-$cap flash:/guest-share/.iris-upload-$cap-rpc-secret" ]] || return 1
+  [[ "${copies[3]}" == *"/iris-catalog.pem flash:/guest-share/.iris-upload-$cap-iris-catalog.pem" ]] || return 1
+  [[ "${copies[4]}" == *"/iris-signers.pem flash:/guest-share/.iris-upload-$cap-iris-signers.allowed_signers" ]] || return 1
+  [[ "${copies[5]}" == *"/staging/iris-instructions-203.0.113.3-$cap.envelope flash:/guest-share/.iris-upload-$cap-iris-instructions.bootstrap" ]] || return 1
+  [[ "${copies[6]}" == *"/staging/bundle-sha256-$cap flash:/guest-share/.iris-upload-$cap-bundle.tgz.sha256" ]] || return 1
+  [[ "${copies[7]}" == *"/iris-agent.tgz flash:/guest-share/.iris-upload-$cap-bundle.tgz" ]]
 }
 
 @test "an invalid supplied staging capability is refused without rendering secrets" {
@@ -181,6 +181,14 @@ setup() {
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"ERROR: IRIS_STAGING_CAPABILITY must be 32 lowercase hexadecimal characters"* ]] || return 1
   [[ "$output" != *"catalog_token = deadbeef"* ]]
+}
+
+@test "publication uses the fixed EEM guest-share root even with a stage override" {
+  run env STAGE=/flash/guest-share/custom bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"stage_dir = /flash/guest-share/custom"* ]] || return 1
+  [[ "$output" == *"guestshell run bash /flash/guest-share/.iris-upload-"*" --publish-inputs "* ]] || return 1
+  [[ "$output" != *"/custom/.iris-upload-"* ]]
 }
 
 @test "installer source never recursively removes the live Guest Shell stage" {
@@ -376,6 +384,7 @@ STUB
   mkdir -p "$STUBDIR/server"
   cp "$BATS_TEST_DIRNAME/../../server/time_preflight.py" "$STUBDIR/server/"
   ln -s "$INSTALL" "$STUBDIR/device/device-install.sh"
+  cp "$BATS_TEST_DIRNAME/../guestshell-publish.sh" "$STUBDIR/device/"
   cp "$BATS_TEST_DIRNAME/../bootstrap.sh" "$STUBDIR/device/bootstrap.sh" 2>/dev/null || true
 
   ARTDIR="$BATS_TEST_TMPDIR/artifacts"
@@ -770,6 +779,9 @@ case "\$cmds" in
   *'show ntp status'*) echo 'Clock is synchronized, stratum 5, reference is 192.0.2.123' ;;
   *'show app-hosting list'*) echo 'guestshell RUNNING' ;;
   *'copy https://'*) echo '123 bytes copied' ;;
+  *'--publish-inputs '*)
+    last="\${cmds##* }"
+    echo "IRIS-INPUTS-PUBLISHED:$cap:\${last#*:}" ;;
   *'copy running-config startup-config'*) echo '[OK]' ;;
   *'show running-config'*)
     echo 'show running-config | include no ip routing'

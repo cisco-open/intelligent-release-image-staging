@@ -62,7 +62,8 @@ setup() {
   [[ "$output" == *"stage_dir = /bootflash/guest-share/iris"* ]]
   [[ "$output" == *"target_fs = bootflash:"* ]]
   [[ "$output" == *"catalog_ca = /bootflash/guest-share/iris/iris-catalog.pem"* ]]
-  [[ "$output" == *"bootflash:guest-share/bootstrap.sh"* ]]
+  [[ "$output" == *"bootflash:guest-share/.iris-upload-"*"-bootstrap.sh"* ]]
+  [[ "$output" == *"bash /bootflash/guest-share/bootstrap.sh"* ]]
   [[ "$output" != *"target_fs = flash:"* ]]
 }
 
@@ -81,14 +82,14 @@ setup() {
   [ "$status" -eq 0 ] || return 1
   mapfile -t copies < <(printf '%s\n' "$output" | grep '^copy https://')
   [ "${#copies[@]}" -eq 8 ] || return 1
-  [[ "${copies[0]}" == *"/bootstrap.sh bootflash:guest-share/bootstrap.sh" ]] || return 1
-  [[ "${copies[1]}" == *"/staging/iris-agent-router-1-$cap.conf bootflash:guest-share/iris-agent.conf" ]] || return 1
-  [[ "${copies[2]}" == *"/staging/rpc-secret-$cap bootflash:guest-share/rpc-secret" ]] || return 1
-  [[ "${copies[3]}" == *"/iris-catalog.pem bootflash:guest-share/iris-catalog.pem" ]] || return 1
-  [[ "${copies[4]}" == *"/iris-signers.pem bootflash:guest-share/iris-signers.allowed_signers" ]] || return 1
-  [[ "${copies[5]}" == *"/staging/iris-instructions-router-1-$cap.envelope bootflash:guest-share/iris-instructions.bootstrap" ]] || return 1
-  [[ "${copies[6]}" == *"/staging/bundle-sha256-$cap bootflash:guest-share/bundle.tgz.sha256" ]] || return 1
-  [[ "${copies[7]}" == *"/iris-agent.tgz bootflash:guest-share/bundle.tgz" ]]
+  [[ "${copies[0]}" == *"/bootstrap.sh bootflash:guest-share/.iris-upload-$cap-bootstrap.sh" ]] || return 1
+  [[ "${copies[1]}" == *"/staging/iris-agent-router-1-$cap.conf bootflash:guest-share/.iris-upload-$cap-iris-agent.conf" ]] || return 1
+  [[ "${copies[2]}" == *"/staging/rpc-secret-$cap bootflash:guest-share/.iris-upload-$cap-rpc-secret" ]] || return 1
+  [[ "${copies[3]}" == *"/iris-catalog.pem bootflash:guest-share/.iris-upload-$cap-iris-catalog.pem" ]] || return 1
+  [[ "${copies[4]}" == *"/iris-signers.pem bootflash:guest-share/.iris-upload-$cap-iris-signers.allowed_signers" ]] || return 1
+  [[ "${copies[5]}" == *"/staging/iris-instructions-router-1-$cap.envelope bootflash:guest-share/.iris-upload-$cap-iris-instructions.bootstrap" ]] || return 1
+  [[ "${copies[6]}" == *"/staging/bundle-sha256-$cap bootflash:guest-share/.iris-upload-$cap-bundle.tgz.sha256" ]] || return 1
+  [[ "${copies[7]}" == *"/iris-agent.tgz bootflash:guest-share/.iris-upload-$cap-bundle.tgz" ]]
 }
 
 @test "router rejects an invalid supplied staging capability before rendering credentials" {
@@ -282,6 +283,12 @@ case "$cmds" in
   *"copy https://"*)
     echo "123 bytes copied"
     ;;
+  *"--publish-inputs "*)
+    # Transport boundary only; actual publisher execution is covered by the
+    # bootstrap and full installer publication regression tests.
+    last="${cmds##* }"
+    echo "IRIS-INPUTS-PUBLISHED:$IRIS_STAGING_CAPABILITY:${last#*:}"
+    ;;
   *"copy running-config startup-config"*)
     echo "[OK]"
     ;;
@@ -299,6 +306,7 @@ STUB
   chmod +x "$STUBDIR/bin/curl"
 
   ln -sf "$INSTALL" "$STUBDIR/device/router-install.sh"
+  cp "$BATS_TEST_DIRNAME/../guestshell-publish.sh" "$STUBDIR/device/"
   cp "$BATS_TEST_DIRNAME/../bootstrap.sh" "$STUBDIR/device/bootstrap.sh"
 
   ARTDIR="$BATS_TEST_TMPDIR/artifacts"

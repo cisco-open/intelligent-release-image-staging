@@ -34,7 +34,7 @@ running on stale networking from an earlier install.
 
 ## What the installer lands on the device
 
-Both installers push these files to the guest share root:
+Both installers upload these files to temporary names in the guest share root:
 
 | File | Device-side name | What it is |
 | --- | --- | --- |
@@ -43,8 +43,15 @@ Both installers push these files to the guest share root:
 | Agent bundle | `bundle.tgz` | The agent code, the bootstrap script, the Guest Shell start script, the log rotation script, the peer-transfer hook, and a build of `aria2c` for the device architecture. |
 | Catalog certificate | `iris-catalog.pem` | The server certificate the agent pins for its calls to the catalog. |
 | Bootstrap script | `bootstrap.sh` | The script the EEM applet runs. |
+| Bundle digest | `bundle.tgz.sha256` | The expected SHA-256 of the complete bundle. |
+| Instruction signer list | `iris-signers.allowed_signers` | The public keys allowed to sign device instructions. |
+| First instruction | `iris-instructions.bootstrap` | The encrypted, signed instruction prepared for this device. |
 
-The installer then installs one EEM applet:
+After all eight files arrive, bootstrap checks each file's size and hash under
+its normal lock. It renames complete files to the names above, with the bundle
+last. A failed copy leaves previously published inputs in place.
+
+The installer configures one EEM applet:
 
 ```text
 event manager applet IRIS-AGENT authorization bypass
@@ -76,6 +83,12 @@ upgrade for Guest Shell, so read
 The applet is named `IRIS-AGENT` and fires every 60 seconds. A device that
 carries no such applet did not finish the install. The confirmation steps are in
 [What a device needs before onboarding](device-requirements.md).
+
+An upload confirmation proves that complete inputs were published. Bootstrap
+records its later bundle decision in `bundle-outcome.json` inside the Guest
+Shell working directory. Check the latest heartbeat separately to confirm that
+the agent runs and reaches the catalog. See
+[Guest Shell troubleshooting](../user-guide/troubleshooting.md#guest-shell).
 
 ## Next steps
 

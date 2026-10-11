@@ -17,6 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Upload Guest Shell onboarding inputs under temporary names, then verify and
+  atomically publish each complete file under the bootstrap lock, with the
+  bundle last. Failed copies preserve published inputs. Retain a bounded
+  bundle acceptance or rejection record without credentials; upload completion
+  remains separate from runtime startup and catalog contact.
+
 - Refuse redirects on authenticated device catalog requests, preventing bearer
   forwarding and request replay at redirect destinations, including plaintext
   URLs. Preserve pinned TLS verification and bounded response handling.
