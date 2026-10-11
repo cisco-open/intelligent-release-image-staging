@@ -49,10 +49,12 @@ The heartbeat reports staging progress:
 | `current_image_id` | The image that supplied this heartbeat's identity and observation. |
 | `stage_state` | One state for the tick: `staging`, `downloading`, `transferring_to_ios`, `ready`, or `error`. |
 | `stage_error` | The reason for `stage_state`. |
-| `staged_image_ids` | Assigned images staged and verified as of the last heartbeat. |
-| `errored_image_ids` | Assigned images that failed on the last tick. |
+| `staged_image_ids` | For multiple images, those staged and verified as of the last heartbeat. |
+| `errored_image_ids` | For multiple images, those that failed on the last tick. |
 
-An image in both lists shows its current error, not the older staged flag. See [Assign images and check staging status](../user-guide/assignments.md#unassigned-image-park).
+For one image, `current_image_id` and `stage_state` report its staging status;
+the two lists are omitted. An image in both lists shows its current error, not
+the older staged flag. See [Assign images and check staging status](../user-guide/assignments.md#unassigned-image-park).
 
 ## Inventory CSV columns
 
