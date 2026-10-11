@@ -52,7 +52,7 @@ docker compose -f server/docker-compose.yml exec iris \
   iris-management-token rotate
 ```
 
-2. Open **Devices** in the Console. The page loads.
+2. Open **Inventory** in the Console. The page loads.
 3. Retire the old value:
 
 ```bash
@@ -68,21 +68,23 @@ docker compose -f server/docker-compose.yml exec iris \
 2. Copy that file to the Console host over verified SSH, under a temporary name
    in its `IRIS_TIER_AUTH_DIR`. Set owner `10001:10001` and mode 600, then
    rename it to `current.json` there.
-3. Open **Devices** in the Console. The page loads.
+3. Open **Inventory** in the Console. The page loads.
 4. On the server host, run
    `iris_server exec iris iris-management-token retire-previous` and remove the
    temporary copies.
 
 ### On Kubernetes
 
-1. Generate the new token and put the old one in `previous`:
+1. Use the protected files from [installation](../install/kubernetes.md#3-create-the-namespace-keys-and-certificates).
+   Save the old token, then generate its replacement:
 
 ```bash
-cp iris-tier-auth/current iris-tier-auth/previous
-openssl rand -hex 32 > iris-tier-auth/current
+umask 077
+cp /secure/path/management-current /secure/path/management-previous
+openssl rand -hex 32 > /secure/path/management-current
 kubectl -n iris create secret generic iris-tier-auth \
-  --from-file=current=iris-tier-auth/current \
-  --from-file=previous=iris-tier-auth/previous \
+  --from-file=current=/secure/path/management-current \
+  --from-file=previous=/secure/path/management-previous \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -95,19 +97,17 @@ kubectl -n iris rollout status deployment/iris-seed-server
 kubectl -n iris rollout status deployment/iris-console
 ```
 
-3. Open **Devices** in the Console. The page loads.
+3. Open **Inventory** in the Console. The page loads.
 4. Empty `previous`, apply the Secret again, and restart both Deployments:
 
 ```bash
-: > iris-tier-auth/previous
+: > /secure/path/management-previous
 kubectl -n iris create secret generic iris-tier-auth \
-  --from-file=current=iris-tier-auth/current \
-  --from-file=previous=iris-tier-auth/previous \
+  --from-file=current=/secure/path/management-current \
+  --from-file=previous=/secure/path/management-previous \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n iris rollout restart deployment/iris-seed-server deployment/iris-console
 ```
-
-Secret and Deployment names: [Install on Kubernetes](../install/kubernetes.md).
 
 ## Rotate the certificate that devices trust
 
@@ -141,7 +141,7 @@ the server. New authority or new self-signed certificate:
    beside the current one.
 2. Restart the Console. It still reaches the server.
 3. Replace the server pair and restart the server.
-4. Open **Devices** in the Console. The page loads.
+4. Open **Inventory** in the Console. The page loads.
 5. Remove the old trust entry and restart the Console again.
 
 ### On Kubernetes
@@ -153,7 +153,7 @@ the server. New authority or new self-signed certificate:
    `iris-server-api.iris.svc`.
 3. Restart `deployment/iris-seed-server` and wait for its rollout. The management
    listener loads its certificate when it starts.
-4. Open **Devices** in the Console. Once it loads, remove the old authority from
+4. Open **Inventory** in the Console. Once it loads, remove the old authority from
    `iris-management-ca`, then restart the Console and wait for its rollout.
 
 Run these rollouts with `kubectl -n iris rollout restart deployment/<name>`
@@ -187,9 +187,8 @@ See [Find your way around the Console](../user-guide/console.md).
 
 ## Rotate the seeder announce credential
 
-The server's seeder announces itself to the tracker with its own credential
-in an HTTPS authorization header. Rotation keeps the published torrent URLs
-and image hashes unchanged.
+The seeder announces to the tracker with its own credential in an HTTPS authorization header.
+Rotation keeps the published torrent URLs and image hashes unchanged.
 
 1. Freeze maintenance for your layout.
 2. Run `rotate-seeder-announce --maintenance-frozen`. It exits zero only after

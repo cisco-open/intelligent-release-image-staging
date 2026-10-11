@@ -93,3 +93,31 @@ def test_upgrade_keeps_three_steps_and_passes_reviewed_roots():
     assert re.findall(r"^## (\d+)\.", source, re.M) == ["1", "2", "3"]
     assert "IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots" in source
     assert "### Onboard the devices again" in source
+
+
+def test_kubernetes_token_rotation_reuses_protected_installation_files():
+    install = _document("install/kubernetes.md")
+    rotations = _document("admin-guide/rotations.md")
+    token_section = rotations.split("## Rotate the certificate that devices trust", 1)[0]
+    kube = token_section.split("### On Kubernetes", 1)[1]
+    for name in ("current", "previous"):
+        argument = f"--from-file={name}=/secure/path/management-{name}"
+        assert argument in install
+        assert kube.count(argument) == 2
+        assert f"iris-tier-auth/{name}" not in kube
+    assert "umask 077" in kube
+    assert "cp /secure/path/management-current /secure/path/management-previous" in kube
+    assert "**Inventory**" in kube
+    assert "#3-create-the-namespace-keys-and-certificates" in kube
+
+
+def test_browser_import_distinguishes_saved_override_from_each_live_listener():
+    page = " ".join(_document("install/certificates-and-tokens.md").split())
+    help_text = " ".join((ROOT / "server/webroot/help-server.html").read_text().split())
+    assert "saved but reload was not confirmed" in page
+    assert "restart the others too" in page
+    assert "new trusted connection to each Console" in page
+    assert "reload reaches only the Console that handled the request" in page
+    assert "saved but reload was not confirmed" in help_text
+    assert "Restart other Console instances too" in help_text
+    assert "new trusted connection to each instance" in help_text
