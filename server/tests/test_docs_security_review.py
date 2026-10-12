@@ -23,6 +23,15 @@ def page(name):
     return " ".join((DOCS / name).read_text().split())
 
 
+def test_origin_storage_error_does_not_promise_that_approval_was_not_saved():
+    problems = page("problems.md")
+    unavailable = problems.split("## origin_enforcement_unavailable", 1)[1]
+    unavailable = unavailable.split("## ", 1)[0]
+    assert "The approval may already have been saved" in unavailable
+    assert "reread the current approval and status before starting a new preview" in unavailable
+    assert "no new restriction was approved" not in unavailable
+
+
 def test_capability_repair_does_not_claim_compose_run_drops_service_limits():
     compose = (ROOT / "server/docker-compose.yml").read_text()
     assert "cap_drop: [ALL]" in compose

@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Clarify that a distribution-access storage error can follow a saved approval;
+  reread the current approval and status before a new preview.
+
 - Keep separate, request-bound native package generations when replacing
   instruction roots on a prebuilt installation. Recovery retains the original
   caches and resumes only the approved successor generation.

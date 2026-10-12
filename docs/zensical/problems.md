@@ -175,7 +175,7 @@ The request body, declared or received, is larger than this operation's document
 409: the reviewed restriction cannot be applied safely. Resolve the preview's checks before applying.
 ## origin_enforcement_unavailable
 
-503: required private state cannot be read or validated. Check tracker health and storage; no new restriction was approved by this request.
+503: required private state could not be read or saved reliably. The approval may already have been saved. Check tracker health and storage, then reread the current approval and status before starting a new preview.
 ## origin_review_stale
 
 409: the preview no longer matches the exact current devices, addresses, policy or settings. Refresh and preview again.
