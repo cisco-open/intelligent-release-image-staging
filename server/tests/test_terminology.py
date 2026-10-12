@@ -443,6 +443,12 @@ TERM_FILE_ALLOWLIST.extend(
 # guarded against retired deployment/peer vocabulary. No attachment exemption
 # is implied, even inside these scopes.
 TERM_SCOPE_ALLOWLIST = [
+    ("tools/iris_installer/prebuilt_trust.py", "_caches", ("receipt",),
+     "authenticates immutable predecessor build finalization and native-wrapper "
+     "provenance, not deployment or peer-transfer records"),
+    ("server/tests/test_prebuilt_trust_rotation.py", "rotating", ("receipt",),
+     "build-finalization fixture checks provenance while simulating only the "
+     "licensed native wrapper SDK; not deployment or peer-transfer records"),
     ("tools/iris_installer/deploy.py", "_finalized_package_hashes", ("receipt",),
      "compares native-wrapper bytes with their exact runtime finalization record"),
     ("tools/iris_installer/deploy.py", "DockerInstall._acquire_prebuilt_packages", ("receipt",),
@@ -672,6 +678,20 @@ def test_schedule_receipt_exemptions_preserve_other_domains(tmp_path, monkeypatc
 def test_build_record_exemptions_preserve_operator_and_peer_domains(tmp_path, monkeypatch):
     sources = {
         "tools/iris_installer/release_kit.py": "receipt = None\nattachment = None\n",
+        "tools/iris_installer/prebuilt_trust.py": (
+            "receipt = None\n"
+            "def _caches():\n"
+            "    receipt = None\n"
+            "    attachment = None\n"
+            "def other():\n"
+            "    receipt = None\n"),
+        "server/tests/test_prebuilt_trust_rotation.py": (
+            "receipt = None\n"
+            "def rotating():\n"
+            "    receipt = None\n"
+            "    attachment = None\n"
+            "def other():\n"
+            "    receipt = None\n"),
         "tools/iris_installer/deploy.py": (
             "receipt = None\n"
             "def _finalized_package_hashes():\n"
@@ -694,6 +714,12 @@ def test_build_record_exemptions_preserve_operator_and_peer_domains(tmp_path, mo
     monkeypatch.setitem(globals(), "_tracked_files", lambda: list(sources))
     assert [(path, line, term) for path, line, term, *_rest in _iter_hits()] == [
         ("tools/iris_installer/release_kit.py", 2, "attachment"),
+        ("tools/iris_installer/prebuilt_trust.py", 1, "receipt"),
+        ("tools/iris_installer/prebuilt_trust.py", 4, "attachment"),
+        ("tools/iris_installer/prebuilt_trust.py", 6, "receipt"),
+        ("server/tests/test_prebuilt_trust_rotation.py", 1, "receipt"),
+        ("server/tests/test_prebuilt_trust_rotation.py", 4, "attachment"),
+        ("server/tests/test_prebuilt_trust_rotation.py", 6, "receipt"),
         ("tools/iris_installer/deploy.py", 1, "receipt"),
         ("tools/iris_installer/deploy.py", 4, "attachment"),
         ("tools/iris_installer/deploy.py", 8, "attachment"),
