@@ -386,6 +386,8 @@ STUB
   ln -s "$INSTALL" "$STUBDIR/device/device-install.sh"
   cp "$BATS_TEST_DIRNAME/../guestshell-publish.sh" "$STUBDIR/device/"
   cp "$BATS_TEST_DIRNAME/../bootstrap.sh" "$STUBDIR/device/bootstrap.sh" 2>/dev/null || true
+  cp "$BATS_TEST_DIRNAME/guest_publish_stub.py" "$STUBDIR/lab/guest-publish.py"
+  export IRIS_TEST_GUEST_PUBLISH_SOURCE="$BATS_TEST_DIRNAME/../../lab/guest-publish.py"
 
   ARTDIR="$BATS_TEST_TMPDIR/artifacts"
   mkdir -p "$ARTDIR/staging"

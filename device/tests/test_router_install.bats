@@ -308,6 +308,9 @@ STUB
   ln -sf "$INSTALL" "$STUBDIR/device/router-install.sh"
   cp "$BATS_TEST_DIRNAME/../guestshell-publish.sh" "$STUBDIR/device/"
   cp "$BATS_TEST_DIRNAME/../bootstrap.sh" "$STUBDIR/device/bootstrap.sh"
+  cp "$BATS_TEST_DIRNAME/guest_publish_stub.py" "$STUBDIR/lab/guest-publish.py"
+  export IRIS_TEST_GUEST_PUBLISH_SOURCE="$BATS_TEST_DIRNAME/../../lab/guest-publish.py"
+  export IRIS_TEST_GUEST_PUBLISH_LOG="$BATS_TEST_TMPDIR/guest-publication.jsonl"
 
   ARTDIR="$BATS_TEST_TMPDIR/artifacts"
   mkdir -p "$ARTDIR/staging"
@@ -362,6 +365,37 @@ _router_install_run_live() {
         "$ARTDIR/staging/iris-agent-router-1-$TEST_CAP.conf" "$mode"
       [ "$status" -eq 0 ] || return 1
     done
+  done
+}
+
+@test "router publication uses the prompt-aware helper contract before saving configuration" {
+  _router_install_stub_setup
+  run _router_install_run_live
+  [ "$status" -eq 0 ] || return 1
+  run python3 - "$IRIS_TEST_GUEST_PUBLISH_LOG" "$ARTDIR/iris-agent.tgz" "$TEST_CAP" <<'PY'
+import hashlib, json, pathlib, sys
+rows = [json.loads(row) for row in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+assert len(rows) == 1
+args = rows[0]
+assert len(args) == 11
+assert args[:3] == ['192.0.2.10', '/bootflash/guest-share', sys.argv[3]]
+raw = pathlib.Path(sys.argv[2]).read_bytes()
+assert args[-1] == str(len(raw)) + ':' + hashlib.sha256(raw).hexdigest()
+PY
+  [ "$status" -eq 0 ] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" '--publish-inputs')" -eq 0 ] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" 'copy running-config startup-config')" -eq 1 ]
+}
+
+@test "router refuses failed missing and duplicate helper outcomes before verification or persistence" {
+  _router_install_stub_setup
+  for outcome in failed missing duplicate; do
+    printf '0\n' > "$FAKE_STATE_DIR/apphost_n"
+    IRIS_TEST_GUEST_PUBLISH_RESULT="$outcome" run _router_install_run_live
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"publication"* ]] || return 1
+    [ "$(_calls_containing "$FAKE_COMMAND_LOG" '__IRIS_VERIFY_RUNNING__')" -eq 0 ] || return 1
+    [ "$(_calls_containing "$FAKE_COMMAND_LOG" 'copy running-config startup-config')" -eq 0 ] || return 1
   done
 }
 
