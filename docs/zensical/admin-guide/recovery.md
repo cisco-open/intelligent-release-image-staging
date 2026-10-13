@@ -61,6 +61,8 @@ sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris replace-recove
 ```
 
 Compare the public recipient with your independent copy and confirm when asked.
+The worker checks the matching host-prepared key before backup or downtime and
+checks it again before changing encrypted data.
 Use `status` to check the operation. This private recovery key stays outside the
 Console. Private signing roots must remain on their holders' machines.
 

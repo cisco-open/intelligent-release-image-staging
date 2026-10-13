@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Validate the host-prepared recovery key before backup or downtime, then
+  recheck its approved bytes before changing encrypted configuration.
 - Document first-time backup signer trust, separate IOx assembly from native
   signing, and clarify architecture-specific clients and ARM build prerequisites.
 - Keep tracker announcements responsive when a device reaches its overall
