@@ -17,7 +17,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools"))
-from iris_installer import cli, key_setup, local_setup as setup
+from iris_installer import automatic_keys, cli, key_setup, local_setup as setup
 from iris_installer.state import InstallError, Journal
 
 
@@ -255,7 +255,8 @@ def test_automatic_key_creation_and_signing_receive_selected_mode(tmp_path, term
 
 
 @pytest.mark.skipif(not shutil.which("age-keygen"), reason="age required")
-def test_real_automatic_keys_and_pinned_approval_need_no_password_input(tmp_path, monkeypatch, capsys):
+def test_real_automatic_keys_and_pinned_approval_need_no_password_input(tmp_path, monkeypatch, capsys,
+                                                                    packaged_askpass):
     folder = key_setup.private_directory(tmp_path / "automatic")
     monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("automatic keys must not ask for passwords"))
     roots, recipient = setup.prepare_keys(folder, mode="automatic")
@@ -276,6 +277,26 @@ def test_real_automatic_keys_and_pinned_approval_need_no_password_input(tmp_path
     with pytest.raises(InstallError, match="does not match"):
         setup.sign_request(wrong, folder, mode="automatic")
     assert set((folder / "approvals").iterdir()) == preserved
+
+
+@pytest.fixture
+def packaged_askpass(tmp_path, monkeypatch):
+    """Use real shipped bytes owned by the test user, as a package install does."""
+    helper = tmp_path / "automatic_askpass.py"
+    helper.write_bytes(automatic_keys.ASKPASS.read_bytes())
+    helper.chmod(0o700)
+    monkeypatch.setattr(automatic_keys, "ASKPASS", helper)
+    return helper
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="real foreign-owner helper refusal requires root")
+def test_automatic_setup_refuses_foreign_owned_helper(tmp_path, packaged_askpass):
+    os.chown(packaged_askpass, 65534, 65534)
+    folder = key_setup.private_directory(tmp_path / "automatic")
+    with pytest.raises(InstallError, match="passphrase helper is unavailable or unsafe"):
+        setup.prepare_keys(folder, mode="automatic")
+    assert not (folder / "root-a/root-a").exists()
+    assert not (folder / "root-b").exists()
 
 
 def test_existing_manual_keys_are_not_replaced_by_automatic_mode(keys, monkeypatch):
