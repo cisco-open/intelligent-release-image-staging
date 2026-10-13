@@ -120,6 +120,17 @@ def test_heartbeat_lease_and_master_toggle_stop_the_worker(runtime):
     assert runtime[-1] == []
 
 
+@pytest.mark.parametrize("streaming", [None, "off", "false", "invalid", False])
+def test_ten_second_policy_does_not_enable_streaming(runtime, streaming):
+    if streaming is None:
+        runtime[0].pop("telemetry_stream")
+    else:
+        runtime[0]["telemetry_stream"] = streaming
+    assert runtime[3]["peer_telemetry_interval_s"] == 10
+    assert not tick(runtime)
+    assert runtime[-1] == []
+
+
 def test_failed_checkpoint_prevents_post_and_sequence_advance(runtime):
     def fail(_state): raise OSError("no space")
     runtime[2].checkpoint = fail

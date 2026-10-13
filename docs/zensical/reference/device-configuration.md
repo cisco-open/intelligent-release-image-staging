@@ -120,7 +120,7 @@ for what it shows once it is on.
 
 | Platform | Delivery |
 | --- | --- |
-| Guest Shell / router | `TELEMETRY_STREAM=on` in the installer environment, or the Console's *Telemetry streaming* checkbox. |
+| Guest Shell / router | `TELEMETRY_STREAM=on` in the installer environment, or the Console's **Live telemetry** checkbox. |
 | IOx | `IRIS_TELEMETRY_STREAM=on` at deploy time. A redeploy updates the persisted configuration. |
 | IOS-XR appmgr | `IRIS_TELEMETRY_STREAM=on` at deploy time, or the Console checkbox. Re-onboard the device to apply a change. |
 

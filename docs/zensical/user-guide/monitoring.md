@@ -55,7 +55,7 @@ path your platform uses.
 
 | Platform | How you set it |
 | --- | --- |
-| Guest Shell / router | `TELEMETRY_STREAM=on` at install, or the Console's *Telemetry streaming* checkbox. |
+| Guest Shell / router | `TELEMETRY_STREAM=on` at install, or the Console's **Live telemetry** checkbox. |
 | IOx | `IRIS_TELEMETRY_STREAM=on` at deploy time. |
 | IOS-XR appmgr | `IRIS_TELEMETRY_STREAM=on` at deploy time, or the Console checkbox; re-onboard to apply. |
 

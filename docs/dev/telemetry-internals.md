@@ -31,6 +31,10 @@ Console admits ten seconds only after a fresh capability heartbeat and uses
 the normal peer-policy revision and preview transaction. Returning to sixty
 seconds removes the override, preserving other device QoS settings.
 
+Both ordinary peer observations and accelerated reporting require the device's
+`telemetry` and `telemetry_stream` settings to be enabled. Saving an interval
+does not turn streaming on; select it during onboarding, including test setup.
+
 The helper started by `iris_agent.py --peer-telemetry` verifies the local signed
 cache, shares the ordinary agent's state lock, and only reads aria observations.
 It posts to the device-bound `live-telemetry` endpoint without refreshing the

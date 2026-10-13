@@ -156,3 +156,23 @@ def test_guest_shell_distinguishes_publication_marker_from_file_copy_and_readine
     assert "installer's `inputs published` confirmation" in page
     assert "A file-copy confirmation alone does not prove this" in page
     assert "later bundle decision" in page and "latest heartbeat separately" in page
+
+
+def test_peer_reporting_guidance_names_streaming_onboarding_prerequisite():
+    page = " ".join(_document("user-guide/console.md").split())
+    help_text = " ".join((ROOT / "server/webroot/help-device.html").read_text().split())
+    contributor = " ".join((ROOT / "docs/dev/telemetry-internals.md").read_text().split())
+    ui = (ROOT / "server/console-ui/src/inventory-actions.jsx").read_text()
+    for setting, label in (("telemetry", "Telemetry reports"), ("telemetry_stream", "Live telemetry")):
+        assert re.search(r"checkbox\('" + setting + r"', '[^']+', '" + label + r"'\)", ui)
+        assert f"**{label}**" in page
+        assert f"<strong>{label}</strong>" in help_text
+    assert "Device-to-device arrows and faster reporting need" in page
+    assert "enabled when you onboard the device" in page
+    assert "monitoring.md#turn-on-and-tune-live-transfer-samples" in page
+    assert "enabled when you onboard the device" in help_text
+    assert "interval does not turn streaming on" in help_text
+    assert "`telemetry` and `telemetry_stream` settings to be enabled" in contributor
+    for name in ("user-guide/monitoring.md", "reference/device-configuration.md"):
+        assert "Console's **Live telemetry** checkbox" in _document(name)
+        assert "Telemetry streaming" not in _document(name)

@@ -61,6 +61,10 @@ speed and report age. Gray spokes show participation. Old observations expire,
 even when the map is paused;
 connections with no unique device match remain unattributed.
 
+Device-to-device arrows and faster reporting need **Telemetry reports** and
+**Live telemetry** enabled when you onboard the device. See
+[Turn on and tune live transfer samples](monitoring.md#turn-on-and-tune-live-transfer-samples).
+
 The summary counts image-peer entries: one device can appear under several
 images. An unavailable snapshot clears the count. The embedded map pauses when
 you leave Swarm or hide the tab; a manual pause stays paused when you return.
