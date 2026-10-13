@@ -61,13 +61,23 @@ path your platform uses.
 
 Only `on`, `1`, `true` or `yes` turns streaming on. See
 [Add and onboard devices](onboarding.md). A tick is one pass of the agent's
-check-in loop; sampling follows link quality:
+check-in loop. Sampling depends on catalog response time, connection failures,
+and the image's average download speed:
 
-| Link quality | Cadence |
+| Sampling class | Cadence |
 | --- | --- |
-| `good` | Every tick (60 s). |
+| `good` | Every tick (60 s), or up to every 10 s with faster reporting enabled. |
 | `constrained` | Every 4th tick (~4 min). |
 | `bad` | No samples. |
+
+The agent uses `constrained` when the median catalog response time exceeds
+250 ms or the image's recorded average transfer speed is below 1 MiB/s.
+Three consecutive catalog failures stop sampling until contact recovers.
+
+Choose faster reporting in the device's [Peer telemetry settings](console.md#peer-transfers).
+The 10-second setting applies only while sampling is `good`; a constrained
+device keeps its slower cadence. An idle seeder suppresses repeated idle
+reports. Check **Reported interval** to see the latest observed cadence.
 
 Call `POST /api/v1/telemetry/stream` with `{"every": <1..60>, "pause":
 <bool>}` to change the rate fleet-wide; `pause` stops sampling. See

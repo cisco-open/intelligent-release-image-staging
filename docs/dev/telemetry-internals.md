@@ -41,7 +41,14 @@ It posts to the device-bound `live-telemetry` endpoint without refreshing the
 heartbeat or running staging, instruction application, token refresh or catalog
 polls. The successful-heartbeat and same-boot context leases last 180 seconds;
 expired policy, disabled streaming and a lost context stop accelerated work.
-Pause, slower signed cadence and constrained links take precedence. Failed POSTs
+Pause, slower signed cadence and constrained sampling take precedence. The
+classifier uses catalog RTT and the image's recorded average transfer speed:
+over 250 ms or below 1 MiB/s respectively means `constrained`. The average uses
+main-agent timestamps from downloading to copied or seeding-only, including
+time between checks. A completed small image can retain that class even when
+current RTT is low. Tests must
+distinguish the accepted interval setting from actual accelerated observations;
+an idle completed transfer does not prove ten-second reporting. Failed POSTs
 back off. Idle seeders send one zero-rate observation and suppress repeated idle
 POSTs. A device with several images still sends at most one accelerated envelope
 per cycle; the live table remains one current image per device.

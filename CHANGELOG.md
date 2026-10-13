@@ -22,6 +22,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 - Explain that peer arrows and faster reporting require telemetry streaming
   to be enabled during device onboarding; saving an interval keeps that choice.
+  Document the response-time and download-speed limits on faster reporting.
 
 - Publish the ARM Guest Shell upgrade bundle under its served filename so
   source-built application upgrades replace the existing bundle and checksum.

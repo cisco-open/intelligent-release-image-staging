@@ -4,6 +4,7 @@
 
 """Execute the documented readiness decision and guard recovery commands."""
 import json
+import importlib.util
 from pathlib import Path
 import re
 import sys
@@ -176,3 +177,24 @@ def test_peer_reporting_guidance_names_streaming_onboarding_prerequisite():
     for name in ("user-guide/monitoring.md", "reference/device-configuration.md"):
         assert "Console's **Live telemetry** checkbox" in _document(name)
         assert "Telemetry streaming" not in _document(name)
+
+
+def test_monitoring_explains_the_actual_sampling_limits():
+    path = ROOT / "device/agent/telemetry_report.py"
+    spec = importlib.util.spec_from_file_location("docs_telemetry_report", path)
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    page = " ".join(_document("user-guide/monitoring.md").split())
+    assert f"{telemetry.RTT_CONSTRAINED_MS} ms" in page
+    assert telemetry.SLOW_BPS == 1024 * 1024
+    assert "below 1 MiB/s" in page
+    assert telemetry.FAIL_STREAK_BAD == 3
+    assert "Three consecutive catalog failures stop sampling" in page
+    assert telemetry.STREAM_TIER_TICKS == {"good": 1, "constrained": 4}
+    assert "Every 4th tick (~4 min)" in page
+    assert "10-second setting applies only while sampling is `good`" in page
+    assert "idle seeder suppresses repeated idle reports" in page
+    # A quick catalog round trip does not override the image's slow average.
+    link = {"link": {"rtt_ms": [22, 26], "fail_streak": 0}}
+    assert telemetry.classify(link, telemetry.SLOW_BPS - 1) == "constrained"
+    assert telemetry.classify(link, telemetry.SLOW_BPS) == "good"
