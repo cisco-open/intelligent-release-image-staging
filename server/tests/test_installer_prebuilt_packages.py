@@ -6,7 +6,9 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -367,3 +369,67 @@ def test_source_acquisition_retains_original_download_and_wrapper_commands(adapt
                                                      "stage-iox-package.sh", "build-xr-package.sh"]
     assert all("--finalized-dir" not in argv for argv in calls)
     assert set(obj.journal.document["completed"]["packages"]) == deploy.NATIVE_FILES
+
+
+@pytest.mark.parametrize("target", CLASSES)
+def test_actual_native_builder_routes_all_three_commands_through_private_diagnostics(packaging, target, monkeypatch):
+    obj = packaging(target)
+    assert Path(deploy.__file__).resolve().parents[2] == Path(__file__).resolve().parents[2]
+    original_env = dict(obj.env)
+    generator = obj.runner
+    calls = []
+
+    def instrumented(command, **kwargs):
+        assert set(kwargs) == {"env", "diagnostics_dir"}
+        assert kwargs["diagnostics_dir"] == obj.base
+        calls.append(command)
+        return generator(command, env=kwargs["env"])
+
+    monkeypatch.setattr(deploy, "run", instrumented)
+    obj.runner = instrumented
+    obj.packages()
+    assert [Path(argv[1]).name for argv in calls] == [
+        "stage-iox-package.sh", "stage-iox-package.sh", "build-xr-package.sh"]
+    assert obj.env == original_env and set(obj.journal.document["completed"]["packages"]) == deploy.NATIVE_FILES
+
+
+@pytest.mark.parametrize("target", CLASSES)
+@pytest.mark.parametrize("failed_command", [1, 3])
+@pytest.mark.parametrize("outcome", ["failure", "timeout"])
+def test_actual_native_builder_failure_retains_private_diagnostics_before_abort(
+        packaging, target, failed_command, outcome, monkeypatch, capsys):
+    if os.geteuid() != 0:
+        pytest.skip("Actual root-owned managed packaging diagnostics")
+    obj = packaging(target)
+    generator = obj.runner
+    obj.runner = deploy.run
+    calls = []
+    stdout, stderr = b"sensitive-native-stdout", b"sensitive-native-stderr"
+
+    def child(command, *, input, env, stdout, stderr, timeout, check):
+        # Run the real adapter and production command/diagnostics functions,
+        # substituting only licensed native compilation; no Docker or device call.
+        assert input is None and timeout == 7200 and check is False
+        assert stdout == stderr == subprocess.PIPE
+        calls.append(command)
+        if len(calls) == failed_command:
+            if outcome == "timeout":
+                raise subprocess.TimeoutExpired(command, timeout,
+                                                output=b"sensitive-native-stdout", stderr=b"sensitive-native-stderr")
+            return subprocess.CompletedProcess(command, 37, b"sensitive-native-stdout", b"sensitive-native-stderr")
+        return subprocess.CompletedProcess(command, 0, generator(command, env=env), b"")
+
+    monkeypatch.setattr(deploy.subprocess, "run", child)
+    with pytest.raises(InstallError, match="timed out" if outcome == "timeout" else "exit 37") as caught:
+        obj.packages()
+    assert "private diagnostics:" in str(caught.value)
+    assert "sensitive-native" not in str(caught.value) + capsys.readouterr().out
+    saved, = (obj.base / "command-failures").glob("*.log")
+    data = saved.read_bytes()
+    assert stdout in data and stderr in data
+    assert saved.stat().st_uid == 0 and saved.stat().st_mode & 0o777 == 0o600
+    assert saved.parent.stat().st_uid == 0 and saved.parent.stat().st_mode & 0o777 == 0o700
+    assert b"sensitive-native" not in obj.journal.path.read_bytes()
+    assert len(calls) == failed_command and list((obj.base / "artifacts").iterdir()) == []
+    assert not list(obj.base.glob("prebuilt-native-packages-*"))
+    assert set(obj.journal.document["completed"]) == {"prebuilt-package-intent"}
