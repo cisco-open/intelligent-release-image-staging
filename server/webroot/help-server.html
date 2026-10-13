@@ -55,6 +55,14 @@
       <code>6800</code> stays on server loopback.</li>
     </ul>
 
+    <h2>Installer command failures</h2>
+    <p>A failed managed build names a private diagnostics file in the terminal
+    error. Inspect it locally as root and keep the installation state for resume.
+    The installer retains at most eight files, each with the last 128 KiB of
+    stdout and stderr. Earlier logs are never overwritten. These files can
+    contain credentials: do not share them in tickets, chat or public logs.
+    See <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/troubleshooting/#installer-command-failures" target="_blank" rel="noopener">Installer command failures</a>.</p>
+
     <h2>Settings saves</h2>
     <p>In General, TLS &amp; trust, Telemetry and Audit export, an uncertain save
     requires <strong>Reload current settings</strong> and review before retrying.

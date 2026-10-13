@@ -29,6 +29,25 @@ symptom in the table for that area.
     Do not repair state by editing databases, deployment JSON, occurrences or
     receipts by hand. Undeploy a running agent before you onboard it again.
 
+## Installer command failures
+
+For a failed managed Docker, separate-host or Kubernetes build, open the private
+diagnostics file named in the terminal error as root. Keep the original state
+directory and installer version when you resume after correcting the cause.
+See [Install with the managed package](../install/managed-package.md#approve-and-resume).
+
+The installer retains at most eight files under `command-failures/` in its state
+directory. Each contains the last 128 KiB from each output stream and indicates
+whether earlier output was omitted. Only root can read the saved files.
+If no file was saved, check free disk space, the eight-file limit, and ownership
+of the state directory. Its path must be owned by root and contain no symbolic
+links. Keep existing logs in protected storage if you move them to make room.
+The installer never overwrites earlier logs.
+
+!!! warning
+    These files can contain credentials and private build output. Inspect them
+    locally as root. Do not paste them into tickets, chat or public support logs.
+
 ## Time synchronization
 
 A wrong clock reads as a certificate problem.

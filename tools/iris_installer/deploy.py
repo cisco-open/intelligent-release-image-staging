@@ -9,6 +9,7 @@ offline private roots or an administrator, and never contacts inventory devices.
 """
 
 from contextlib import ExitStack
+import fcntl
 import hashlib
 import ipaddress
 import json
@@ -21,6 +22,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import uuid
 
 from . import ubuntu
 from .state import InstallError, Journal, atomic_write, regular_bytes
@@ -32,6 +34,9 @@ PRODUCTION_REVIEW = 22
 BASE_CONFIG_KEYS = {"target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls"}
 NATIVE_PACKAGES = ("iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm")
 NATIVE_FILES = frozenset(name + suffix for name in NATIVE_PACKAGES for suffix in ("", ".manifest"))
+FAILURE_TAIL_BYTES = 128 * 1024
+FAILURE_LOG_COUNT = 8
+FAILURE_LOG_BYTES = 2 * FAILURE_TAIL_BYTES + 2048
 
 
 def digest(path):
@@ -135,26 +140,104 @@ def clean_env():
             "DOCKER_HOST": "unix:///var/run/docker.sock"}
 
 
-def run(command, *, env=None, input=None, timeout=7200, capture=False):
+def _failure_diagnostics(directory, label, stdout, stderr, *, returncode=None, timed_out=False):
+    """Save bounded private evidence without replacing or pruning earlier failures.
+
+    subprocess.run's capture behavior is unchanged: these bounds apply to saved
+    evidence, not the child's in-memory output. Never record argv, env or stdin.
+    """
+    if directory is None:
+        return ""
+    unavailable = "; private diagnostics unavailable (unsafe storage, quota or write failure)"
+    try:
+        path = Path(directory)
+        if os.geteuid() != 0 or not path.is_absolute() or path == Path('/') or '..' in path.parts:
+            return unavailable
+        with ExitStack() as stack:
+            def opened(name, parent=None):
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                stack.callback(os.close, fd)
+                info = os.fstat(fd)
+                if info.st_uid != 0 or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+                    raise InstallError('Unsafe private diagnostics parent')
+                return fd
+
+            parent = opened('/')
+            for part in path.parts[1:]:
+                parent = opened(part, parent)
+            if stat.S_IMODE(os.fstat(parent).st_mode) != 0o700:
+                return unavailable
+            try:
+                os.mkdir('command-failures', mode=0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+            logs = opened('command-failures', parent)
+            if stat.S_IMODE(os.fstat(logs).st_mode) != 0o700:
+                return unavailable
+            fcntl.flock(logs, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            entries = os.listdir(logs)
+            if len(entries) >= FAILURE_LOG_COUNT:
+                return unavailable
+            for name in entries:
+                info = os.stat(name, dir_fd=logs, follow_symlinks=False)
+                if (not re.fullmatch(r'failure-[a-f0-9]{32}\.log', name)
+                        or not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > FAILURE_LOG_BYTES):
+                    return unavailable
+            stdout, stderr = stdout or b'', stderr or b''
+            header = {'command': label, 'returncode': returncode, 'timed_out': timed_out,
+                      'stdout_bytes': len(stdout), 'stderr_bytes': len(stderr),
+                      'stdout_tail_truncated': len(stdout) > FAILURE_TAIL_BYTES,
+                      'stderr_tail_truncated': len(stderr) > FAILURE_TAIL_BYTES}
+            data = (b'SENSITIVE: command output may contain credentials. Do not publish this file.\n'
+                    + json.dumps(header, sort_keys=True).encode() + b'\n--- stdout tail ---\n'
+                    + stdout[-FAILURE_TAIL_BYTES:] + b'\n--- stderr tail ---\n' + stderr[-FAILURE_TAIL_BYTES:])
+            if len(data) > FAILURE_LOG_BYTES:
+                return unavailable
+            name = 'failure-' + uuid.uuid4().hex + '.log'
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=logs)
+            with os.fdopen(fd, 'wb') as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
+                    raise InstallError('Unsafe private diagnostics file')
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(logs)
+            os.fsync(parent)
+        # JSON quoting prevents terminal control characters in a custom state path.
+        location = json.dumps(str(path / 'command-failures' / name), ensure_ascii=True)
+        return '; private diagnostics: ' + location + ' (sensitive; root only; do not publish)'
+    except (OSError, InstallError):
+        return unavailable
+
+
+def run(command, *, env=None, input=None, timeout=7200, capture=False, diagnostics_dir=None):
     label = Path(command[0]).name
+    if label not in {'docker', 'bash', 'kubectl', 'k3s', 'skopeo', 'apt-get', 'dpkg-query',
+                     'ssh', 'ssh-keygen', 'openssl', 'age-keygen', 'ip', 'systemctl'}:
+        label = 'installer command'
     if label == "docker":
         actions = ("compose", "container", "volume", "network", "image", "build", "run", "up", "exec", "inspect", "ls", "config")
         label += " " + " ".join(part for part in command[1:] if part in actions)
-    elif label == "bash" and len(command) > 1:
-        label += " " + Path(command[1]).name
     print(">> " + label, flush=True)
     try:
         result = subprocess.run(command, input=input, env=env or clean_env(),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
-        raise InstallError("Command timed out; installation state was retained for resume") from exc
-    except OSError as exc:
-        raise InstallError("Required command is unavailable: " + command[0]) from exc
+        evidence = _failure_diagnostics(diagnostics_dir, label, exc.stdout, exc.stderr, timed_out=True)
+        raise InstallError("Command timed out; installation state was retained for resume" + evidence) from None
+    except OSError:
+        raise InstallError("Required command is unavailable: " + label) from None
     if result.returncode:
         # Bootstrap/build tools can print tokens and private paths. Do not copy
         # their unrestricted output into a journal or terminal support log.
-        raise InstallError("Command failed: " + label + " (exit " + str(result.returncode) + "); state retained, no reset performed")
+        evidence = _failure_diagnostics(diagnostics_dir, label, result.stdout, result.stderr,
+                                        returncode=result.returncode)
+        raise InstallError("Command failed: " + label + " (exit " + str(result.returncode)
+                           + "); state retained, no reset performed" + evidence)
     return result.stdout if capture else b""
 
 
@@ -271,7 +354,10 @@ class DockerInstall:
                         IOXCLIENT=str(self.base / "bin/ioxclient"))
 
     def command(self, command, **kwargs):
-        return self.runner([str(arg) for arg in command], env=self.env, **kwargs)
+        if self.runner is run:
+            kwargs['diagnostics_dir'] = self.base
+        kwargs.setdefault('env', self.env)
+        return self.runner([str(arg) for arg in command], **kwargs)
 
     def compose(self, *args, **kwargs):
         return self.command(["docker", "compose", "-p", self.config["instance"],
@@ -366,7 +452,7 @@ class DockerInstall:
         }
         # Empty explicit env file prevents automatic discovery of server/.env.
         atomic_write(self.base / "compose.env", b"# managed by irisctl\n")
-        data = self.runner(["docker", "compose", "--env-file", str(self.base / "compose.env"),
+        data = self.command(["docker", "compose", "--env-file", str(self.base / "compose.env"),
                             "-p", self.config["instance"], "-f", str(self.source / "server/docker-compose.yml"),
                             "config", "--format", "json"], env=dict(self.env, **settings), capture=True)
         compose = json.loads(data)

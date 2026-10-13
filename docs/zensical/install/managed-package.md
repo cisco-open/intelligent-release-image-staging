@@ -236,6 +236,7 @@ Continue local setup with `irisctl setup`, keeping the same key mode and paths.
 For separate key holders, use `irisctl resume` with the same `--state-dir`.
 Keep the original installer version until setup finishes. Resume checks recorded
 inputs and preserves changed or unknown files.
+For failed builds, see [Installer command failures](../user-guide/troubleshooting.md#installer-command-failures).
 
 Automatic setup approves its own server request and resumes for you. Manual
 local setup asks you to approve it. With separate key holders, exit `20` means

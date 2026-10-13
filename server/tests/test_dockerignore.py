@@ -15,8 +15,14 @@ wins, a matching parent directory excludes its subtree) against a planted
 tree and asserts what must stay out -- and what the image still needs.
 """
 
+import io
+import json
 import os
 import re
+import shutil
+import subprocess
+import tarfile
+import uuid
 
 import pytest
 
@@ -162,6 +168,7 @@ MUST_INCLUDE = [
     "server/console-ui/scripts/build-map.mjs",
     "server/console-ui/templates/swarmmap.html",
     "bin/aria2c",
+    "deliverables/aria2c-aarch64",
     "tools/aria2c.sha256",
     "VERSION",
     "server/tracker.py",
@@ -245,3 +252,83 @@ def test_evaluator_matches_docker_semantics():
     planted = ["server/.env", "server/certs/a.key", "server/app.py"]
     real = load_patterns()
     assert [p for p in planted if not excluded(p, real)] == ["server/app.py"]
+
+
+@pytest.mark.parametrize("rel", [
+    "deliverables/aria2c-x86_64", "deliverables/other-client",
+    "deliverables/aria2c-aarch64.key", "deliverables/aria2c-aarch64.backup",
+    "deliverables/nested/aria2c-aarch64", "deliverables/iris-arm64.tar",
+    "deliverables/roots/root-a.key", "deliverables/.env",
+])
+def test_arm_client_exception_does_not_include_other_deliverables(rel, patterns):
+    assert excluded(rel, patterns), rel
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is unavailable")
+def test_actual_server_build_context_keeps_only_both_required_clients(tmp_path):
+    """The c253 source install failed COPY ARM before creating any image.
+
+    Exercise the actual Docker context filter with harmless stand-in clients,
+    FROM scratch and no network. A parser-only Dockerfile test missed this.
+    """
+    environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                   "DOCKER_HOST": "unix:///var/run/docker.sock"}
+    probe = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
+                           env=environment, capture_output=True, timeout=20)
+    if probe.returncode:
+        pytest.skip("The local Docker daemon is unavailable")
+    context = tmp_path / "context"
+    context.mkdir()
+    (context / "bin").mkdir()
+    (context / "deliverables").mkdir()
+    amd64, arm64 = b"test-amd64-client\n", b"test-arm64-client\n"
+    (context / "bin/aria2c").write_bytes(amd64)
+    (context / "deliverables/aria2c-aarch64").write_bytes(arm64)
+    for name in ("aria2c-x86_64", "other-client", "aria2c-aarch64.key", "iris-arm64.tar"):
+        (context / "deliverables" / name).write_bytes(b"must-not-enter-the-image\n")
+    dockerfile = "FROM scratch\nCOPY bin/aria2c /amd64\nCOPY deliverables/aria2c-aarch64 /arm64\nCOPY deliverables/ /deliverables/\n"
+    (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+    with open(os.path.join(ROOT, ".dockerignore"), encoding="utf-8") as stream:
+        actual_ignore = stream.read()
+    exact_exception = "!deliverables/aria2c-aarch64\n"
+    assert actual_ignore.count(exact_exception) == 1
+    tag = "iris-context-regression-" + uuid.uuid4().hex + ":test"
+    try:
+        # Reproduce the original package's exclusion without building a server
+        # or fetching a base image. The failed build must never create our tag.
+        (context / ".dockerignore").write_text(actual_ignore.replace(exact_exception, ""), encoding="utf-8")
+        argv = ["docker", "build", "--network=none", "--pull=false", "--no-cache",
+                "--tag", tag, str(context)]
+        failure = subprocess.run(argv, env=environment, capture_output=True, timeout=90)
+        assert failure.returncode != 0
+        assert b"aria2c-aarch64" in failure.stderr + failure.stdout
+        tags = subprocess.run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+                              env=environment, capture_output=True, timeout=20)
+        assert tags.returncode == 0 and tag not in tags.stdout.decode().splitlines()
+        (context / ".dockerignore").write_text(actual_ignore, encoding="utf-8")
+        build = subprocess.run(argv, env=environment, capture_output=True, timeout=90)
+        assert build.returncode == 0, (build.stderr + build.stdout).decode(errors="replace")[-2000:]
+        archive = tmp_path / "image.tar"
+        exported = subprocess.run(["docker", "image", "save", "--output", str(archive), tag],
+                                  env=environment, capture_output=True, timeout=20)
+        assert exported.returncode == 0, exported.stderr.decode(errors="replace")
+        # Inspect actual saved layers, without creating/running a container or
+        # adding Docker's /etc and /dev placeholder files to the observation.
+        files = {}
+        with tarfile.open(archive) as saved:
+            manifest = json.load(saved.extractfile("manifest.json"))
+            assert len(manifest) == 1 and manifest[0]["RepoTags"] == [tag]
+            for name in manifest[0]["Layers"]:
+                with tarfile.open(fileobj=io.BytesIO(saved.extractfile(name).read())) as layer:
+                    files.update({member.name.removeprefix("./"): layer.extractfile(member).read()
+                                  for member in layer if member.isfile()})
+        assert files == {"amd64": amd64, "arm64": arm64, "deliverables/aria2c-aarch64": arm64}
+    finally:
+        # Only the unique owned tag is removed. No image-ID delete,
+        # daemon-wide cache pruning or lab deployment is involved.
+        removed = subprocess.run(["docker", "image", "rm", tag], env=environment,
+                                 capture_output=True, timeout=20)
+        if removed.returncode:
+            tags = subprocess.run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+                                  env=environment, capture_output=True, timeout=20)
+            assert tags.returncode == 0 and tag not in tags.stdout.decode().splitlines()

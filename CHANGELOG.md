@@ -17,6 +17,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Retain bounded, root-private command output after managed installer failures
+  and timeouts, including Docker, separate-host and Kubernetes builds. Terminal
+  errors point to sensitive diagnostics without exposing command output.
+
+- Keep the compiled ARM client in the server build context so fresh Docker and
+  Kubernetes source installations can build both Guest Shell bundles.
+
 - Refresh both architecture-matched Guest Shell bundles at server startup and
   instruction-root rotation. Missing or stale ARM files now prevent readiness.
 
