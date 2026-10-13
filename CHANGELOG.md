@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Clarify that role-link edits update both roles together and that devices
+  can retain different signed policy revisions when their settings are unchanged.
+
 - Limit Cisco hash-feed downloads to ten minutes and queued image verification
   to eleven minutes. Slow or unavailable feeds report an incomplete check
   without changing stored verdicts or discarding the published image.

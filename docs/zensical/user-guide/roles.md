@@ -57,6 +57,9 @@ to check for changes from elsewhere while keeping your open role draft.
 4. Select **Preview change**, then **Save role**. Editing any field after a
    preview discards it. **Delete** previews first too.
 
+Adding or removing a role from **Other roles to allow** updates the other
+role's list in the same save. Review the reported impact before saving.
+
 If a save cannot be confirmed, refresh and review the current definition before
 trying again. **Reload current definition** discards your draft. Closing the
 editor leaves an already-submitted save running.

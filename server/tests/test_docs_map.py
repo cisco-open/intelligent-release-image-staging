@@ -1412,8 +1412,8 @@ def _assert_phase1_enforcement_boundary(text):
 
 
 def _assert_phase1_rollup_relationship(text):
-    _assert_unit(text, ("fleet_rollup", "issued_revision", "nullable"),
-                 "issued revision must be documented as current-or-null")
+    _assert_unit(text, ("fleet_rollup", "issued_revision", "highest", "null"),
+                 "issued revision must be documented as the highest issued revision or null")
     _assert_unit(text, ("fleet_rollup", "applied", "policy revision"),
                  "applied rollup must count accepted policy revisions")
     for unit in _units(text):
@@ -1427,6 +1427,16 @@ def _assert_phase1_rollup_relationship(text):
             r"(?:by\s+)?instruction serial", lower)
         if affirmative and not negative:
             raise AssertionError("fleet rollup must not key on instruction serial")
+
+
+def test_role_docs_explain_reciprocal_edits_and_per_device_instruction_revisions():
+    roles = " ".join(_page("user-guide/roles.md").split())
+    reference = " ".join(_page("reference/peer-policy-api.md").split())
+    assert "updates the other role's list in the same save" in roles
+    assert "adds or removes the matching link in each other role's list" in reference
+    assert "Devices can report different accepted revisions" in reference
+    assert ("effective settings unchanged does not by itself issue a new instruction"
+            in reference)
 
 
 

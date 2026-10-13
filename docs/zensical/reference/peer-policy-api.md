@@ -44,7 +44,7 @@ Role names match `^[a-z0-9][a-z0-9._-]{0,31}$`, and at most 256 roles may exist.
 | Field | Default / bound | Meaning |
 | --- | --- | --- |
 | `restricted` | `false` | When true, the server compiles a virtual access list for this role; false keeps open, implicit permit. |
-| `peers` | the role itself; at most 64 | Permitted role names. The list must contain the role itself. A link between two restricted roles must be symmetric; the server normalizes the reciprocal side for you. |
+| `peers` | the role itself; at most 64 | Permitted role names. The list must contain the role itself. Creating or updating a role adds or removes the matching link in each other role's list in the same commit. |
 | `origin` | `true` | Whether the tracker may introduce the server's own seeder to this restricted role. |
 | `nets` | empty | Optional IPv4 subnet hints for role management. |
 | `on_stale` | `keep` for restricted roles, `defaults` otherwise, unless overridden globally | After the last verified instruction expires, retain its transfer settings or use built-in device settings. See [Choose behavior when instructions expire](../user-guide/roles.md#choose-behavior-when-instructions-expire). |
@@ -103,9 +103,12 @@ Scalar QoS is the instruction intent the server sends to a device. `tracker_qos`
 | `enforcement.mutual_origin.mode = preflight` | The default observation-only mode. `newly_denied_device_count` is `null` when unavailable, and `0` when a completed check found no newly denied device; neither adds a device to the active deny list. |
 | `enforcement.mutual_origin.mode = enforce` | Reviewed restrictions are requested. Read the dedicated origin-enforcement route for current application proof; the old preflight count is `null`. |
 | `origin_qos.state`, `target_download_count`, `applied_download_count` | Whether the origin's rate limits reached every active download. These are counts, not per-role throughput. |
-| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | The current issued policy revision, nullable until the first issue, and accepted-device counts grouped by that policy revision. |
+| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | The highest policy revision among issued device instructions, or null when unavailable, and accepted-device counts grouped by revision. |
 | `fleet_rollup.states.pre-instructions` | Devices whose last heartbeat did not claim the instruction protocol. |
 | `GET /api/v1/devices/<id>/effective-qos` `delivery_state = pre-instructions` | A deprecated legacy sentinel; read the response's `instruction` object for current evidence instead. |
+
+Devices can report different accepted revisions. A policy edit that leaves a
+device's effective settings unchanged does not by itself issue a new instruction.
 
 !!! warning
     Never log or export an aria2 option dictionary, because tracker authorization data can be present among those options.
