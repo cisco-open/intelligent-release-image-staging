@@ -128,6 +128,11 @@ check runs, then `done`. `error` means the publish itself failed. A `done` job
 can still report a failed check, so read its verification outcome, image state,
 and message. Jobs are held in memory and disappear on a server restart.
 
+Online feed downloads have a ten-minute limit. An image can also wait up to
+eleven minutes behind another check before its own check starts. A timeout
+reports an incomplete check; the image remains published. Use **Refresh now**
+in *Settings → Image verification* to check again when the active run finishes.
+
 | Verdict | Meaning |
 | --- | --- |
 | `verified` | The image's `sha512` matches the feed row. |

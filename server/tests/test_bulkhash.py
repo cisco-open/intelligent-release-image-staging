@@ -1005,7 +1005,7 @@ def test_full_pipeline_local_server_to_verdict(tmp_path, signing_key):
     ('refused', 'connection refused'),
     ('unknown', 'URLError'),
 ])
-def test_fetch_reports_safe_network_cause(tmp_path, monkeypatch, kind, expected):
+def test_network_worker_reports_safe_network_cause(tmp_path, monkeypatch, kind, expected):
     import socket
     import ssl
     import urllib.error
@@ -1023,9 +1023,106 @@ def test_fetch_reports_safe_network_cause(tmp_path, monkeypatch, kind, expected)
     monkeypatch.setattr(bulkhash.urllib.request, 'build_opener', lambda *args: FailedOpener())
     dest = tmp_path / 'feed.tar'
     dest.write_bytes(b'previous verified feed')
-    with pytest.raises(bulkhash.BulkHashError, match=expected) as raised:
-        bulkhash.fetch('https://private.invalid/feed', 1, str(dest))
+    temporary = tmp_path / 'worker.tmp'
+    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        # Error categorization is an isolated worker-unit seam. Public fetch's
+        # real fresh process, deadline and cleanup are exercised separately.
+        with pytest.raises(bulkhash.BulkHashError, match=expected) as raised:
+            bulkhash._fetch_stream('https://private.invalid/feed', 1, fd,
+                                   bulkhash._MAX_DOWNLOAD_BYTES, bulkhash._DOWNLOAD_CHUNK)
+    finally:
+        os.close(fd)
+        temporary.unlink()
     assert 'private' not in str(raised.value) and 'secret' not in str(raised.value)
+    assert dest.read_bytes() == b'previous verified feed'
+    assert list(tmp_path.iterdir()) == [dest]
+
+
+def test_fetch_launch_failure_is_sanitized_and_closes_temporary_fd(tmp_path, monkeypatch):
+    dest = tmp_path / 'feed.tar'
+    dest.write_bytes(b'previous verified feed')
+    captured = []
+
+    def fail_launch(_argv, **kwargs):
+        captured.extend(kwargs['pass_fds'])
+        raise OSError('https://username:secret@private.invalid/feed')
+
+    monkeypatch.setattr(bulkhash.subprocess, 'Popen', fail_launch)
+    with pytest.raises(bulkhash.BulkHashError, match='download failed: OSError') as raised:
+        bulkhash.fetch('https://username:secret@private.invalid/feed', 1, dest)
+    assert 'secret' not in str(raised.value) and 'private' not in str(raised.value)
+    assert dest.read_bytes() == b'previous verified feed'
+    assert list(tmp_path.iterdir()) == [dest]
+    assert len(captured) == 1
+    with pytest.raises(OSError):
+        os.fstat(captured[0])
+
+
+@pytest.mark.parametrize('returncode,output', [
+    (3, b'private secret worker traceback'),
+    (0, b'private secret malformed result'),
+    (0, b'[]'),
+    (0, b'{"ok":"true","bytes":0}'),
+    (0, b'{"ok":true,"bytes":true}'),
+    (0, b'{"ok":true,"bytes":10}'),
+])
+def test_fetch_worker_failure_never_replaces_previous_feed(tmp_path, monkeypatch, returncode, output):
+    dest = tmp_path / 'feed.tar'
+    dest.write_bytes(b'previous verified feed')
+    captured = []
+
+    class FinishedWorker:
+        stdin = stdout = stderr = None
+
+        def __init__(self, _argv, **kwargs):
+            self.returncode = returncode
+            captured.extend(kwargs['pass_fds'])
+
+        def communicate(self, _payload, timeout):
+            assert timeout == bulkhash.DEFAULT_TOTAL_TIMEOUT
+            return output, None
+
+        def poll(self): return self.returncode
+        def wait(self): return self.returncode
+
+    monkeypatch.setattr(bulkhash.subprocess, 'Popen', FinishedWorker)
+    with pytest.raises(bulkhash.BulkHashError) as raised:
+        bulkhash.fetch('https://username:secret@private.invalid/feed', 1, dest)
+    assert 'secret' not in str(raised.value) and 'private' not in str(raised.value)
+    assert dest.read_bytes() == b'previous verified feed'
+    assert list(tmp_path.iterdir()) == [dest]
+    with pytest.raises(OSError):
+        os.fstat(captured[0])
+
+
+def test_fetch_communication_failure_reaps_worker_before_cleanup(tmp_path, monkeypatch):
+    dest = tmp_path / 'feed.tar'
+    dest.write_bytes(b'previous verified feed')
+    events = []
+
+    class BrokenWorker:
+        stdin = stdout = stderr = None
+        returncode = None
+
+        def __init__(self, _argv, **kwargs):
+            self.fd = kwargs['pass_fds'][0]
+
+        def communicate(self, _payload, timeout):
+            raise OSError('private secret transport failure')
+
+        def poll(self): return self.returncode
+        def kill(self): events.append('kill')
+        def wait(self):
+            os.fstat(self.fd)  # The held temporary is still open while reaping.
+            events.append('wait')
+            self.returncode = -9
+            return self.returncode
+
+    monkeypatch.setattr(bulkhash.subprocess, 'Popen', BrokenWorker)
+    with pytest.raises(bulkhash.BulkHashError, match='download failed: OSError'):
+        bulkhash.fetch('https://private.invalid/feed', 1, dest)
+    assert events == ['kill', 'wait']
     assert dest.read_bytes() == b'previous verified feed'
     assert list(tmp_path.iterdir()) == [dest]
 

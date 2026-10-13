@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Limit Cisco hash-feed downloads to ten minutes and queued image verification
+  to eleven minutes. Slow or unavailable feeds report an incomplete check
+  without changing stored verdicts or discarding the published image.
+
 - Retain bounded, root-private command output after managed installer failures
   and timeouts, including Docker, separate-host and Kubernetes builds. Terminal
   errors point to sensitive diagnostics without exposing command output.

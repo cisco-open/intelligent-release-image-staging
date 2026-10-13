@@ -47,6 +47,7 @@ import stat
 import tempfile
 import threading
 import time
+import math
 
 import bulkhash
 
@@ -62,11 +63,10 @@ FEED_URL = ("https://tools.cisco.com/cscrdr/security/center/files/trust/"
 _CERT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "certs",
     "cisco_bulkhash_verify.pem")
-# bulkhash.fetch's urlopen timeout is per socket operation, not a total
-# transfer deadline, so this stays generous even though the real feed's CSV
-# is tens of MB -- matches bulkhash._OPENSSL_TIMEOUT's "generous but
-# bounded" precedent in the same feature area.
+# The socket-operation timeout is separate from fetch's ten-minute hard
+# network-worker deadline. Waiting behind another refresh has its own bound.
 _FETCH_TIMEOUT = 60
+_WAIT_TIMEOUT = bulkhash.DEFAULT_TOTAL_TIMEOUT + bulkhash._OPENSSL_TIMEOUT
 _DETAIL_MAX = 200        # bounded failure-detail length (audit_export.py's
                         # _stderr_snippet / _FAIL_DETAIL_MAX precedent)
 OFFLINE_CACHE = "bulkhash-offline.tar"
@@ -321,6 +321,7 @@ def _failure_detail(exc):
 def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
                 cert_path=_CERT_PATH, timeout=_FETCH_TIMEOUT, audit_fn=None,
                 wait=False, now_fn=time.time, use_offline_cache=False,
+                wait_timeout=_WAIT_TIMEOUT,
                 _fetch_fn=bulkhash.fetch,
                 _verify_fn=bulkhash.verify_tar, _parse_fn=bulkhash.parse,
                 _reconcile_fn=bulkhash.reconcile):
@@ -347,7 +348,11 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
     not taken its catalog snapshot yet, that one successful run can cover the
     caller; otherwise one waiter takes a fresh snapshot.  Other concurrent
     waiters covered by that snapshot reuse its successful result instead of
-    downloading and reconciling the same feed serially.  A failed result is
+    downloading and reconciling the same feed serially. Waiting is limited
+    by ``wait_timeout`` (11 minutes by default); expiry returns a failure
+    without starting a second run or changing the active run's last_run.
+    This limit applies to queue waiting, not the caller's own reconciliation.
+    A failed result is
     never reused.  This is used by Console publish jobs so every newly imported
     image is known to have been present in the successful snapshot they accept.
 
@@ -378,11 +383,23 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
     global _RUNNING, _WAIT_GENERATION
     coverage_key = os.path.realpath(os.fspath(state_dir))
     request_generation = None
+    deadline = None
+    if wait:
+        if (isinstance(wait_timeout, bool)
+                or not isinstance(wait_timeout, (int, float))
+                or not math.isfinite(wait_timeout) or wait_timeout <= 0):
+            return {"outcome": "fail", "detail": "invalid hash verification wait timeout",
+                    "matched": None, "mismatched": None, "not_in_feed": None}
+        deadline = time.monotonic() + wait_timeout
     with _RUN_CONDITION:
         if wait:
             _WAIT_GENERATION += 1
             request_generation = _WAIT_GENERATION
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                return {"outcome": "fail",
+                        "detail": "timed out waiting for another Cisco hash verification",
+                        "matched": None, "mismatched": None, "not_in_feed": None}
             if request_generation is not None:
                 covered = _SUCCESSFUL_COVERAGE.get(coverage_key)
                 if covered is not None and covered[0] >= request_generation:
@@ -392,7 +409,12 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
                 break
             if not wait:
                 return {"outcome": "already_running"}
-            _RUN_CONDITION.wait()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"outcome": "fail",
+                        "detail": "timed out waiting for another Cisco hash verification",
+                        "matched": None, "mismatched": None, "not_in_feed": None}
+            _RUN_CONDITION.wait(remaining)
 
     # A one-item list lets the exact pre-list_images snapshot point report its
     # generation back without changing run_refresh's public result shape.
