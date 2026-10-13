@@ -12102,7 +12102,7 @@ def test_role_policy_view_and_effective_qos(role_api):
     assert qos["instruction"]["accepted_identity"] is None
     assert qos["qos"]["numwant"]["source"] == "builtin"
     assert qos["qos"]["numwant"]["effective_ceiling"] == 50
-    assert qos["qos"]["announce_min_interval_s"]["peerless_leecher_floor_s"] == 120
+    assert qos["qos"]["announce_min_interval_s"] == {"value": 30, "source": "builtin"}
     assert qos["qos"]["catalog_tick_s"]["offline_horizon_s"] == 600
     assert qos["qos"]["catalog_tick_s"]["heartbeat_always"] is True
     assert request("GET", "/api/devices/missing/effective-qos")[0] == 404

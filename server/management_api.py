@@ -6158,13 +6158,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             422, "invalid_policy_request", revision)
                         return
                     qos = peer_policy.explain_qos(doc, did)
-                    # These are pinned aria2 client constraints, not tracker caps:
-                    # DefaultBtAnnounce.cc emits 50 or 0; the peerless leecher
-                    # overrides min interval with BtAnnounce's 2 minute default.
+                    # DefaultBtAnnounce.cc emits 50 peers or 0 when disabled.
+                    # Its announce timer uses the interval returned by the
+                    # tracker, including while a leecher has no peers.
                     qos["numwant"].update(effective_ceiling=min(qos["numwant"]["value"], 50),
                         runtime_request_zero="disabled", constraint_source="pinned-aria2-client")
-                    qos["announce_min_interval_s"].update(peerless_leecher_floor_s=120,
-                        constraint_source="pinned-aria2-client")
                     qos["catalog_tick_s"].update(offline_horizon_s=_HEARTBEAT_FRESH,
                                                 heartbeat_always=True)
                     heartbeat, heartbeat_available = \
@@ -6190,10 +6188,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 tracker_qos["numwant"]["value"], 50),
                             runtime_request_zero="disabled",
                             constraint_source="pinned-aria2-client")
-                        if tracker_state == "leecher":
-                            tracker_qos["announce_min_interval_s"].update(
-                                peerless_leecher_floor_s=120,
-                                constraint_source="pinned-aria2-client")
                         result.update(tracker_state=tracker_state,
                                       tracker_qos=tracker_qos)
                 else:

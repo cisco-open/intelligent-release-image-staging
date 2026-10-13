@@ -1219,8 +1219,6 @@ def _qos_example():
     qos = peer_policy.explain_qos(doc, "edge-01")
     qos["numwant"].update(effective_ceiling=50, runtime_request_zero="disabled",
                          constraint_source="pinned-aria2-client")
-    qos["announce_min_interval_s"].update(peerless_leecher_floor_s=120,
-                                         constraint_source="pinned-aria2-client")
     qos["catalog_tick_s"].update(offline_horizon_s=600, heartbeat_always=True)
     return qos
 
@@ -1233,20 +1231,12 @@ def _tracker_qos_source_schema():
         r"(?:seeder|leecher))$")}
 
 
-def _tracker_interval_explanation_schema(leecher):
+def _tracker_interval_explanation_schema():
     properties = {
         "value": {"type": "integer", "minimum": 10, "maximum": 300},
         "source": _tracker_qos_source_schema(),
     }
     required = ["value", "source"]
-    if leecher:
-        properties.update({
-            "peerless_leecher_floor_s": {
-                "type": "integer", "const": 120},
-            "constraint_source": {
-                "type": "string", "const": "pinned-aria2-client"},
-        })
-        required.extend(["peerless_leecher_floor_s", "constraint_source"])
     return {"type": "object", "additionalProperties": False,
             "properties": properties, "required": required}
 
@@ -1268,15 +1258,10 @@ def _tracker_numwant_explanation_schema():
                          "runtime_request_zero", "constraint_source"]}
 
 
-def _tracker_qos_explanation_schema(leecher=None):
-    interval = (
-        {"oneOf": [_tracker_interval_explanation_schema(False),
-                   _tracker_interval_explanation_schema(True)]}
-        if leecher is None else
-        _tracker_interval_explanation_schema(leecher))
+def _tracker_qos_explanation_schema():
     return {"type": "object", "additionalProperties": False,
             "properties": {
-                "announce_min_interval_s": interval,
+                "announce_min_interval_s": _tracker_interval_explanation_schema(),
                 "numwant": _tracker_numwant_explanation_schema(),
             },
             "required": ["announce_min_interval_s", "numwant"]}
@@ -1285,9 +1270,6 @@ def _tracker_qos_explanation_schema(leecher=None):
 def _tracker_qos_example(state):
     interval = {
         "value": 120, "source": "role-state:boat:" + state}
-    if state == "leecher":
-        interval.update(peerless_leecher_floor_s=120,
-                        constraint_source="pinned-aria2-client")
     return {
         "announce_min_interval_s": interval,
         "numwant": {
@@ -3398,20 +3380,6 @@ def _success(route):
             "tracker_state": ["tracker_qos"],
             "tracker_qos": ["tracker_state"],
         }
-        schema.setdefault("allOf", []).extend([
-            {
-                "if": {"required": ["tracker_state"], "properties": {
-                    "tracker_state": {"const": "seeder"}}},
-                "then": {"properties": {
-                    "tracker_qos": _tracker_qos_explanation_schema(False)}},
-            },
-            {
-                "if": {"required": ["tracker_state"], "properties": {
-                    "tracker_state": {"const": "leecher"}}},
-                "then": {"properties": {
-                    "tracker_qos": _tracker_qos_explanation_schema(True)}},
-            },
-        ])
     if suffix in ("/devices/{device_id}/role", "/devices/bulk-role"):
         optional = {"candidate_revision", *_blast_example()}
         schema["required"] = [key for key in schema["required"] if key not in optional]

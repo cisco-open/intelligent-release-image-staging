@@ -1979,8 +1979,6 @@ def _state_qos_legacy_rows():
     result = {key: {"value": value, "source": "builtin"} for key, value in values}
     result["numwant"].update(effective_ceiling=50, runtime_request_zero="disabled",
                              constraint_source="pinned-aria2-client")
-    result["announce_min_interval_s"].update(
-        peerless_leecher_floor_s=120, constraint_source="pinned-aria2-client")
     result["catalog_tick_s"].update(offline_horizon_s=600, heartbeat_always=True)
     return result
 
@@ -2010,9 +2008,6 @@ def test_tracker_state_effective_qos_expands_legacy_response_and_closes_query(
     def queried(device_id, scalar, state, interval, interval_source, numwant, source):
         expected = copy.deepcopy(scalar)
         interval_row = {"value": interval, "source": interval_source}
-        if state == "leecher":
-            interval_row.update(peerless_leecher_floor_s=120,
-                                constraint_source="pinned-aria2-client")
         expected.update(tracker_state=state, tracker_qos={
             "announce_min_interval_s": interval_row,
             "numwant": {"value": numwant, "source": source,
@@ -2024,7 +2019,8 @@ def test_tracker_state_effective_qos_expands_legacy_response_and_closes_query(
         assert status == 200, payload
         assert payload == expected
         assert headers["ETag"] == '"iris-peer-policy-%d"' % expected["revision"]
-        assert payload["qos"]["announce_min_interval_s"]["peerless_leecher_floor_s"] == 120
+        assert set(payload["qos"]["announce_min_interval_s"]) == {"value", "source"}
+        assert set(payload["tracker_qos"]["announce_min_interval_s"]) == {"value", "source"}
 
     builtin = legacy("d1", _state_qos_legacy_rows())
     for state in ("seeder", "leecher"):

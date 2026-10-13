@@ -7794,19 +7794,11 @@
                             },
                             "source": {
                               "type": "string"
-                            },
-                            "peerless_leecher_floor_s": {
-                              "type": "integer"
-                            },
-                            "constraint_source": {
-                              "type": "string"
                             }
                           },
                           "required": [
                             "value",
-                            "source",
-                            "peerless_leecher_floor_s",
-                            "constraint_source"
+                            "source"
                           ],
                           "additionalProperties": true
                         },
@@ -8233,55 +8225,22 @@
                       "additionalProperties": false,
                       "properties": {
                         "announce_min_interval_s": {
-                          "oneOf": [
-                            {
-                              "type": "object",
-                              "additionalProperties": false,
-                              "properties": {
-                                "value": {
-                                  "type": "integer",
-                                  "minimum": 10,
-                                  "maximum": 300
-                                },
-                                "source": {
-                                  "type": "string",
-                                  "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                }
-                              },
-                              "required": [
-                                "value",
-                                "source"
-                              ]
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "value": {
+                              "type": "integer",
+                              "minimum": 10,
+                              "maximum": 300
                             },
-                            {
-                              "type": "object",
-                              "additionalProperties": false,
-                              "properties": {
-                                "value": {
-                                  "type": "integer",
-                                  "minimum": 10,
-                                  "maximum": 300
-                                },
-                                "source": {
-                                  "type": "string",
-                                  "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                },
-                                "peerless_leecher_floor_s": {
-                                  "type": "integer",
-                                  "const": 120
-                                },
-                                "constraint_source": {
-                                  "type": "string",
-                                  "const": "pinned-aria2-client"
-                                }
-                              },
-                              "required": [
-                                "value",
-                                "source",
-                                "peerless_leecher_floor_s",
-                                "constraint_source"
-                              ]
+                            "source": {
+                              "type": "string",
+                              "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
                             }
+                          },
+                          "required": [
+                            "value",
+                            "source"
                           ]
                         },
                         "numwant": {
@@ -8343,179 +8302,7 @@
                     "tracker_qos": [
                       "tracker_state"
                     ]
-                  },
-                  "allOf": [
-                    {
-                      "if": {
-                        "required": [
-                          "tracker_state"
-                        ],
-                        "properties": {
-                          "tracker_state": {
-                            "const": "seeder"
-                          }
-                        }
-                      },
-                      "then": {
-                        "properties": {
-                          "tracker_qos": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                              "announce_min_interval_s": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "value": {
-                                    "type": "integer",
-                                    "minimum": 10,
-                                    "maximum": 300
-                                  },
-                                  "source": {
-                                    "type": "string",
-                                    "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                  }
-                                },
-                                "required": [
-                                  "value",
-                                  "source"
-                                ]
-                              },
-                              "numwant": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "value": {
-                                    "type": "integer",
-                                    "minimum": 4,
-                                    "maximum": 200
-                                  },
-                                  "source": {
-                                    "type": "string",
-                                    "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                  },
-                                  "effective_ceiling": {
-                                    "type": "integer",
-                                    "minimum": 4,
-                                    "maximum": 50
-                                  },
-                                  "runtime_request_zero": {
-                                    "type": "string",
-                                    "const": "disabled"
-                                  },
-                                  "constraint_source": {
-                                    "type": "string",
-                                    "const": "pinned-aria2-client"
-                                  }
-                                },
-                                "required": [
-                                  "value",
-                                  "source",
-                                  "effective_ceiling",
-                                  "runtime_request_zero",
-                                  "constraint_source"
-                                ]
-                              }
-                            },
-                            "required": [
-                              "announce_min_interval_s",
-                              "numwant"
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "if": {
-                        "required": [
-                          "tracker_state"
-                        ],
-                        "properties": {
-                          "tracker_state": {
-                            "const": "leecher"
-                          }
-                        }
-                      },
-                      "then": {
-                        "properties": {
-                          "tracker_qos": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                              "announce_min_interval_s": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "value": {
-                                    "type": "integer",
-                                    "minimum": 10,
-                                    "maximum": 300
-                                  },
-                                  "source": {
-                                    "type": "string",
-                                    "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                  },
-                                  "peerless_leecher_floor_s": {
-                                    "type": "integer",
-                                    "const": 120
-                                  },
-                                  "constraint_source": {
-                                    "type": "string",
-                                    "const": "pinned-aria2-client"
-                                  }
-                                },
-                                "required": [
-                                  "value",
-                                  "source",
-                                  "peerless_leecher_floor_s",
-                                  "constraint_source"
-                                ]
-                              },
-                              "numwant": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "value": {
-                                    "type": "integer",
-                                    "minimum": 4,
-                                    "maximum": 200
-                                  },
-                                  "source": {
-                                    "type": "string",
-                                    "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                  },
-                                  "effective_ceiling": {
-                                    "type": "integer",
-                                    "minimum": 4,
-                                    "maximum": 50
-                                  },
-                                  "runtime_request_zero": {
-                                    "type": "string",
-                                    "const": "disabled"
-                                  },
-                                  "constraint_source": {
-                                    "type": "string",
-                                    "const": "pinned-aria2-client"
-                                  }
-                                },
-                                "required": [
-                                  "value",
-                                  "source",
-                                  "effective_ceiling",
-                                  "runtime_request_zero",
-                                  "constraint_source"
-                                ]
-                              }
-                            },
-                            "required": [
-                              "announce_min_interval_s",
-                              "numwant"
-                            ]
-                          }
-                        }
-                      }
-                    }
-                  ]
+                  }
                 },
                 "example": {
                   "revision": 4,
@@ -8610,9 +8397,7 @@
                     },
                     "announce_min_interval_s": {
                       "value": 30,
-                      "source": "builtin",
-                      "peerless_leecher_floor_s": 120,
-                      "constraint_source": "pinned-aria2-client"
+                      "source": "builtin"
                     },
                     "numwant": {
                       "value": 50,
@@ -53469,19 +53254,11 @@
                             },
                             "source": {
                               "type": "string"
-                            },
-                            "peerless_leecher_floor_s": {
-                              "type": "integer"
-                            },
-                            "constraint_source": {
-                              "type": "string"
                             }
                           },
                           "required": [
                             "value",
-                            "source",
-                            "peerless_leecher_floor_s",
-                            "constraint_source"
+                            "source"
                           ],
                           "additionalProperties": true
                         },
@@ -53908,55 +53685,22 @@
                       "additionalProperties": false,
                       "properties": {
                         "announce_min_interval_s": {
-                          "oneOf": [
-                            {
-                              "type": "object",
-                              "additionalProperties": false,
-                              "properties": {
-                                "value": {
-                                  "type": "integer",
-                                  "minimum": 10,
-                                  "maximum": 300
-                                },
-                                "source": {
-                                  "type": "string",
-                                  "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                }
-                              },
-                              "required": [
-                                "value",
-                                "source"
-                              ]
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "value": {
+                              "type": "integer",
+                              "minimum": 10,
+                              "maximum": 300
                             },
-                            {
-                              "type": "object",
-                              "additionalProperties": false,
-                              "properties": {
-                                "value": {
-                                  "type": "integer",
-                                  "minimum": 10,
-                                  "maximum": 300
-                                },
-                                "source": {
-                                  "type": "string",
-                                  "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                },
-                                "peerless_leecher_floor_s": {
-                                  "type": "integer",
-                                  "const": 120
-                                },
-                                "constraint_source": {
-                                  "type": "string",
-                                  "const": "pinned-aria2-client"
-                                }
-                              },
-                              "required": [
-                                "value",
-                                "source",
-                                "peerless_leecher_floor_s",
-                                "constraint_source"
-                              ]
+                            "source": {
+                              "type": "string",
+                              "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
                             }
+                          },
+                          "required": [
+                            "value",
+                            "source"
                           ]
                         },
                         "numwant": {
@@ -54018,179 +53762,7 @@
                     "tracker_qos": [
                       "tracker_state"
                     ]
-                  },
-                  "allOf": [
-                    {
-                      "if": {
-                        "required": [
-                          "tracker_state"
-                        ],
-                        "properties": {
-                          "tracker_state": {
-                            "const": "seeder"
-                          }
-                        }
-                      },
-                      "then": {
-                        "properties": {
-                          "tracker_qos": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                              "announce_min_interval_s": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "value": {
-                                    "type": "integer",
-                                    "minimum": 10,
-                                    "maximum": 300
-                                  },
-                                  "source": {
-                                    "type": "string",
-                                    "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                  }
-                                },
-                                "required": [
-                                  "value",
-                                  "source"
-                                ]
-                              },
-                              "numwant": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "value": {
-                                    "type": "integer",
-                                    "minimum": 4,
-                                    "maximum": 200
-                                  },
-                                  "source": {
-                                    "type": "string",
-                                    "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                  },
-                                  "effective_ceiling": {
-                                    "type": "integer",
-                                    "minimum": 4,
-                                    "maximum": 50
-                                  },
-                                  "runtime_request_zero": {
-                                    "type": "string",
-                                    "const": "disabled"
-                                  },
-                                  "constraint_source": {
-                                    "type": "string",
-                                    "const": "pinned-aria2-client"
-                                  }
-                                },
-                                "required": [
-                                  "value",
-                                  "source",
-                                  "effective_ceiling",
-                                  "runtime_request_zero",
-                                  "constraint_source"
-                                ]
-                              }
-                            },
-                            "required": [
-                              "announce_min_interval_s",
-                              "numwant"
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "if": {
-                        "required": [
-                          "tracker_state"
-                        ],
-                        "properties": {
-                          "tracker_state": {
-                            "const": "leecher"
-                          }
-                        }
-                      },
-                      "then": {
-                        "properties": {
-                          "tracker_qos": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                              "announce_min_interval_s": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "value": {
-                                    "type": "integer",
-                                    "minimum": 10,
-                                    "maximum": 300
-                                  },
-                                  "source": {
-                                    "type": "string",
-                                    "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                  },
-                                  "peerless_leecher_floor_s": {
-                                    "type": "integer",
-                                    "const": 120
-                                  },
-                                  "constraint_source": {
-                                    "type": "string",
-                                    "const": "pinned-aria2-client"
-                                  }
-                                },
-                                "required": [
-                                  "value",
-                                  "source",
-                                  "peerless_leecher_floor_s",
-                                  "constraint_source"
-                                ]
-                              },
-                              "numwant": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                  "value": {
-                                    "type": "integer",
-                                    "minimum": 4,
-                                    "maximum": 200
-                                  },
-                                  "source": {
-                                    "type": "string",
-                                    "pattern": "^(?:builtin|global|global-state:(?:seeder|leecher)|role:[a-z0-9][a-z0-9._-]{0,31}|role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$"
-                                  },
-                                  "effective_ceiling": {
-                                    "type": "integer",
-                                    "minimum": 4,
-                                    "maximum": 50
-                                  },
-                                  "runtime_request_zero": {
-                                    "type": "string",
-                                    "const": "disabled"
-                                  },
-                                  "constraint_source": {
-                                    "type": "string",
-                                    "const": "pinned-aria2-client"
-                                  }
-                                },
-                                "required": [
-                                  "value",
-                                  "source",
-                                  "effective_ceiling",
-                                  "runtime_request_zero",
-                                  "constraint_source"
-                                ]
-                              }
-                            },
-                            "required": [
-                              "announce_min_interval_s",
-                              "numwant"
-                            ]
-                          }
-                        }
-                      }
-                    }
-                  ]
+                  }
                 },
                 "example": {
                   "revision": 4,
@@ -54285,9 +53857,7 @@
                     },
                     "announce_min_interval_s": {
                       "value": 30,
-                      "source": "builtin",
-                      "peerless_leecher_floor_s": 120,
-                      "constraint_source": "pinned-aria2-client"
+                      "source": "builtin"
                     },
                     "numwant": {
                       "value": 50,
