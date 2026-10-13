@@ -11,7 +11,9 @@ import shlex
 import subprocess
 import sys
 import tarfile
+import threading
 from types import SimpleNamespace
+import urllib.request
 
 import pytest
 
@@ -92,6 +94,24 @@ def test_runtime_contract_bool_is_not_an_integer():
     new = {'services': {'iris': {'read_only': 1}, 'console': {}}}
     with pytest.raises(InstallError, match='runtime layout'):
         plan.candidate_compose(old, old, new, {'iris': 'sha256:' + '1' * 64, 'console': 'sha256:' + '2' * 64})
+
+
+@pytest.mark.parametrize('damage', ['obsolete-name', 'extra-alias', 'missing-sidecar'])
+def test_upgrade_guest_outputs_require_the_exact_served_names(damage):
+    expected = {'iris-agent.tgz', 'iris-agent.tgz.sha256',
+                'iris-agent-arm.tgz', 'iris-agent-arm.tgz.sha256'}
+    assert plan.GUEST_FILES == expected
+    files = {name: 'a' * 64 for name in plan.BUILD_FILES}
+    plan.file_manifest(files, expected=plan.BUILD_FILES)
+    if damage == 'obsolete-name':
+        for suffix in ('', '.sha256'):
+            files['iris-agent-arm64.tgz' + suffix] = files.pop('iris-agent-arm.tgz' + suffix)
+    elif damage == 'extra-alias':
+        files['iris-agent-arm64.tgz'] = 'a' * 64
+    else:
+        files.pop('iris-agent-arm.tgz.sha256')
+    with pytest.raises(InstallError, match='incomplete or unexpected'):
+        plan.file_manifest(files, expected=plan.BUILD_FILES)
 
 
 def test_upgrade_cli_requires_explicit_operation_plan_and_package_proof():
@@ -232,7 +252,7 @@ else:
             assert argv[-2:] == ['--instruction-roots-dir', str(base / 'roots')]
             assert Path(argv[4]).parent == artifacts
             assert (Path(argv[3]).name, Path(argv[4]).name) in (
-                ('aria2c-x86_64', 'iris-agent.tgz'), ('aria2c-aarch64', 'iris-agent-arm64.tgz'))
+                ('aria2c-x86_64', 'iris-agent.tgz'), ('aria2c-aarch64', 'iris-agent-arm.tgz'))
             arch = 'amd64' if Path(argv[3]).name.endswith('x86_64') else 'arm64'
             assert argv[5:7] == ['--ssh-keygen', str(helpers / ('ssh-keygen-' + arch))]
             assert env['IRIS_AEAD_HELPER'] == str(helpers / ('iris-aead-' + arch))
@@ -262,7 +282,7 @@ else:
         with pytest.raises(subprocess.CalledProcessError) as error:
             candidate.build(install, operation, {'source': manifest}, source)
         assert error.value.returncode == (19 if damage.endswith('-build') else 1)
-        assert not (artifacts / 'iris-agent-arm64.tgz').exists()
+        assert not (artifacts / 'iris-agent-arm.tgz').exists()
         if not damage.endswith('-build'):
             assert b'pack-agent-bundle:' in error.value.stderr
         if damage == 'crypto-build':
@@ -274,7 +294,7 @@ else:
             'stage-iox-package.sh', 'build-xr-package.sh', 'build-ssh-verifiers.sh',
             'build-instruction-crypto.sh', 'pack-agent-bundle.sh', 'pack-agent-bundle.sh']
         assert built['native_admission'] == 'not-qualified-by-this-build'
-        for filename, machine in (('iris-agent.tgz', 62), ('iris-agent-arm64.tgz', 183)):
+        for filename, machine in (('iris-agent.tgz', 62), ('iris-agent-arm.tgz', 183)):
             bundle = artifacts / filename
             with tarfile.open(bundle) as archive:
                 for name in ('aria2c', 'agent/ssh-keygen', 'agent/iris-aead'):
@@ -293,6 +313,61 @@ else:
     assert list(served.iterdir()) == [served / 'sentinel']
     assert list(old_cache.iterdir()) == [old_cache / 'sentinel']
     assert (old_cache / 'sentinel').read_bytes() == b'current builder cache'
+    if damage is None:
+        _assert_candidate_publishes_guest_shell_routes(install, operation, built, monkeypatch)
+
+
+def _assert_candidate_publishes_guest_shell_routes(install, operation, built, monkeypatch):
+    """Real packer -> staged generation -> published public route, no native execution."""
+    import artifact_server
+    from iris_installer import upgrade_runtime as runtime
+
+    served = install.base / 'artifacts'
+    original = {}
+    for name in ('iris-agent.tgz', 'iris-agent-arm.tgz'):
+        original[name] = ('stale ' + name).encode()
+        original[name + '.sha256'] = hashlib.sha256(original[name]).hexdigest().encode() + b'\n'
+    original['iris-catalog.pem'] = b'unchanged deployment certificate'
+    for name, raw in original.items():
+        atomic_write(served / name, raw, 0o644)
+    operation.record = {}
+    saves = []
+    operation.save = lambda: saves.append(plan.canonical(operation.record))
+    # Unit tests keep the invoking user's custody. Only chown is modeled;
+    # inventory, staging, hash checks, fsync and directory publication are real.
+    monkeypatch.setattr(runtime.os, 'chown', lambda *args: None)
+    runtime.stage_artifacts(install, operation, built)
+    assert len(saves) == 2
+    assert all((served / name).read_bytes() == raw for name, raw in original.items())
+    staged = install.base / ('.upgrade-artifacts-' + operation.id)
+    assert not (staged / 'iris-agent-arm64.tgz').exists()
+    for name in ('iris-agent.tgz', 'iris-agent-arm.tgz'):
+        assert artifact_server._legacy_guest_shell_target('/' + name) == name
+        assert (staged / name).read_bytes() != original[name]
+        digest = hashlib.sha256((staged / name).read_bytes()).hexdigest()
+        assert digest == built['files'][name]
+        assert (staged / (name + '.sha256')).read_bytes() == digest.encode() + b'\n'
+    assert artifact_server._legacy_guest_shell_target('/iris-agent-arm64.tgz') is None
+    retained = install.base / ('.test-retained-artifacts-' + operation.id)
+    runtime.storage.publish(served, staged, retained,
+        runtime.storage.fingerprint(operation.record['artifact_before']),
+        runtime.storage.fingerprint(operation.record['artifact_after']))
+    assert all((retained / name).read_bytes() == raw for name, raw in original.items())
+    assert (served / 'iris-catalog.pem').read_bytes() == original['iris-catalog.pem']
+    assert (served / 'sentinel').read_bytes() == b'current served package'
+    server = artifact_server.make_server('127.0.0.1', 0, str(served))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for name in ('iris-agent.tgz', 'iris-agent-arm.tgz'):
+            with urllib.request.urlopen('http://127.0.0.1:%d/%s' % (server.server_address[1], name),
+                                        timeout=5) as response:
+                assert response.status == 200
+                assert hashlib.sha256(response.read()).hexdigest() == built['files'][name]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_iox_parser_rejects_obsolete_upgrade_artifacts_flag_before_any_build(tmp_path):

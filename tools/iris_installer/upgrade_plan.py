@@ -23,7 +23,7 @@ SERVICES = ('iris', 'console')
 NATIVE_FILES = frozenset(name + suffix for name in
     ('iris-amd64.tar', 'iris-arm64.tar', 'iris-xr.rpm') for suffix in ('', '.manifest'))
 GUEST_FILES = frozenset(name + suffix for name in
-    ('iris-agent.tgz', 'iris-agent-arm64.tgz') for suffix in ('', '.sha256'))
+    ('iris-agent.tgz', 'iris-agent-arm.tgz') for suffix in ('', '.sha256'))
 BUILD_FILES = NATIVE_FILES | GUEST_FILES | {'device.oci.tar', 'device.oci.tar.manifest'}
 
 

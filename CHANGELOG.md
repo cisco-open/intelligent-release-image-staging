@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Publish the ARM Guest Shell upgrade bundle under its served filename so
+  source-built application upgrades replace the existing bundle and checksum.
+
 - Clarify that a distribution-access storage error can follow a saved approval;
   reread the current approval and status before a new preview.
 

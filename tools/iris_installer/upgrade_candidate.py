@@ -140,7 +140,7 @@ def build(install, operation, selection, source):
     run(['bash', candidate_source / 'tools/build-instruction-crypto.sh', helpers],
         IRIS_CRYPTO_ARCHES='amd64 arm64')
     for architecture, helper_arch, filename in (('x86_64', 'amd64', 'iris-agent.tgz'),
-                                               ('aarch64', 'arm64', 'iris-agent-arm64.tgz')):
+                                               ('aarch64', 'arm64', 'iris-agent-arm.tgz')):
         run(['bash', candidate_source / 'server/pack-agent-bundle.sh', candidate_source / 'device',
              candidate_source / 'deliverables' / ('aria2c-' + architecture), artifacts / filename,
              '--ssh-keygen', helpers / ('ssh-keygen-' + helper_arch),
