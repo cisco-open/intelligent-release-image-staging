@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Refresh both architecture-matched Guest Shell bundles at server startup and
+  instruction-root rotation. Missing or stale ARM files now prevent readiness.
+
 - Explain that peer arrows and faster reporting require telemetry streaming
   to be enabled during device onboarding; saving an interval keeps that choice.
 

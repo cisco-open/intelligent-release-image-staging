@@ -8,6 +8,8 @@ import json
 import os
 import tarfile
 
+import pytest
+
 import setup_status
 
 # Two tiny self-signed certificates, generated once and pinned here so the
@@ -116,6 +118,8 @@ def _write_served_bundle_fixture(tmp_path, root_bytes=b"root trust\n"):
             archive.addfile(info, io.BytesIO(data))
     digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
     (artifacts / "iris-agent.tgz.sha256").write_text(digest + "\n")
+    (artifacts / "iris-agent-arm.tgz").write_bytes(bundle.read_bytes())
+    (artifacts / "iris-agent-arm.tgz.sha256").write_text(digest + "\n")
     (artifacts / "bootstrap.sh").write_bytes(b"bootstrap\n")
     (artifacts / "iris-signers.pem").write_bytes(
         embedded["iris-signers.allowed_signers"])
@@ -123,6 +127,7 @@ def _write_served_bundle_fixture(tmp_path, root_bytes=b"root trust\n"):
     record = {"format": "iris-served-bundle-v1", "state": "ok",
               "reason": "ready"}
     for name in ("iris-agent.tgz", "iris-agent.tgz.sha256",
+                 "iris-agent-arm.tgz", "iris-agent-arm.tgz.sha256",
                  "bootstrap.sh", "iris-signers.pem"):
         record[name] = hashlib.sha256((artifacts / name).read_bytes()).hexdigest()
     for name, data in embedded.items():
@@ -137,20 +142,33 @@ def test_served_bundle_readiness_binds_raw_sidecar_and_embedded_trust(tmp_path):
         str(artifacts), str(status), startup_state="ok")
     assert item["state"] == "ok", item
 
+
     # Model a replaced bundle whose adjacent digest and top-level provenance
     # were both updated, while its embedded offline-root trust changed.
     _write_served_bundle_fixture(tmp_path, root_bytes=b"substituted root\n")
-    bundle = artifacts / "iris-agent.tgz"
-    digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
-    sidecar = artifacts / "iris-agent.tgz.sha256"
-    sidecar.write_text(digest + "\n")
-    record["iris-agent.tgz"] = digest
-    record["iris-agent.tgz.sha256"] = hashlib.sha256(
-        sidecar.read_bytes()).hexdigest()
+    for name in ("iris-agent.tgz", "iris-agent-arm.tgz"):
+        bundle = artifacts / name
+        digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+        sidecar = artifacts / (name + ".sha256")
+        sidecar.write_text(digest + "\n")
+        record[name] = digest
+        record[name + ".sha256"] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
     status.write_text(json.dumps(record) + "\n")
     item = setup_status.served_bundle_readiness(
         str(artifacts), str(status), startup_state="ok")
     assert item["state"] == "stale"
+    assert item["reason"] == "served-bundle-changed"
+    assert item["detail"].startswith("Embedded device instruction trust changed")
+
+
+@pytest.mark.parametrize('damage', ['missing', 'sidecar', 'archive'])
+def test_served_bundle_readiness_cannot_ignore_missing_or_stale_arm(tmp_path, damage):
+    artifacts, status, record = _write_served_bundle_fixture(tmp_path)
+    arm = artifacts / 'iris-agent-arm.tgz'
+    if damage == 'missing': arm.unlink()
+    elif damage == 'sidecar': (artifacts / (arm.name + '.sha256')).write_bytes(b'0' * 64 + b'\n')
+    else: arm.write_bytes(b'previous ARM bundle')
+    assert setup_status.served_bundle_readiness(str(artifacts), str(status), startup_state='ok')['state'] != 'ok'
 
 
 def test_served_bundle_readiness_rejects_noncanonical_digest_sidecar(tmp_path):

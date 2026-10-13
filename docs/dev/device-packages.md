@@ -46,6 +46,11 @@ platform:
 
 A build needs exactly two distinct approved public root files (`.pub`) in
 `IRIS_INSTRUCTION_ROOTS_DIR`, or passed with `--instruction-roots-dir DIR`.
+
+The server image includes both architecture-matched Guest Shell clients and
+their compiled verification helpers. Startup and instruction-root rotation
+refresh both `iris-agent.tgz` and `iris-agent-arm.tgz`, including their digest
+sidecars. Readiness requires both bundles to contain the current public trust.
 Set `ARIA2C_BIN_AMD64` and `ARIA2C_BIN_ARM64` to point at the current pinned
 `aria2c` binaries when older ones are still sitting in the fallback
 locations; a mismatched architecture or checksum stops the build. These
@@ -240,8 +245,10 @@ pins.
 
 ## Resolve ARM64 emulation for the build host
 
-An amd64 host needs ARM64 emulation to build the arm64 IOx package, whose
-image runs `apk add` and `chmod` steps inside the target platform. The host
+An amd64 host needs ARM64 emulation to build the server's ARM64 verification
+helpers and the arm64 IOx package. These builds run commands inside the target
+platform. The Ubuntu installer provisions and checks emulation before building.
+The host
 also needs it for an intentional `aarch64` `aria2c` source build.
 [Download the tools that build device packages](../zensical/install/build-tools.md)
 covers checking whether the host already has a working handler and

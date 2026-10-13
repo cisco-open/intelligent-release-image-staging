@@ -43,8 +43,9 @@ The tool installs at `tools/bin/ioxclient`, checked against
 
 ## 2. Check ARM64 emulation
 
-Building the arm64 IOx package on an amd64 host needs QEMU emulation. Check the
-host:
+An amd64 build host needs QEMU for the server's ARM64 verification helpers and
+the arm64 IOx package. The Ubuntu installer handles this dependency. For a
+manual source build, check the host:
 
 ```bash
 grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready

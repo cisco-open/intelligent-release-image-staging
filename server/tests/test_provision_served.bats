@@ -27,11 +27,21 @@ import pathlib,sys
 pathlib.Path(sys.argv[1]).write_bytes(b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x02\x00\x3e\x00' + bytes(44))
 PYTHON
   cp "$TMP/aria2c" "$IRIS_SSH_KEYGEN"
+  python3 - "$TMP/aria2c-arm64" <<'PYTHON'
+import pathlib,sys
+pathlib.Path(sys.argv[1]).write_bytes(b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x02\x00\xb7\x00' + bytes(44))
+PYTHON
+  export IRIS_ARIA2_ARM="$TMP/aria2c-arm64"
+  export IRIS_SSH_KEYGEN_ARM="$TMP/ssh-keygen-arm64"
+  export IRIS_AEAD_HELPER_ARM="$TMP/iris-aead-arm64"
+  cp "$IRIS_ARIA2_ARM" "$IRIS_SSH_KEYGEN_ARM"
+  cp "$IRIS_ARIA2_ARM" "$IRIS_AEAD_HELPER_ARM"
   export IRIS_AEAD_HELPER="$TMP/iris-aead"
   cp "$TMP/aria2c" "$IRIS_AEAD_HELPER"
   printf "license fixture\n" > "$TMP/iris-aead.LICENCE"
   chmod +x "$TMP/aria2c"
   printf '%s  x86_64\n' "$(sha256sum "$TMP/aria2c" | awk '{print $1}')" > "$TMP/aria2c.sha256"
+  printf '%s  aarch64\n' "$(sha256sum "$IRIS_ARIA2_ARM" | awk '{print $1}')" >> "$TMP/aria2c.sha256"
   mkdir -p "$TMP/config/tls"; printf 'CRTPEM\n' > "$TMP/config/tls/crt.pem"
   mkdir -p "$TMP/config/instr/roots.d"
   for name in root-b root-a; do
@@ -47,6 +57,53 @@ PYTHON
   }
 }
 teardown() { rm -rf "$TMP"; }
+
+@test "both architectures refresh their exact public trust after root replacement" {
+  run run_prov
+  [ "$status" -eq 0 ]
+  amd_before="$(sha256sum "$ART/iris-agent.tgz" | awk '{print $1}')"
+  arm_before="$(sha256sum "$ART/iris-agent-arm.tgz" | awk '{print $1}')"
+  for name in root-a root-b; do
+    ssh-keygen -q -t ed25519 -N '' -C replacement-test -f "$TMP/replacement-$name"
+    cp "$TMP/replacement-$name.pub" "$TMP/config/instr/roots.d/$name.pub"
+  done
+  run run_prov
+  [ "$status" -eq 0 ]
+  [ "$amd_before" != "$(sha256sum "$ART/iris-agent.tgz" | awk '{print $1}')" ]
+  [ "$arm_before" != "$(sha256sum "$ART/iris-agent-arm.tgz" | awk '{print $1}')" ]
+  for bundle in iris-agent.tgz iris-agent-arm.tgz; do
+    [ "$(cat "$ART/$bundle.sha256")" = "$(sha256sum "$ART/$bundle" | awk '{print $1}')" ]
+    tar xOf "$ART/$bundle" iris-signers.allowed_signers > "$TMP/$bundle.signers"
+    cmp "$TMP/$bundle.signers" "$ART/iris-signers.pem"
+  done
+  PYTHONPATH="$BATS_TEST_DIRNAME/.." python3 - "$ART" "$TMP/run/served-bundle.json" <<'PYTHON'
+import sys,setup_status
+assert setup_status.served_bundle_readiness(*sys.argv[1:],startup_state='ok')['state']=='ok'
+PYTHON
+}
+
+@test "missing ARM input cannot preserve a stale healthy publication" {
+  run run_prov
+  [ "$status" -eq 0 ]
+  cp "$ART/iris-agent-arm.tgz" "$TMP/prior-arm.tgz"
+  rm "$IRIS_ARIA2_ARM"
+  run run_prov
+  [ "$status" -ne 0 ]
+  cmp "$ART/iris-agent-arm.tgz" "$TMP/prior-arm.tgz"
+  [[ "$(cat "$TMP/run/served-bundle.json")" == *'"state": "failed"'* ]]
+}
+
+@test "wrong ARM verifier cannot publish either new bundle or a success record" {
+  run run_prov
+  [ "$status" -eq 0 ]
+  cp "$ART/iris-agent.tgz" "$TMP/prior-amd.tgz"
+  cp "$ART/iris-agent-arm.tgz" "$TMP/prior-arm.tgz"
+  cp "$TMP/aria2c" "$IRIS_SSH_KEYGEN_ARM"
+  run run_prov
+  [ "$status" -ne 0 ]
+  cmp "$ART/iris-agent.tgz" "$TMP/prior-amd.tgz"
+  cmp "$ART/iris-agent-arm.tgz" "$TMP/prior-arm.tgz"
+}
 
 @test "served bundle publication writes the archive before its adjacent digest" {
   bundle_line="$(grep -n 'stage_atomic .*iris-agent.tgz" iris-agent.tgz' "$PROV" | cut -d: -f1)"

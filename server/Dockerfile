@@ -13,8 +13,8 @@
 # silently ships an out-of-date base (issue #13). tools/start-compose-server.sh
 # passes it for the same reason.
 #
-# The alpha server image is intentionally amd64: the static aria2c copied into
-# the Guest Shell bundle must match the x86_64 Catalyst platforms it serves.
+# The server runs on amd64 and publishes architecture-matched Guest Shell
+# bundles using the separately verified amd64 and arm64 client inputs.
 # ---------------------------------------------------------------------------
 # The IRIS server image.
 # ---------------------------------------------------------------------------
@@ -53,6 +53,13 @@ COPY --from=ssh-verifier-arm64 /out/ssh-keygen /ssh-keygen-arm64
 COPY --from=ssh-verifier-amd64 /out/ssh-keygen.LICENCE /ssh-keygen.LICENCE
 
 FROM --platform=linux/amd64 alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS instruction-crypto
+COPY tools/iris-aead.c /src/iris-aead.c
+COPY tools/build-instruction-crypto-inner.sh /src/build.sh
+COPY tools/licenses/musl-COPYRIGHT /src/musl-COPYRIGHT
+ADD --checksum=sha256:7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.9/LICENSE.txt /src/openssl-LICENSE
+RUN sh /src/build.sh
+
+FROM --platform=linux/arm64 alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS instruction-crypto-arm64
 COPY tools/iris-aead.c /src/iris-aead.c
 COPY tools/build-instruction-crypto-inner.sh /src/build.sh
 COPY tools/licenses/musl-COPYRIGHT /src/musl-COPYRIGHT
@@ -99,12 +106,15 @@ RUN apt-get update \
 #
 # Run tools/get-aria2c.sh before building this image, or the COPY below fails.
 COPY bin/aria2c /opt/iris/bin/aria2c
-# Startup provisions only the amd64 Guest Shell bundle. Keep the ordinary
-# amd64 server build independent of an ARM emulation worker.
+# Both committed clients and compiled helpers are baked into the server;
+# publishing new deployment trust does not compile or download at startup.
+COPY deliverables/aria2c-aarch64 /opt/iris/bin/aria2c-arm64
 COPY --from=ssh-verifier-amd64 /out/ssh-keygen /opt/iris/bin/ssh-keygen-amd64
+COPY --from=ssh-verifier-arm64 /out/ssh-keygen /opt/iris/bin/ssh-keygen-arm64
 COPY --from=ssh-verifier-amd64 /out/ssh-keygen.LICENCE /opt/iris/bin/ssh-keygen.LICENCE
 COPY --from=instruction-crypto /out/iris-aead /opt/iris/bin/iris-aead
 COPY --from=instruction-crypto /out/iris-aead /opt/iris/bin/iris-aead-amd64
+COPY --from=instruction-crypto-arm64 /out/iris-aead /opt/iris/bin/iris-aead-arm64
 COPY --from=instruction-crypto /out/iris-aead.LICENCE /opt/iris/bin/iris-aead.LICENCE
 COPY tools/aria2c.sha256 /opt/iris/tools/aria2c.sha256
 
@@ -128,6 +138,9 @@ RUN set -eux; \
       echo "FAIL: /opt/iris/bin/aria2c is not statically linked" >&2; \
       ldd /opt/iris/bin/aria2c 2>&1 || true; exit 1; \
     fi
+
+RUN chmod 0755 /opt/iris/bin/aria2c-arm64 \
+    && python3 -c 'import hashlib,pathlib; p=pathlib.Path("/opt/iris/bin/aria2c-arm64"); b=p.read_bytes(); pins=[r.split()[0] for r in pathlib.Path("/opt/iris/tools/aria2c.sha256").read_text().splitlines() if len(r.split())==2 and r.split()[1]=="aarch64"]; assert len(pins)==1 and hashlib.sha256(b).hexdigest()==pins[0] and b[:6]==b"\x7fELF\x02\x01" and b[18:20]==b"\xb7\x00", "ARM client checksum or architecture differs"'
 
 
 WORKDIR /opt/iris
