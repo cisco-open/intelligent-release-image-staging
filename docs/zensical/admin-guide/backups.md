@@ -70,6 +70,29 @@ server PVC. A vanished or forcibly terminated pod is not sufficient evidence.
 The service age identity remains in the separate recovery set. The external
 worker and its transport credentials must remain available during downtime.
 
+## Trust the backup signer
+
+Before your first restore or managed upgrade:
+
+1. Select **Back up now**, confirm downtime and wait for `captured` in backup
+   history. The first capture creates a separate backup signing key. Its public
+   file is `<installation-state-directory>/backup-custody/signer.pub`.
+2. Obtain that public file through an authenticated host connection. Record its
+   fingerprint with `ssh-keygen -lf <public-file>` and keep an independent copy
+   away from the deployment host. Only the `.pub` file is needed; leave the
+   private signing key in place.
+3. Put a reviewed copy at a protected path outside the installation state,
+   check it against your independent record, then run:
+
+   ```bash
+   sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris trust-signer \
+     --signer /protected/path/backup-signer.pub
+   ```
+
+Use your actual state directory and public-file path. Confirm the key when
+prompted. A signer supplied only with the selected archive is not independent
+trust. Keep this public record with the recovery material for future restores.
+
 ## Make room for new operations
 
 **Settings → Backup & restore** shows space for 100 recent maintenance records
@@ -140,10 +163,8 @@ Keep the age identity in its separate protected backup. After a loss, see
 
 For an installer-owned deployment:
 
-1. Set recovery access on the installer host as described above. Set the trusted
-   backup signer with `irisctl maintenance --state-dir <installation-state-directory>
-   trust-signer --signer /protected/path/backup-signer.pub`, using `sudo`.
-   Check this public key against your independently held record.
+1. Set recovery access on the installer host as described above and
+   [trust the backup signer](#trust-the-backup-signer) using your independent record.
 2. In **Settings → Backup & restore**, select the captured backup and choose
    **Restore selected backup**. From the host terminal, use the maintenance
    action `restore --job-id <backup-job-id> --allow-downtime` instead.

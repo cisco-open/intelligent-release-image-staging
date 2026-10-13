@@ -80,7 +80,8 @@ deployment, or the device's running software.
 
 Any change under the shared agent code needs a fresh build of every package
 before it ships. Build the Guest Shell bundle, both IOx tars, and the IOS-XR
-rpm from the same source and the same pinned aria2c binary. For the full
+rpm from the same reviewed source, using the matching checksum-pinned aria2c
+client for each architecture. For the full
 build and publish steps, including the ARM64 IOx package, see
 [Build and publish the device packages](../zensical/install/device-packages.md#build-and-publish-the-arm64-iox-package).
 

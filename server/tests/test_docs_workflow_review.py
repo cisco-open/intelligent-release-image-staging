@@ -96,6 +96,54 @@ def test_upgrade_keeps_three_steps_and_passes_reviewed_roots():
     assert "### Onboard the devices again" in source
 
 
+def test_backup_signer_setup_names_the_producer_and_independent_trust_step():
+    page = " ".join(_document("admin-guide/backups.md").split())
+    upgrade = _document("admin-guide/upgrade.md")
+    help_text = (ROOT / "server/webroot/help-server.html").read_text()
+    producer = (ROOT / "tools/iris_installer/backup.py").read_text()
+    consumer = (ROOT / "tools/iris_installer/managed_worker.py").read_text()
+    assert "directory = journal.directory / 'backup-custody'" in producer
+    assert "directory / 'signer.pub'" in producer
+    assert "source == state or state in source.parents" in consumer
+    assert "Independent public signer does not match this deployment backup signer" in consumer
+    assert "wait for `captured`" in page
+    assert "<installation-state-directory>/backup-custody/signer.pub" in page
+    assert "fingerprint with `ssh-keygen -lf <public-file>`" in page
+    assert "outside the installation state" in page
+    assert "trust-signer" in page and "--signer /protected/path/backup-signer.pub" in page
+    assert "signer supplied only with the selected archive is not independent trust" in page
+    assert "backups.md#trust-the-backup-signer" in upgrade
+    assert "backups/#trust-the-backup-signer" in help_text
+    assert "backup-custody/signer.pub" in help_text
+
+
+def test_iox_assembly_is_unsigned_and_native_signing_is_separate():
+    builder = (ROOT / "device/iox/build.sh").read_text()
+    contributor = (ROOT / "docs/dev/device-packages.md").read_text()
+    assert '"$IOXCLIENT" package --skip-signing .' in builder
+    assert "assembles an unsigned package offline" in contributor
+    assert "iox.md#native-package-signing" in contributor
+    assert "assembles and signs" not in contributor
+
+
+def test_release_checklist_uses_the_matching_client_for_each_architecture():
+    checklist = " ".join((ROOT / "docs/dev/release-checklist.md").read_text().split())
+    assert "matching checksum-pinned aria2c client for each architecture" in checklist
+    assert "same pinned aria2c binary" not in checklist
+
+
+def test_manual_server_build_requires_emulation_before_iox_registration():
+    start = (ROOT / "tools/start-compose-server.sh").read_text()
+    stage = (ROOT / "tools/stage-iox-package.sh").read_text()
+    operator = " ".join(_document("install/build-tools.md").split())
+    contributor = " ".join((ROOT / "docs/dev/device-packages.md").read_text().split())
+    assert "ARM64 emulation is not enabled on the Docker build host" in start
+    assert '"tonistiigi/binfmt@$BINFMT_IMAGE_DIGEST" --install arm64' in stage
+    assert "before building the server" in operator
+    assert "arm64 IOx staging helper can register" in operator
+    assert "direct image builds need the handler ready before building" in contributor
+
+
 def test_kubernetes_token_rotation_reuses_protected_installation_files():
     install = _document("install/kubernetes.md")
     rotations = _document("admin-guide/rotations.md")

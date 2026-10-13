@@ -24,7 +24,8 @@ keeping your accounts, keys, inventory, images and deployment storage.
 2. Finish running jobs. Undeploy every IRIS agent and wait for confirmed
    removal. Keep the device inventory; you will onboard it again afterwards.
 3. Check that the managed worker is running and that recovery access and the
-   independent backup signer are configured. See [Back up and restore](backups.md).
+   independent backup signer are configured. For first-time setup, follow
+   [Trust the backup signer](backups.md#trust-the-backup-signer).
 
 Prepare the candidate using the authenticated release's full commit and the
 SHA256 of its `.deb.source.json` file:

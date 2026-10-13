@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Document first-time backup signer trust, separate IOx assembly from native
+  signing, and clarify architecture-specific clients and ARM build prerequisites.
 - Keep tracker announcements responsive when a device reaches its overall
   download limit, while retaining image-transfer rate limits and peer TLS checks.
 - Correct the policy preview's nonexistent 120-second tracker interval floor.

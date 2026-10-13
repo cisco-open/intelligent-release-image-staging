@@ -214,6 +214,13 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     Match the operation ID and check its result; acceptance is not completion.
     An uncertain response needs a refresh and review before another request.
     Running or interrupted worker operations block new maintenance.</p>
+    <p>Before a first restore or managed upgrade, complete a backup and record
+    its public signer from <code>&lt;installation-state-directory&gt;/backup-custody/signer.pub</code>
+    through a trusted host connection. Keep an independent public copy, then use
+    <code>irisctl maintenance</code> with <code>trust-signer</code> and that reviewed
+    file outside installation state. The
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/admin-guide/backups/#trust-the-backup-signer" target="_blank" rel="noopener">backup signer procedure</a>
+    has the steps. Never establish trust from a signer supplied only with the selected archive.</p>
     <p>Restore keeps your current <strong>Policies → Distribution access</strong>
     settings and safety records for shared IP addresses. Check application
     status again after the server restarts.</p>

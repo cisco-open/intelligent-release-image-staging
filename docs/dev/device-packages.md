@@ -256,9 +256,10 @@ installing the distribution package that provides one. Run those checks on
 the host where the Docker daemon builds the packages, not on the Console
 host or a Kubernetes worker chosen at random.
 
-When no handler is registered, the builders register one themselves, and
-require an audited `tonistiigi/binfmt` digest rather than a floating tag.
-Review the tag you intend to use, resolve it to a digest, and export it:
+The server start helper and direct image builds need the handler ready before
+building. The arm64 IOx staging helper can register it with an audited
+`tonistiigi/binfmt` digest rather than a floating tag. For that helper, review
+the tag you intend to use, resolve it to a digest, and export it:
 
 ```bash
 docker buildx imagetools inspect tonistiigi/binfmt:<reviewed-tag> \
@@ -266,8 +267,8 @@ docker buildx imagetools inspect tonistiigi/binfmt:<reviewed-tag> \
 export BINFMT_IMAGE_DIGEST=sha256:<the digest printed above>
 ```
 
-With the digest unset, the build fails instead of pulling an image nobody
-reviewed.
+If registration is needed and the digest is unset, the IOx staging helper
+fails instead of pulling an image nobody reviewed.
 
 Use a Buildx builder that supports multi-platform OCI export. Reuse an
 approved one, or, once it is approved, create a dedicated
@@ -297,8 +298,9 @@ package` call, it points `HOME` at a scratch directory holding an inert
 profile it writes there. That profile names `localhost` and a placeholder
 credential, and the build discards it with the rest of the build context.
 
-Packaging never reaches a device: it assembles and signs a directory,
-offline. Because packaging runs with this throwaway profile in place, an
+Packaging never reaches a device: it assembles an unsigned package offline.
+Native signing is a separate [IOx package signing step](../zensical/install/iox.md#native-package-signing).
+Because packaging runs with this throwaway profile in place, an
 ordinary operator profile, which may hold a real device address and
 credential, plays no part in it. IRIS reaches devices through its own
 onboarding, never through `ioxclient`.
