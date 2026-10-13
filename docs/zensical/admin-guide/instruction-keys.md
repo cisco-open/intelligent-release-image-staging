@@ -154,7 +154,7 @@ certificate separately when due. The CLI example below uses separately held offl
    ```
 
    The status shows the new keylist sequence.
-8. Repeat steps 5 to 7 with the other custodian, the other root and the next
+8. Repeat steps 5 to 7 with the other key holder, the other root and the next
    sequence, so both roots are attested on their own.
 9. Compare the Console panel and the `iris_instruction_*` metrics with the
    windows you recorded, then record identities, fingerprints, times and
@@ -178,8 +178,8 @@ certificate follows the shorter renewal window in steps 3 and 4.
    the next online certificate and keylist. No device trust change is required.
 4. Record the quorum as degraded until a replacement root and a new signed
    device release are in place. The 180-day attestation metric only reports
-   signed records, not physical custody, so confirm the loss with your
-   custodians directly rather than relying on that metric alone.
+   signed records, not whether someone still has the private key. Confirm the
+   loss with the key holders.
 
 ## If both root keys are lost
 

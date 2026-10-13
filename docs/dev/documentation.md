@@ -216,6 +216,8 @@ The table below records the retained aliases for the reorganization.
 | `build-and-publish-the-arm64-iox-package` | `install/device-packages.md` "Build the packages" | `test_aiagent_arm_package_docs.py`, in-docs links from two install pages. |
 | `embedded-agent-packages` | `install/device-packages.md` "When to rebuild the packages" | `help-server.html:118` (shipped in images). |
 | `initialise-instruction-custody` | `install/activate-signing.md` "Start signing instructions" | `test_aiagent_arm_package_docs.py`; in-docs links. The id keeps the old spelling; the text is American. |
+| `holder-a-on-the-first-custody-machine` | `install/signing-roots.md` "Holder A: on the first offline machine" | Saved links to the separate-holder instructions. |
+| `holder-b-on-the-second-custody-machine` | `install/signing-roots.md` "Holder B: on the second offline machine" | Saved links to the separate-holder instructions. |
 | `instruction-root-ceremony-and-recovery` | `admin-guide/instruction-keys.md` "Replace the two root keys"; the pointer section on `admin-guide/recovery.md` | `tools/start-compose-server.sh`, `kubernetes/README.md:426`, older script copies, CHANGELOG. |
 | `f3-offline-bootstrap-envelope-redelivery` | `admin-guide/instruction-keys.md` "Deliver the first instruction file by hand" | Four in-docs pages, CHANGELOG. |
 | `device-administrator-trust-boundary` | `architecture/security-model.md` "What a device administrator can still change" | The literal link `test_docs_map.py` pins on `architecture/data-path.md`. |

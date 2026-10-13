@@ -258,7 +258,7 @@ for Force. Both are described in [Console API](../reference/console-api.md).
 | Result | Next step |
 | --- | --- |
 | Online key or certificate changed | Prepare a new request in **Settings → Certificates & keys**, then obtain approval for the current key. |
-| Renewed certificate must extend the existing expiry | Check the file returned by the custodian; an older approval cannot replace a newer certificate. |
+| Renewed certificate must extend the existing expiry | Check the file returned by the key holder; an older approval cannot replace a newer certificate. |
 | Lifecycle worker unavailable | Check the worker on the installer host and its dedicated control mount. See [Back up and restore](backups.md#console-backup-controls). |
 | Backup refused for storage sharing, space or an unclean stop | Correct the reported host condition before retrying. Check that the original services recovered. |
 | `recovery-required` | Preserve `backup-operation.json` and `lifecycle-jobs.json` in the installer's private state directory. Review service state and unfinished files with the deployment maintainer; clearing the record does not repair an interrupted capture. |

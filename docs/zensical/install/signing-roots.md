@@ -31,7 +31,7 @@ For guided prompts, each holder can run
 [iris-key-setup](offline-approval.md#create-your-root). The commands below
 create the same keys directly with OpenSSH.
 
-### Holder A: on the first custody machine
+### Holder A: on the first offline machine { #holder-a-on-the-first-custody-machine }
 
 ```bash
 install -d -m 0700 ~/iris-custody
@@ -42,7 +42,7 @@ ssh-keygen -lf ~/iris-custody/root-a.pub
 Record the fingerprint. Transfer only `root-a.pub` through your approved public
 file transfer process to `~/iris-root-import/root-a.pub` on the build host.
 
-### Holder B: on the second custody machine
+### Holder B: on the second offline machine { #holder-b-on-the-second-custody-machine }
 
 ```bash
 install -d -m 0700 ~/iris-custody
@@ -52,7 +52,7 @@ ssh-keygen -lf ~/iris-custody/root-b.pub
 
 Record the fingerprint. Transfer only `root-b.pub` through your approved public
 file transfer process to `~/iris-root-import/root-b.pub` on the build host.
-Each private key stays on its holder's offline custody machine.
+Each private key stays on its holder's offline machine.
 
 ### Build host: assemble the public roots
 

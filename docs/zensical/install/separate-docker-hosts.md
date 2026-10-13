@@ -57,7 +57,7 @@ Only the server host holds `$IRIS_CONFIG/instr/signing-key.age`, the separate
 age identity, `$IRIS_RUN/instr/signing-key` runtime plaintext, and durable
 instruction state under `$IRIS_STATE`. The Console holds its management token
 and CA files and its browser identity. The two offline-root public keys are
-public material; their private keys stay with separate offline custodians.
+public material; their private keys stay with separate offline key holders.
 
 !!! warning
 

@@ -1439,6 +1439,18 @@ def test_role_docs_explain_reciprocal_edits_and_per_device_instruction_revisions
             in reference)
 
 
+def test_key_holder_guides_use_plain_language_and_preserve_saved_links():
+    for name in ("install/signing-roots.md", "admin-guide/index.md",
+                 "admin-guide/instruction-keys.md", "admin-guide/recovery.md",
+                 "install/separate-docker-hosts.md"):
+        prose = re.sub(r"\{ #[^}\n]+ \}", "", _without_code_blocks(_page(name)))
+        prose = re.sub(r"(?<=\])\([^)]*\)", "", prose)
+        assert not re.search(r"\b(?:custody|custodians?)\b", prose), name
+    roots = _page("install/signing-roots.md")
+    for holder, order in (("a", "first"), ("b", "second")):
+        assert f"{{ #holder-{holder}-on-the-{order}-custody-machine }}" in roots
+
+
 
 def test_docs_phase1_honest_guarantee_and_admin_boundary():
     """Scope confidentiality to encrypted payloads, never the entire envelope."""
@@ -1769,7 +1781,7 @@ def test_docs_phase1_kubernetes_and_split_host_custody():
                          "age identity", "runtime plaintext", "instruction state"),
                  "private custody material must remain on the server host")
     _assert_unit(split, ("offline-root public keys", "public material",
-                         "private keys", "offline custodians"),
+                         "private keys", "offline key holders"),
                  "public trust material must not be called secret")
 
     # The post-rewrite check list is one table with a column per layout, so
