@@ -558,13 +558,15 @@ def _recovery_candidate(install, operation_id):
         identity = Path(candidate['identity_path'])
         _safe_file(identity, private=True)
         private = regular_bytes(identity, 8192)
-        public = install.command(['age-keygen', '-y', identity], capture=True).decode().strip()
-        service = install.command(['age-keygen', '-y', install.base / 'age.txt'], capture=True).decode().strip()
+        public = install.command(['age-keygen', '-y'], input=private, capture=True).decode().strip()
+        service_bytes = regular_bytes(install.base / 'age.txt', 8192)
+        service = install.command(['age-keygen', '-y'], input=service_bytes, capture=True).decode().strip()
         if (public != candidate['recipient'] or public in (service, install.config['recovery_recipient'])
                 or not re.fullmatch(r'age1[0-9a-z]{58}', public)):
             raise InstallError('Select a different independent recovery identity')
         _safe_file(path, private=True); _safe_file(identity, private=True)
-        if regular_bytes(path, 16384) != raw or regular_bytes(identity, 8192) != private:
+        if (regular_bytes(path, 16384) != raw or regular_bytes(identity, 8192) != private
+                or regular_bytes(install.base / 'age.txt', 8192) != service_bytes):
             raise InstallError('Recovery custody changed during admission')
     except (OSError, ValueError, TypeError):
         raise InstallError('Recovery recipient requires a matching protected host candidate') from None
@@ -591,11 +593,15 @@ def _replacement_identity(install):
         tx.save('applying')
     identity = Path(tx.record['replacement_identity_path'])
     _safe_file(identity, private=True)
-    public = install.command(['age-keygen', '-y', identity], capture=True).decode().strip()
+    private = regular_bytes(identity, 8192)
+    public = install.command(['age-keygen', '-y'], input=private, capture=True).decode().strip()
+    _safe_file(identity, private=True)
+    if regular_bytes(identity, 8192) != private:
+        raise InstallError('Approved replacement recovery identity changed during validation')
     if public != tx.record['recovery_recipient_after']:
         raise InstallError('Approved replacement recovery identity changed')
     approval = tx.record.get('recovery_candidate_approval')
-    if approval is not None and _sha(regular_bytes(identity, 8192)) != approval['identity_sha256']:
+    if approval is not None and _sha(private) != approval['identity_sha256']:
         raise InstallError('Approved replacement recovery identity bytes changed')
     return identity
 
