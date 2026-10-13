@@ -68,10 +68,10 @@ Values are integers. Rate keys are bytes per second, and `0` means unlimited; a 
 | `fanout` | 1 | 1–1,000, and no greater than `max_peers` | global, role, device | Modeling input for derived per-torrent rates. |
 | `seed_up_bps`, `seed_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Device rate while seeding; unlimited by default. |
 | `leech_up_bps`, `leech_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Device rate while leeching; unlimited by default. |
-| `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Device-wide rate across all transfers; unlimited by default. |
+| `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Device-wide image rate across all transfers; unlimited by default. Tracker announcements remain responsive when the download limit is saturated. |
 | `max_concurrent` | 100 | 1–1,000 | global, role, device | Concurrent torrents a device runs. |
 | `request_peer_speed_limit_bps` | 51,200 | 0 or 8,192–1,000,000,000 | global, role | Per-peer request rate a device applies. |
-| `announce_min_interval_s` | 30 s | 10–300 s | global, role, state overlay | The tracker applies one bounded jitter of plus or minus 10% to the interval it issues; a peerless leecher still gets a 120 s floor. |
+| `announce_min_interval_s` | 30 s | 10–300 s | global, role, state overlay | The tracker applies one bounded jitter of plus or minus 10% to the interval it issues. |
 | `numwant` | 50 | 4–200 | global, role, state overlay | Ceiling on peers returned per announce; a client that asks for `numwant=0` gets none. |
 | `handout_budget` | 0 (off) | 0–1,000 | global, role | Per-window handout limit accepted by the API. |
 | `catalog_tick_s` | 60 s | 60–900 s, multiple of 60 | global, role, device | Catalog and staging cadence. For a restricted device, the effective value may not exceed effective `endpoint_ttl()/3`; the endpoint TTL defaults to 900 s but is configurable. |

@@ -339,8 +339,8 @@ def _verify_signature(path, bundle, selected, parent_fd, deadline, config):
 def _source_assets(tag, commit):
     package = "iris-installer_" + tag[1:] + "+installer.0.g" + commit[:12] + "_amd64.deb"
     return {"iris.tgz", "iris.tgz.sha256", "MANIFEST.txt", "release-auth.py", "release-stage.json",
-            "aria2c-x86_64", "aria2c-aarch64", "aria2c.sha256", "aria2c-2.5.6-p11-source.tar.gz",
-            "aria2c-2.5.6-p11-source.tar.gz.sha256", package, package + ".sha256", package + ".source.json"}
+            "aria2c-x86_64", "aria2c-aarch64", "aria2c.sha256", "aria2c-2.5.6-p12-source.tar.gz",
+            "aria2c-2.5.6-p12-source.tar.gz.sha256", package, package + ".sha256", package + ".source.json"}
 
 
 def _profile(value):
@@ -392,7 +392,7 @@ def _prebuilt_metadata(directory, files, selected, profile):
         kit._sha(digest)
     refs = gate._companions(evidence)
     for role, record in refs.items():
-        expected_name = ("aria2c-2.5.6-p11-source.tar.gz" if role == "aria2" else completion.COMPANIONS[role])
+        expected_name = ("aria2c-2.5.6-p12-source.tar.gz" if role == "aria2" else completion.COMPANIONS[role])
         if record["asset"] != expected_name:
             fail("prebuilt companion role has an unsupported filename")
         if role != "aria2":

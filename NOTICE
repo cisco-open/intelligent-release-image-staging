@@ -62,8 +62,8 @@ command-line / RPC interface and remains under its own license:
                aria2-next version, the same source pin, the exact patch list
                applied, and the sha256 of each committed binary.
 
-               Current corresponding source: aria2c-2.5.6-p11-source.tar.gz.
-               This local source record does not assert a published p11 release.
+               Current corresponding source: aria2c-2.5.6-p12-source.tar.gz.
+               This local source record does not assert a published p12 release.
                It contains the pinned upstream tree, local patches, build
                recipes, dependency source archives and Alpine packaging
                patches, original license texts, and recorded provenance.

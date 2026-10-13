@@ -1,0 +1,113 @@
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+SPDX-License-Identifier: GPL-2.0-or-later
+
+Keep internally created BitTorrent tracker response reads independent of the
+aggregate payload download limit. Ordinary HTTP/BT and other in-memory requests
+retain their limits. No RPC option, filename test, TLS or identity change.
+
+diff --git a/src/DownloadCommand.cc b/src/DownloadCommand.cc
+index 5a0599d..fe562e4 100644
+--- a/src/DownloadCommand.cc
++++ b/src/DownloadCommand.cc
+@@ -133,9 +133,12 @@ void flushWrDiskCacheEntry(WrDiskCache* wrDiskCache,
+ 
+ bool DownloadCommand::executeInternal()
+ {
+-  if (getDownloadEngine()
+-          ->getRequestGroupMan()
+-          ->doesOverallDownloadSpeedExceed() ||
++  // A saturated payload budget must not prevent reading the tracker response:
++  // its completion schedules the next announce and keeps the peer registered.
++  if ((!getRequestGroup()->isTorrentTrackerRequest() &&
++       getDownloadEngine()
++           ->getRequestGroupMan()
++           ->doesOverallDownloadSpeedExceed()) ||
+       getRequestGroup()->doesDownloadSpeedExceed()) {
+     addCommandSelf();
+     disableReadCheckSocket();
+diff --git a/src/RequestGroup.cc b/src/RequestGroup.cc
+index f3cc28a..1d55dd7 100644
+--- a/src/RequestGroup.cc
++++ b/src/RequestGroup.cc
+@@ -225,6 +225,7 @@ RequestGroup::RequestGroup(const std::shared_ptr<GroupId>& gid,
+       pauseRequested_(false),
+       restartRequested_(false),
+       inMemoryDownload_(false),
++      torrentTrackerRequest_(false),
+       seedOnly_(false)
+ {
+   fileAllocationEnabled_ = option_->get(PREF_FILE_ALLOCATION) != V_NONE;
+diff --git a/src/RequestGroup.h b/src/RequestGroup.h
+index 715cd9e..d488f89 100644
+--- a/src/RequestGroup.h
++++ b/src/RequestGroup.h
+@@ -191,6 +191,10 @@ private:
+   // just sits in memory.
+   bool inMemoryDownload_;
+ 
++  // Only TrackerWatcherCommand marks its internal announce request.
++  // Payload downloads, including other in-memory requests, stay rate limited.
++  bool torrentTrackerRequest_;
++
+   bool seedOnly_;
+ 
+   void validateFilename(const std::string& expectedFilename,
+@@ -432,6 +436,10 @@ public:
+   // Returns inMemoryDownload flag.
+   bool inMemoryDownload() const { return inMemoryDownload_; }
+ 
++  void markTorrentTrackerRequest() { torrentTrackerRequest_ = true; }
++
++  bool isTorrentTrackerRequest() const { return torrentTrackerRequest_; }
++
+   void setTimeout(std::chrono::seconds timeout);
+ 
+   const std::chrono::seconds& getTimeout() const { return timeout_; }
+diff --git a/src/TrackerWatcherCommand.cc b/src/TrackerWatcherCommand.cc
+index 5728d4e..2c14394 100644
+--- a/src/TrackerWatcherCommand.cc
++++ b/src/TrackerWatcherCommand.cc
+@@ -361,6 +361,7 @@ TrackerWatcherCommand::createHTTPAnnRequest(const std::string& uri)
+   uris.push_back(uri);
+   auto option = util::copy(getOption());
+   auto rg = make_unique<RequestGroup>(GroupId::create(), option);
++  rg->markTorrentTrackerRequest();
+   if (backupTrackerIsAvailable(requestGroup_->getDownloadContext())) {
+     A2_LOG_TRACE("This is multi-tracker announce.");
+   }
+diff --git a/tests/RequestGroupTest.cc b/tests/RequestGroupTest.cc
+index 10d6d9a..ee8ee0f 100644
+--- a/tests/RequestGroupTest.cc
++++ b/tests/RequestGroupTest.cc
+@@ -23,16 +23,31 @@ public:
+   void setUp() { option_.reset(new Option()); }
+ 
+   void testGetFirstFilePath();
++  void testTorrentTrackerRequest();
+   void testTryAutoFileRenaming();
+   void testCreateDownloadResult();
+   void testLoadAndOpenFileRestartFromScratch();
+ };
+ 
+ A2_TEST(RequestGroupTest, testGetFirstFilePath)
++A2_TEST(RequestGroupTest, testTorrentTrackerRequest)
+ A2_TEST(RequestGroupTest, testTryAutoFileRenaming)
+ A2_TEST(RequestGroupTest, testCreateDownloadResult)
+ A2_TEST(RequestGroupTest, testLoadAndOpenFileRestartFromScratch)
+ 
++void RequestGroupTest::testTorrentTrackerRequest()
++{
++  RequestGroup payload(GroupId::create(), option_);
++  REQUIRE_EQ(false, payload.isTorrentTrackerRequest());
++  payload.markInMemoryDownload();
++  REQUIRE_EQ(false, payload.isTorrentTrackerRequest());
++
++  RequestGroup tracker(GroupId::create(), option_);
++  tracker.markTorrentTrackerRequest();
++  REQUIRE_EQ(true, tracker.isTorrentTrackerRequest());
++  REQUIRE_EQ(false, payload.isTorrentTrackerRequest());
++}
++
+ void RequestGroupTest::testGetFirstFilePath()
+ {
+   std::shared_ptr<DownloadContext> ctx(

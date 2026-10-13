@@ -1,7 +1,7 @@
 {
   "binary_sha256": {
-    "aarch64": "9204f37329b3da6d7bf1aa2cadb45b2808bde7b0c36defe42439030c9ed8f41f",
-    "x86_64": "bd85ba6ef266a832200303a22278e42a291de9efd4508ccd060d17d54efea99b"
+    "aarch64": "631e7a8f78e33484e2aa46b95e5eb44ab96eea7701150be0607dd8253189fb7c",
+    "x86_64": "0af630efc543a233885416f97d4deaac5df8f8a022c868f6fae008a59536522e"
   },
   "components": [
     {
@@ -633,20 +633,30 @@
     "original-producer-recipe/patches/0008-required-hybrid-peer-tls.patch": "3e84b022108229a3a37281a8e105f8b907a202e79cc83c31b7c6f142f16ee614",
     "original-producer-recipe/patches/0009-test-seeder-goodbye-grace.patch": "2d14f00dcdf9887b9e11b1a50b926734bfa4bc52f7cc7d5708b5d2726f5b0776",
     "original-producer-recipe/patches/0010-resolve-crossed-peer-handshakes.patch": "21bc23d342e722fd2ab459836e366e0965e0a005873cc2b1cb193be266291ceb",
+    "p12-candidate-build-provenance/aarch64-candidate-evidence.json": "1a161242eefe4e56b6cadbc6468960edb75f1f0c6dd3d517c9ab7dcb9e79712f",
+    "p12-candidate-build-provenance/aarch64-candidate-source.json": "c84d6dbc028ec7c1035ab3e3894118d8aa33314bbe93d790bb1c38c47ae1f13b",
+    "p12-candidate-build-provenance/aarch64-dependency-manifest.txt": "72177096367ada17c7bb19da17d7734e8d5c11a52a7c130a6ead0c5c850907f1",
+    "p12-candidate-build-provenance/aarch64-verification.txt": "79674252ee327ce6e677c8621c6c1e0002b8b458cfcf341b18263e5f6e5793bf",
+    "p12-candidate-build-provenance/x86_64-candidate-evidence.json": "5aae05038145c9385219155035b046e6b95b2a8ffe8f8a3349bf9d4648682236",
+    "p12-candidate-build-provenance/x86_64-candidate-source.json": "c84d6dbc028ec7c1035ab3e3894118d8aa33314bbe93d790bb1c38c47ae1f13b",
+    "p12-candidate-build-provenance/x86_64-dependency-manifest.txt": "b20b14cd8cfdf47420573495de635cc34ea897653696a828fff59b6b3d276ece",
+    "p12-candidate-build-provenance/x86_64-verification.txt": "70f27fb4911db7da860062cdf003163821a4da0a1409dcfbedefcf171b49c229",
     "patches/0011-withdraw-peer-identities.patch": "bbe8ff04720510e1c30be51c2905a67eb5760b77ae864aa2699f443ead968755",
+    "patches/0012-isolate-tracker-control-throttle.patch": "84d640ddf4627c9c7d6bea408a5cd4d85db93bef03304656aa042423c5810f66",
     "tests/revocation-probe.cc": "1dab0a2a0c57c9b72eb8c5ae0754039fe6e66ee91bf03605a6c121dc1565c151",
     "tests/test-handshake.py": "d30c18c0d2e03f349d5e29754bf9fa1fce09bec2ae25ade7f8fdcc6a44550ca4",
     "tests/test-peer-cap.py": "580046f15248b007203d574bd7a94bd052e07cdc7f4e8d848d405cb66009a2e4",
     "tests/test-peer-collision.py": "190d5999bbd97f78ba74ff65727bbac922edb1b13bcad88b3f0d84d35adb0f07",
     "tests/test-peer-revocations.py": "dab263e704e6b6c3b997b28ff78484c0e8c998fe700d16b9dfa92554fec416d5",
     "tests/test-revocation-reader.py": "b01ecef3907a86af5009602f1bdde0a74f701a97e51b4a724e421e8425078951",
+    "tests/test-tracker-throttle.py": "240353800556ac9e107ce037ed02884c54d1f944ef13984ee26180ed0ae99514",
     "tests/test-transfer.py": "1a1ba513f370a344153c6c85bb40d6f1dc2bf7d485aab41bb0a6a90e76f0de74"
   },
   "format": 1,
   "gpl3_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
-  "name": "aria2c-2.5.6-p11-source",
-  "notice_count": 44,
-  "notice_date": "2026-10-10",
+  "name": "aria2c-2.5.6-p12-source",
+  "notice_count": 49,
+  "notice_date": "2026-10-13",
   "patches": [
     {
       "file": "0001-getpeers-keys-filter.patch",
@@ -692,6 +702,11 @@
       "file": "0011-withdraw-peer-identities.patch",
       "path": "patches/0011-withdraw-peer-identities.patch",
       "sha256": "bbe8ff04720510e1c30be51c2905a67eb5760b77ae864aa2699f443ead968755"
+    },
+    {
+      "file": "0012-isolate-tracker-control-throttle.patch",
+      "path": "patches/0012-isolate-tracker-control-throttle.patch",
+      "sha256": "84d640ddf4627c9c7d6bea408a5cd4d85db93bef03304656aa042423c5810f66"
     }
   ],
   "source_date_epoch": 1787100476,

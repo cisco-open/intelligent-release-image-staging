@@ -37,18 +37,31 @@ def test_release_guides_require_source_beside_precompiled_binaries():
         assert "source archive" in text
         assert "checksum" in text
     checklist = read("docs/dev/release-checklist.md")
-    assert "aria2c-2.5.6-p11-source.tar.gz" in checklist
+    assert "aria2c-2.5.6-p12-source.tar.gz" in checklist
     assert "both binaries" in checklist
     assert "Keep older release tags and assets intact" in checklist
 
 
-def test_local_p11_source_record_does_not_claim_a_published_release():
+def test_local_p12_source_record_does_not_claim_a_published_release():
     source = read("tools/aria2c-source/README.md")
-    assert "aria2c-2.5.6-p11-source.tar.gz" in source
-    assert "does not claim that a p11 release has been published" in source
-    assert "p10 assets with p11 bytes" in source
+    assert "aria2c-2.5.6-p12-source.tar.gz" in source
+    assert "does not claim that a p12 release has been published" in source
+    assert "p10 assets or retained p11 artifacts with p12 bytes" in source
     assert "tests/" in read("tools/aria2c-source/BUNDLE-README.md")
     assert "--offline" in read("tools/aria2c-source/BUNDLE-README.md")
+
+
+def test_current_source_consumers_match_the_pinned_asset():
+    records = [line.split() for line in read("tools/aria2c-source/source.sha256").splitlines()
+               if line and not line.startswith("#")]
+    assert len(records) == 1
+    asset = records[0][1]
+    assert "Current corresponding source: " + asset in read("NOTICE")
+    assert "--aria2-sources /path/to/" + asset in read("docs/dev/installer.md")
+    for path in ("tools/aria2c-source/README.md", "tools/aria2c-build/README.md",
+                 "tools/aria2c-patches/README.md", "docs/dev/device-packages.md",
+                 "docs/dev/release-checklist.md"):
+        assert asset in read(path), path
 
 
 def test_device_package_reuse_preserves_instruction_root_boundary():

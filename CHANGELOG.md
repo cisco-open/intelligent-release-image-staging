@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Keep tracker announcements responsive when a device reaches its overall
+  download limit, while retaining image-transfer rate limits and peer TLS checks.
+- Correct the policy preview's nonexistent 120-second tracker interval floor.
+
 - Clarify that role-link edits update both roles together and that devices
   can retain different signed policy revisions when their settings are unchanged.
 

@@ -33,10 +33,10 @@ package builders read). A clone or an unpacked release carries the binaries,
 ordered local patches, and build scripts. `tools/aria2c.sha256` records the
 version, source pin, patch list and SHA-256 of each committed binary.
 
-The current local source asset is `aria2c-2.5.6-p11-source.tar.gz`, with an
-adjacent `.sha256` file. This is not a claim of a published p11 release.
+The current local source asset is `aria2c-2.5.6-p12-source.tar.gz`, with an
+adjacent `.sha256` file. This is not a claim of a published p12 release.
 The source asset contains the pinned upstream tree and bundled libraries,
-all eleven patches, the preserved p10 producer recipe, current build scripts,
+all twelve patches, the preserved p10 producer recipe, current build scripts,
 dependency source archives with Alpine recipes and patches, license texts,
 and binary provenance. A separately identified source tree adds dated
 modification notices without altering the preserved original inputs.
@@ -83,10 +83,10 @@ matching `tools/aria2c.sha256`, prepare and verify the complete source asset
 before creating the release. For the current client:
 
 ```bash
-source_asset=aria2c-2.5.6-p11-source.tar.gz
+source_asset=aria2c-2.5.6-p12-source.tar.gz
 sha256sum -c "$source_asset.sha256"
-gh release create aria2c-2.5.6-p11 \
-  --title "aria2c 2.5.6, 11 patches" \
+gh release create aria2c-2.5.6-p12 \
+  --title "aria2c 2.5.6, 12 patches" \
   --notes-file <notes> \
   deliverables/aria2c-x86_64 deliverables/aria2c-aarch64 tools/aria2c.sha256 \
   "$source_asset" "$source_asset.sha256"
@@ -105,7 +105,7 @@ this checkout. See [source verification](../aria2c-source/README.md).
 
 ```bash
 python3 tools/aria2c-build/rebuild-pinned.py x86_64 \
-  --source-archive /path/to/aria2c-2.5.6-p11-source.tar.gz \
+  --source-archive /path/to/aria2c-2.5.6-p12-source.tar.gz \
   --cache /path/to/retained-apks --output /path/to/new-output --jobs 2
 ```
 
@@ -251,3 +251,24 @@ fresh certificate-identity withdrawal data in required mode.
 See [Peer transfer
 encryption](../../docs/zensical/architecture/security-model.md#peer-transfer-encryption)
 for enrollment, deployment and security limits.
+
+## Tracker announcements under a download limit
+
+Patch `0012-isolate-tracker-control-throttle.patch` marks only the tracker's
+internal HTTP request. Its response remains readable when image transfers reach
+the aggregate download cap. Per-request limits and ordinary HTTP and BitTorrent
+payload limits still apply. Required peer TLS and identity checks are unchanged.
+
+Run the bounded native regression against an exact candidate digest:
+
+```bash
+python3 test-tracker-throttle.py out/x86_64/aria2c \
+  --sha256 "<candidate-sha256>" --seconds 180 --output "<new-evidence-directory>"
+```
+
+The test uses a loopback HTTP tracker, mandatory hybrid peer TLS, and both global
+and per-torrent download limits. It checks real payload, recurring announcements,
+the final silent interval, and a separately capped ordinary HTTP download.
+It retains results and logs and requires all child processes to exit. Python 3.11+
+and the OpenSSL command are required. Use the ARM binary with the same command
+on ARM64 or a registered QEMU handler; emulation is not device performance proof.

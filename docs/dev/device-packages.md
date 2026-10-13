@@ -177,11 +177,11 @@ is a connectivity or release-availability problem. Do not bypass verification
 or substitute an unverified source build to work around it.
 
 For source audits, use the matching
-`aria2c-2.5.6-p11-source.tar.gz` asset. It contains the upstream source, eleven
+`aria2c-2.5.6-p12-source.tar.gz` asset. It contains the upstream source, twelve
 patches, build recipes, dependency sources and license files. Follow
 [aria2c source distribution](../../tools/aria2c-source/README.md) for the
 archive checks and rebuild procedure. Source archives supplement the
-precompiled clients; they do not replace them. The current p11 clients and
+precompiled clients; they do not replace them. The current p12 clients and
 source are local development artifacts until an authorized publication.
 
 For development from this checkout, use the pinned source and tracked recipe:

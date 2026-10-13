@@ -44,9 +44,9 @@ jobs:
           mkdir release-assets
           python3 tools/build-installer-package.py --out release-assets
           bash tools/make-release.sh
-          gh release download aria2c-2.5.6-p11 \
+          gh release download aria2c-2.5.6-p12 \
             --repo cisco-open/intelligent-release-image-staging \
-            --pattern aria2c-2.5.6-p11-source.tar.gz --dir release-assets
+            --pattern aria2c-2.5.6-p12-source.tar.gz --dir release-assets
           python3 tools/release-stage.py record --output release-assets/release-stage.json \
             --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"

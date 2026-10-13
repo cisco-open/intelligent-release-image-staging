@@ -5,18 +5,19 @@
 # aria2c deliverable — handed in as a binary artifact.
 # NOT downloaded. NOT built during a normal IRIS build.
 #
-# Rebuilt 2026-10-10 from the preserved p10 source plus pinned patch 0011.
-# Patches 0001 through 0011; required hybrid peer TLS is explicitly opt-in
+# Rebuilt 2026-10-13 from the preserved p11 source plus pinned patch 0012.
+# Patches 0001 through 0012; required hybrid peer TLS is explicitly opt-in
 # and requires fresh certificate-identity withdrawal data. Default is disabled.
 # OpenSSL 3.5.8, native x86_64 / QEMU aarch64. Both exact clients passed
-# identity-withdrawal TLS, fragmented TLS collision, handshake, peer-cap and
-# transfer checks. Extracted p11 source rebuilt both hashes with cached build
-# layers and locked offline APKs. Emulation is not device performance proof.
+# identity-withdrawal TLS, fragmented TLS collision, handshake, peer-cap,
+# capped tracker-control and transfer checks. Extracted p12 source rebuilt
+# both hashes with cached build layers and locked offline APKs.
+# Emulation is not device performance proof.
 # Local development artifacts; this record does not assert a published release.
 #
 # aria2-next version : 2.5.6
 # source pin         : d4971f0e12322e2ffcdb1721911b7d5c6206d0e5
-# patches applied    : 11
+# patches applied    : 12
 #   - 0001-getpeers-keys-filter.patch
 #   - 0002-fix-uaf-peer-blocklist-disconnect.patch
 #   - 0003-fix-pkcs12-chain-type-confusion.patch
@@ -28,9 +29,10 @@
 #   - 0009-test-seeder-goodbye-grace.patch
 #   - 0010-resolve-crossed-peer-handshakes.patch
 #   - 0011-withdraw-peer-identities.patch
+#   - 0012-isolate-tracker-control-throttle.patch
 #
 # tools/get-aria2c.sh verifies the handed-in binary against these
 # checksums and FAILS CLOSED on a mismatch, so a stale client cannot
 # silently ship. Update this file only when adopting a new build.
-bd85ba6ef266a832200303a22278e42a291de9efd4508ccd060d17d54efea99b  x86_64
-9204f37329b3da6d7bf1aa2cadb45b2808bde7b0c36defe42439030c9ed8f41f  aarch64
+0af630efc543a233885416f97d4deaac5df8f8a022c868f6fae008a59536522e  x86_64
+631e7a8f78e33484e2aa46b95e5eb44ab96eea7701150be0607dd8253189fb7c  aarch64

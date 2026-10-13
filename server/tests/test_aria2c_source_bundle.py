@@ -29,12 +29,12 @@ rebuild = module('rebuild.py')
 
 def test_manifest_pins_complete_inputs():
     manifest = json.loads((DIRECTORY / 'inputs.json').read_text())
-    assert len(manifest['patches']) == 11
+    assert len(manifest['patches']) == 12
     assert len(manifest['components']) == 5
     assert sum(len(c['sources']) for c in manifest['components']) == 60
-    assert manifest['notice_count'] == 44
+    assert manifest['notice_count'] == 49
     assert set(manifest['current_recipe_sha256']) == {'Dockerfile', 'build.sh', 'rebuild-pinned.py', 'apk-lock.json'}
-    assert manifest['patches'][-1]['path'] == 'patches/0011-withdraw-peer-identities.patch'
+    assert manifest['patches'][-1]['path'] == 'patches/0012-isolate-tracker-control-throttle.patch'
     assert bundle.digest(DIRECTORY / 'COPYING3') == manifest['gpl3_sha256']
     for name, digest in manifest['current_recipe_sha256'].items():
         assert bundle.digest(DIRECTORY.parent / 'aria2c-build' / name) == digest

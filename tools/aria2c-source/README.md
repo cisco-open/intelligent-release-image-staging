@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 ## Verify the matching source
 
-The current local development clients match `aria2c-2.5.6-p11-source.tar.gz`.
-This source record does not claim that a p11 release has been published.
+The current local development clients match `aria2c-2.5.6-p12-source.tar.gz`.
+This source record does not claim that a p12 release has been published.
 Verify the archive against the tracked [source.sha256](source.sha256) before
 extraction. Inside the extracted directory, run
 `sha256sum -c SHA256SUMS` to check its members.
@@ -25,7 +25,7 @@ source and dependency grants are preserved. See
 
 ## Assemble a source archive
 
-`inputs.json` pins every external source input for aria2c 2.5.6-p11. Collect the
+`inputs.json` pins every external source input for aria2c 2.5.6-p12. Collect the
 listed paths under an explicit input directory, preserving the original recipe,
 patches and dependency archive bytes. Obtain the unmodified upstream tar with
 `git archive d4971f0e12322e2ffcdb1721911b7d5c6206d0e5` from the upstream repository
@@ -35,7 +35,7 @@ listed in the manifest. No private workspace path is assumed.
 python3 tools/aria2c-source/build-source-bundle.py \
   --inputs /path/to/collected-inputs \
   --upstream-archive /path/to/upstream.tar \
-  --output /path/to/aria2c-2.5.6-p11-source.tar.gz
+  --output /path/to/aria2c-2.5.6-p12-source.tar.gz
 ```
 
 Packaging requires Python 3.11+ and git. It does not execute dependency recipes,
@@ -47,6 +47,6 @@ The checksum sidecar is named `<archive>.sha256`.
 
 Publish the source archive and sidecar alongside both exact binaries under a
 new matching tag. Publication is a separate owner-authorized operation; never
-replace the p10 assets with p11 bytes. The GPLv3 text is pinned by SHA-256 and
-preserved verbatim from GNU.
+replace the p10 assets or retained p11 artifacts with p12 bytes. The GPLv3 text
+is pinned by SHA-256 and preserved verbatim from GNU.
 See BUNDLE-README.md for recipient rebuild instructions and scope limits.

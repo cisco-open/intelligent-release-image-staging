@@ -1,9 +1,9 @@
 <!-- Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0 -->
 
-# IRIS aria2c 2.5.6-p11 corresponding source
+# IRIS aria2c 2.5.6-p12 corresponding source
 
-This archive accompanies the exact local p11 clients named in inputs.json.
+This archive accompanies the exact local p12 clients named in inputs.json.
 It is not evidence of a published release or GitHub authentication.
 See LICENSE-DISTRIBUTION.md and COPYING3 for the GPLv3 distribution selection.
 Original copyright, exception and dependency license texts are preserved.
@@ -12,16 +12,17 @@ Original copyright, exception and dependency license texts are preserved.
 
 - upstream/aria2-next.tar: the unmodified pinned upstream tree.
 - original-producer-recipe/: the unchanged p10 recipe and patches 0001-0010.
-- patches/: patch 0011, applied after that preserved series.
-- notice-added-source/: reconstructed p11 source with dated modification notices.
+- patches/: patches 0011-0012, applied after that preserved series.
+- notice-added-source/: reconstructed p12 source with dated modification notices.
 - current-recipe/: the static compiler recipe, build driver, complete APK lock
   and checksum-locked offline rebuild helper.
 - dependencies/: full source archives, exact Alpine recipes, patches, helpers,
   notices and provenance for musl, zlib, c-ares, OpenSSL and GCC runtimes.
-- candidate-build-provenance/: per-architecture build inputs, source inventories,
+- candidate-build-provenance/: preserved p11 candidate build records.
+- p12-candidate-build-provenance/: per-architecture build inputs, source inventories,
   actual binary hashes, installed dependencies and static-link checks.
-- tests/: the revocation parser probe and exact-client TLS, transfer, handshake
-  and peer-cap regression drivers.
+- tests/: the revocation parser probe and exact-client TLS, transfer, handshake,
+  peer-cap and capped tracker-announcement regression drivers.
 - inputs.json: all input identities and exact corresponding client hashes.
 
 Run `sha256sum -c SHA256SUMS` after extraction. All dependency archive contents

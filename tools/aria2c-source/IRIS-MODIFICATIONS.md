@@ -17,6 +17,13 @@ other permitted identities that share an address. Missing, invalid or expired
 authorization data stops private peer connections. A read-only RPC reports the
 loaded generation and its validity. This is not CRL or OCSP processing.
 
+On 2026-10-13, IRIS added patch 0012 to keep tracker announcements responsive
+when the overall download limit is saturated. Only internally marked tracker
+control requests bypass that aggregate download check. Per-request limits,
+ordinary HTTP and BitTorrent payload limits, and required peer TLS remain intact.
+A C++ unit test checks the internal marker. A bounded native integration test
+checks announcement timing, real TLS payload and ordinary HTTP rate limiting.
+
 The notice-added-source tree contains dated comment-only notices on all modified
 source, build and test files. source-verification.json lists those files exactly.
 The actual compiler input is reconstructed from the original upstream and ordered

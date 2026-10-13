@@ -22,15 +22,15 @@ replacement when a committed client is missing.
 1. **Upstream fork** — <https://github.com/AnInsomniacy/aria2-next> at commit
    `d4971f0e12322e2ffcdb1721911b7d5c6206d0e5`.
 2. **The patches in this directory**, applied in numeric order.
-   The current checksum-pinned artifacts contain patches `0001`–`0011`,
+   The current checksum-pinned artifacts contain patches `0001`–`0012`,
    as `tools/aria2c.sha256` records.
 3. **The build scripts** — [`tools/aria2c-build/`](../aria2c-build/README.md),
    published in this repository.
 4. **The complete source asset** — upstream source, patches, build recipes,
    dependency source archives, Alpine packaging changes, license texts and
-   provenance in `aria2c-2.5.6-p11-source.tar.gz`.
+   provenance in `aria2c-2.5.6-p12-source.tar.gz`.
    [`../aria2c-source/`](../aria2c-source/) records its filename and checksum;
-   these local development artifacts do not imply a published p11 release.
+   these local development artifacts do not imply a published p12 release.
    Redistribute the source asset alongside the matching binaries.
 
 ## Applying the patches
@@ -92,7 +92,7 @@ What is fixed about the deliverable:
   architecture.
 
 A rebuild with the recorded inputs can reproduce the pinned checksums. The
-extracted p11 archive matched both clients using cached build layers and locked
+extracted p12 archive matched both clients using cached build layers and locked
 offline APKs. Different toolchains,
 library versions or flags can change the bytes. `tools/get-aria2c.sh` fails
 closed on a mismatch with no override. Adopting different bytes requires
@@ -148,7 +148,7 @@ license texts and the distribution statement. The patch files remain ordinary
 - `0009-test-seeder-goodbye-grace.patch`: align three upstream tests with the
   five-second grace already provided by patch 0007.
 
-Both x86_64 and aarch64 builds use all eleven patches. The ARM transport tests
+Both x86_64 and aarch64 builds use all twelve patches. The ARM transport tests
 run under QEMU; native device validation is a separate rollout check.
 
 ## Certificate-identity withdrawal (2026-10-10)
@@ -165,3 +165,15 @@ two seconds after local publication, plus the catalog polling delay. Scheduling
 delays can extend this; it is not a real-time guarantee.
 This is identity-based withdrawal, not CRL or OCSP. The source archive includes
 the native reader probe and exact-client regressions.
+
+## Tracker control traffic (2026-10-13)
+
+Patch `0012-isolate-tracker-control-throttle.patch` marks requests created by the
+BitTorrent tracker command. Their response reads remain responsive when the
+overall image-download limit is saturated. Per-request limits, HTTP and
+BitTorrent payload limits, peer TLS and identity withdrawal remain enforced.
+Ordinary in-memory requests do not receive the tracker exemption.
+
+Both exact clients passed the capped-transfer regression, including a separate
+ordinary HTTP payload limit check. The local tracker uses loopback HTTP and the
+ARM client runs under QEMU; live HTTPS/device qualification is separate.
