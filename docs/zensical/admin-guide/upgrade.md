@@ -57,6 +57,7 @@ Rebuilding an IOx package does not certify its native platform signature.
 If preparation reports a build failure before printing a plan SHA256, the
 running deployment is unchanged. Fix that problem and run `upgrade prepare` again.
 It creates a new operation and retains the failed attempt's files for inspection.
+For retained build output, see [Installer command failures](../user-guide/troubleshooting.md#installer-command-failures).
 An unfinished preparation cannot use `upgrade recover`.
 
 If `upgrade apply` stops, inspect the recorded status:

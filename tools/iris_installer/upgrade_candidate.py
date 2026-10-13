@@ -74,7 +74,7 @@ def template(install, source):
         IRIS_OBSERVABILITY='1' if deploy.observability_enabled(install.config) else '',
         IRIS_IMAGE_ROOT=str(image_root(install)),
         IRIS_ARTIFACTS_HOST_DIR=str(install.base / 'artifacts'))
-    value = json.loads(install.runner(['docker', 'compose', '--env-file', str(install.base / 'compose.env'),
+    value = json.loads(install.command(['docker', 'compose', '--env-file', str(install.base / 'compose.env'),
         '-p', install.config['instance'], '-f', str(source / 'server/docker-compose.yml'),
         'config', '--format', 'json'], env=settings, capture=True))
     plan.runtime_contract(value)
@@ -124,7 +124,7 @@ def build(install, operation, selection, source):
                IRIS_INSTRUCTION_ROOTS_DIR=str(install.base / 'roots'),
                XDG_CACHE_HOME=str(cache), IOXCLIENT=str(binary / 'ioxclient'))
     def run(arguments, **overrides):
-        return install.runner([str(value) for value in arguments],
+        return install.command([str(value) for value in arguments],
                               env=dict(env, **overrides), timeout=7200)
     run(['bash', candidate_source / 'tools/get-ioxclient.sh', binary])
     for architecture in ('arm64', 'amd64'):

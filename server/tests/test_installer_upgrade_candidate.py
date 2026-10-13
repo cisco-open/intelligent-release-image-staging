@@ -6,6 +6,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -213,6 +214,8 @@ else:
 ''', 0o755)
 
     def command(argv, **kwargs):
+        if argv[0] == 'bash':
+            return runner(argv, **kwargs)
         if argv[:3] == ['docker', 'image', 'inspect']:
             digit = '1' if str(argv[-1]).endswith(':iris') else '2'
             return plan.canonical([{'Id': 'sha256:' + digit * 64}])
@@ -315,6 +318,102 @@ else:
     assert (old_cache / 'sentinel').read_bytes() == b'current builder cache'
     if damage is None:
         _assert_candidate_publishes_guest_shell_routes(install, operation, built, monkeypatch)
+
+
+def test_upgrade_template_preserves_explicit_environment_capture_and_private_diagnostics(tmp_path, monkeypatch):
+    from iris_installer import deploy, image_storage
+    install = object.__new__(deploy.DockerInstall)
+    install.base = tmp_path
+    install.env = {'PATH': '/usr/bin:/bin', 'PRESERVED_INPUT': 'public-fixture'}
+    install.config = {'instance': 'upgrade-fixture', 'host': '192.0.2.10', 'console_bind': '192.0.2.11', 'console_port': 28080,
+                      'recovery_recipient': 'age1' + 'q' * 58, 'peer_tls': 'required'}
+    monkeypatch.setattr(image_storage, 'image_root', lambda current: current.base / 'images')
+    monkeypatch.setattr(plan, 'runtime_contract', lambda value: value)
+    calls = []
+
+    def instrumented(argv, **kwargs):
+        assert set(kwargs) == {'env', 'capture', 'diagnostics_dir'}
+        assert kwargs['capture'] is True and kwargs['diagnostics_dir'] == install.base
+        calls.append((argv, kwargs))
+        if argv[0] == 'age-keygen':
+            assert kwargs['env'] == install.env
+            return ('age1' + 'q' * 58 + '\n').encode()
+        assert argv[:2] == ['docker', 'compose'] and argv[-3:] == ['config', '--format', 'json']
+        return b'{"services":{}}'
+
+    monkeypatch.setattr(deploy, 'run', instrumented)
+    install.runner = instrumented
+    assert candidate.template(install, tmp_path / 'new-source') == {'services': {}}
+    assert len(calls) == 2
+    env = calls[1][1]['env']
+    assert env['PRESERVED_INPUT'] == install.env['PRESERVED_INPUT']
+    assert env['IRIS_HOST_IP'] == '192.0.2.10'
+    assert env['IRIS_CONSOLE_URL'] == 'https://192.0.2.11:28080/'
+    assert env['IRIS_IMAGE_ROOT'] == str(install.base / 'images')
+    assert install.env == {'PATH': '/usr/bin:/bin', 'PRESERVED_INPUT': 'public-fixture'}
+
+
+@pytest.mark.parametrize('stage', ['template', 'native'])
+@pytest.mark.parametrize('outcome', ['failure', 'timeout'])
+def test_actual_upgrade_candidate_callers_retain_private_failure_output(tmp_path, monkeypatch, stage, outcome, capsys):
+    if os.geteuid() != 0:
+        pytest.skip('Actual root-owned upgrade diagnostics')
+    from iris_installer import deploy, image_storage
+    install = object.__new__(deploy.DockerInstall)
+    install.base = tmp_path / 'installation'; install.base.mkdir(mode=0o700)
+    install.source = tmp_path / 'source'; install.source.mkdir()
+    install.env = deploy.clean_env()
+    install.config = {'instance': 'upgrade-fixture', 'host': '192.0.2.10', 'console_bind': '192.0.2.10', 'console_port': 28080,
+                      'recovery_recipient': 'age1' + 'q' * 58, 'peer_tls': 'required'}
+    install.runner = deploy.run
+    monkeypatch.setattr(image_storage, 'image_root', lambda current: current.base / 'images')
+    calls = []
+    stdout, stderr = b'sensitive-upgrade-stdout', b'sensitive-upgrade-stderr'
+
+    def child(argv, *, input, env, stdout, stderr, timeout, check):
+        assert input is None and check is False and timeout == 7200
+        assert stdout == stderr == subprocess.PIPE
+        calls.append((argv, env))
+        if argv[0] == 'age-keygen':
+            return subprocess.CompletedProcess(argv, 0, ('age1' + 'q' * 58 + '\n').encode(), b'')
+        selected = stage == 'template' and argv[:2] == ['docker', 'compose'] or stage == 'native' and argv[0] == 'bash'
+        if selected:
+            if outcome == 'timeout':
+                raise subprocess.TimeoutExpired(argv, timeout, output=b'sensitive-upgrade-stdout', stderr=b'sensitive-upgrade-stderr')
+            return subprocess.CompletedProcess(argv, 37, b'sensitive-upgrade-stdout', b'sensitive-upgrade-stderr')
+        if argv[:3] == ['docker', 'image', 'inspect']:
+            digit = '1' if str(argv[-1]).endswith(':iris') else '2'
+            return subprocess.CompletedProcess(argv, 0, plan.canonical([{'Id': 'sha256:' + digit * 64}]), b'')
+        assert argv[:2] == ['docker', 'compose'] and 'build' in argv
+        return subprocess.CompletedProcess(argv, 0, b'', b'')
+
+    monkeypatch.setattr(deploy.subprocess, 'run', child)
+    if stage == 'native':
+        atomic_write(install.source / 'VERSION', b'2026.10.08\n', 0o644)
+        manifest = {'VERSION': hashlib.sha256(b'2026.10.08\n').hexdigest()}
+        atomic_write(install.source / 'INSTALLER-SOURCE.json', plan.canonical(manifest), 0o644)
+        operation = SimpleNamespace(id='7f761c39-450f-4101-836e-6515449d7b28', directory=install.base / 'operation')
+        operation.directory.mkdir(mode=0o700)
+        compose = {'services': {name: {'image': 'existing-' + name,
+                    'build': {'context': str(install.source), 'dockerfile': name + '/Dockerfile'}} for name in plan.SERVICES}}
+        install.compose_file = install.base / 'compose.json'
+        atomic_write(install.compose_file, plan.canonical(compose), 0o644)
+        monkeypatch.setattr(candidate, 'template', lambda *args: compose)
+        invoke = lambda: candidate.build(install, operation, {'source': manifest}, install.source)
+    else:
+        invoke = lambda: candidate.template(install, install.source)
+    with pytest.raises(InstallError, match='timed out' if outcome == 'timeout' else 'exit 37') as caught:
+        invoke()
+    assert 'private diagnostics:' in str(caught.value)
+    assert 'sensitive-upgrade' not in str(caught.value) + capsys.readouterr().out
+    log, = (install.base / 'command-failures').glob('*.log')
+    assert stdout in log.read_bytes() and stderr in log.read_bytes()
+    assert log.stat().st_uid == 0 and log.stat().st_mode & 0o777 == 0o600
+    assert log.parent.stat().st_uid == 0 and log.parent.stat().st_mode & 0o777 == 0o700
+    if stage == 'native':
+        assert calls[-1][0][0] == 'bash' and Path(calls[-1][0][1]).name == 'get-ioxclient.sh'
+        assert calls[-1][1]['IRIS_DEVICE_PLATFORMS'] == 'linux/amd64,linux/arm64'
+        assert list((operation.directory / 'artifacts').iterdir()) == []
 
 
 def _assert_candidate_publishes_guest_shell_routes(install, operation, built, monkeypatch):
