@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {retentionStatus, retentionOperation, matchingRetention} from '../src/backup-retention-model.mjs';
+import {retentionStatus, retentionOperation, matchingRetention, upgradeArchivePhases} from '../src/backup-retention-model.mjs';
 import {WorkerLifecycleController} from '../src/worker-lifecycle-controller.mjs';
 import {urls, workerStatus} from '../src/worker-lifecycle-model.mjs';
 import {id, other, hash, now, rotation, backups, job, response} from './worker-fixtures.mjs';
@@ -17,6 +17,11 @@ const retained = () => ({schema: 1, revision: hash, busy: false,
   backups: [{backup_id: id, created_at: now, delete_allowed: true, delete_reason: ''}], operation: null});
 const operation = (action = 'retire-history', state = 'completed') => ({request_id: third, action, state,
   retired_count: action === 'retire-history' ? 1 : 0, backup_id: action === 'retire-history' ? null : id});
+test('historical archive labels do not advertise a current upgrade workflow', () => {
+  assert.equal(upgradeArchivePhases.upgraded, 'Recorded operation complete');
+  assert.equal(upgradeArchivePhases.cancelled, 'Recorded operation cancelled');
+  assert.equal(Object.values(upgradeArchivePhases).some(value => /upgrade/i.test(value)), false);
+});
 async function setup() {
   const c = new WorkerLifecycleController(), f = {visible: true, accept: true, reads: [], writes: [],
     rotation: rotation(), backups: {...backups(), jobs: [job('backup', 'captured')], retention: retained()}, post: null};

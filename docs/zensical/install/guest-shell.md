@@ -69,9 +69,9 @@ the agent's check-in loop.
 `server/pack-agent-bundle.sh` emits Guest Shell's adjacent 64-hex SHA-256
 sidecar, a file beside the bundle holding the bundle's digest. Bootstrap reads
 the digest first and refuses evidence that is missing, malformed, or does not
-match; the device keeps the bundle it has. A validated bundle is the agent
-upgrade for Guest Shell, so read
-[Upgrade to a new release](../admin-guide/upgrade.md) first.
+match; the device keeps the bundle it has. To replace the Guest Shell agent,
+undeploy it and onboard again. Read
+[Deploy a new release](../admin-guide/upgrade.md) first.
 
 !!! warning
     Anyone who can sign in to the device as an administrator can replace the

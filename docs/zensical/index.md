@@ -28,7 +28,7 @@ platforms are validated.
 | --- | --- |
 | Set up IRIS on a host that has never run it | [Install IRIS](install/index.md) |
 | Run IRIS every day | [Run IRIS day to day](user-guide/index.md) |
-| Keep the server running: upgrades, backups, credentials, signing keys | [Keep IRIS running](admin-guide/index.md) |
+| Maintain deployments, backups, credentials and signing keys | [Keep IRIS running](admin-guide/index.md) |
 | See how IRIS works | [How IRIS works](architecture/index.md) |
 | Look up one value, route, file format or term | [Look up a setting, route or term](reference/index.md) |
 
@@ -41,5 +41,5 @@ platforms are validated.
 | Stage your first image | [Stage your first image](user-guide/first-image.md) |
 | Check staging status | [Assign images and check staging status](user-guide/assignments.md) |
 | Schedule a maintenance window | [Schedule maintenance windows](user-guide/scheduling.md) |
-| Upgrade IRIS to a new release | [Upgrade to a new release](admin-guide/upgrade.md) |
+| Deploy a new IRIS release | [Deploy a new release](admin-guide/upgrade.md) |
 | Work out why something failed | [Troubleshoot: symptoms and first steps](user-guide/troubleshooting.md) |

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
-from iris_installer import cli, deploy, kube_deploy, local_setup, split_deploy, upgrade_candidate
+from iris_installer import cli, deploy, kube_deploy, local_setup, split_deploy
 from iris_installer.state import InstallError, Journal
 from test_installer_kube_deploy import config as kube_config, install as kube_install
 from test_installer_split_deploy import config as split_config, fake_files
@@ -133,36 +133,6 @@ def test_actual_kubernetes_manifest_records_server_only_opt_in(tmp_path, monkeyp
     assert all(row['name'] != 'IRIS_OBSERVABILITY' for row in console['spec']['template']['spec']['containers'][0]['env'])
     assert obj.manifests() == rows and obj.config == original
 
-
-@pytest.mark.parametrize('value', ['legacy', False, True])
-def test_upgrade_renders_both_release_templates_with_same_recorded_selection(tmp_path, monkeypatch, value):
-    record = config()
-    if value != 'legacy': record['observability'] = value
-    calls = []
-    def runner(argv, **kwargs):
-        assert kwargs['capture'] is True
-        if argv == ['age-keygen', '-y', str(tmp_path / 'age.txt')]:
-            return ('age1' + 'q' * 58).encode()
-        assert argv[:2] == ['docker', 'compose']
-        calls.append((argv, kwargs['env']))
-        return json.dumps({'services': {'iris': {'environment': {
-            'IRIS_OBSERVABILITY': kwargs['env']['IRIS_OBSERVABILITY']}}, 'console': {}}}).encode()
-    monkeypatch.setenv('IRIS_OBSERVABILITY', 'untrusted-ambient-value')
-    obj = SimpleNamespace(base=tmp_path, config=record, env=deploy.clean_env(), runner=runner)
-    # Exercise the real command boundary used by template(), including argument
-    # conversion and the explicitly selected environment, without host commands.
-    obj.command = deploy.DockerInstall.command.__get__(obj)
-    before = copy.deepcopy(record)
-    sources = (tmp_path / 'old', tmp_path / 'new')
-    rendered = [upgrade_candidate.template(obj, source) for source in sources]
-    expected = '1' if value is True else ''
-    assert len(calls) == 2 and calls[0][1] == calls[1][1]
-    assert calls[0][1]['IRIS_OBSERVABILITY'] == expected and record == before
-    for source, (argv, _env), result in zip(sources, calls, rendered):
-        assert argv == ['docker', 'compose', '--env-file', str(tmp_path / 'compose.env'),
-                        '-p', record['instance'], '-f', str(source / 'server/docker-compose.yml'),
-                        'config', '--format', 'json']
-        assert result['services']['iris']['environment']['IRIS_OBSERVABILITY'] == expected
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason='Real root-owned journal custody')

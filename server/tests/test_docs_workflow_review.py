@@ -89,11 +89,15 @@ def test_documented_wait_is_bounded_and_times_out_unsuccessfully():
     assert 'test "$staged" -eq 1' in source
 
 
-def test_upgrade_keeps_three_steps_and_passes_reviewed_roots():
+def test_replacement_requires_backup_undeploy_removal_and_new_installation():
     source = _document("admin-guide/upgrade.md")
     assert re.findall(r"^## (\d+)\.", source, re.M) == ["1", "2", "3"]
-    assert "IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots" in source
-    assert "### Onboard the devices again" in source
+    assert '## 1. Back up and undeploy' in source
+    assert '## 2. Remove the old deployment' in source
+    assert '## 3. Install and onboard' in source
+    assert 'irisctl upgrade' not in source and 'git checkout' not in source
+    assert 'new state directory and' in source
+    assert 'not automatically adopted' in source
 
 
 def test_uninstall_explains_retained_kubernetes_data_and_controller_credentials():
@@ -104,16 +108,15 @@ def test_uninstall_explains_retained_kubernetes_data_and_controller_credentials(
     assert "Private files retained on the controller can still contain credentials" in page
 
 
-def test_managed_split_upgrade_documents_same_operation_and_remote_trust_boundary():
+def test_replacement_docs_preserve_historical_link_and_no_adoption_boundary():
     page = ' '.join(_document('admin-guide/upgrade.md').split())
     developer = ' '.join((ROOT / 'docs/dev/installer.md').read_text().split())
-    assert '## Managed Docker deployments { #managed-single-host-docker }' in page
-    assert 'run every upgrade command on the server host' in page
-    assert 'same public key and issuer' in page
-    assert 'bearer credentials and browser private key are unchanged' in page
-    assert 'Managed upgrades of prebuilt release kits and Kubernetes are not supported' in page
-    assert 'source-built single-host and split Docker' in developer
-    assert 'sequential public-trust publication intent' in developer
+    assert '### Managed deployment replacement { #managed-single-host-docker }' in page
+    assert 'run it from the original controller' in page.lower()
+    assert 'it is not a cross-deployment migration procedure' in page
+    assert 'does not adopt old volumes' in developer
+    assert 'Historical operation guards' in developer
+    assert 'There is no public in-place application upgrade command' in developer
 
 
 def test_backup_signer_setup_names_the_producer_and_independent_trust_step():

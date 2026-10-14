@@ -17,10 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
-- Preserve the running worker's verified startup guard while preparing a
-  subsequent application upgrade, including recovery of the original plan.
-- Upgrade a source-built managed deployment on separate Docker hosts with the
-  existing approved-plan and same-operation recovery commands.
+- Replace deployments through undeploy, removal, a new installation and device
+  re-onboarding. Remove the in-place application upgrade command and build
+  engines while preserving historical worker fences and backup protection.
 - Remove a managed Docker, separate-host Docker, or Kubernetes deployment with
   a reviewed resource plan, explicit data-purge choice, and resumable removal.
   Explain that Kubernetes storage retention can leave the underlying data.
@@ -62,9 +61,6 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Explain that peer arrows and faster reporting require telemetry streaming
   to be enabled during device onboarding; saving an interval keeps that choice.
   Document the response-time and download-speed limits on faster reporting.
-
-- Publish the ARM Guest Shell upgrade bundle under its served filename so
-  source-built application upgrades replace the existing bundle and checksum.
 
 - Clarify that a distribution-access storage error can follow a saved approval;
   reread the current approval and status before a new preview.
@@ -111,7 +107,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 - Add an explicit `--observability` option to managed installation and guided
   setup for authenticated metrics on Docker, split Docker and Kubernetes.
-  The default stays off; resume and application upgrades retain the selection.
+  The default stays off; resume retains the selection.
 
 - Allow simultaneous browser certificate status reads while keeping certificate
   changes exclusive and refusing reads during an active change.
@@ -119,18 +115,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Correct IOx removal commands, XR onboarding transfer details and browser
   certificate address guidance to match the implemented workflows.
 
-- Build both Guest Shell static-helper sets in the application upgrade's own
-  directory before packing bundles, preserving the verified source snapshot.
-
 - Correct seeder-rotation guidance for header authentication, unchanged torrent
   URLs, quarantine release and the two-previous-credential limit. When that
   limit is reached, explain that rotation must wait for a credential to expire.
-
-- Accept the recorded source-build input mode when preparing application
-  upgrades, while continuing to refuse prebuilt or conflicting input records.
-
-- Pass the supported artifacts-directory option when preparing IOx packages
-  for application upgrades, and isolate the candidate XR builder cache.
 
 - Use plain signing-key status and root-confirmation labels in Advanced policies.
 
@@ -143,8 +130,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Allow finished maintenance history and unneeded saved backups to be cleared
   separately, preserving recovery records and protection against request replay.
   Failed backup attempts without saved files no longer consume backup slots.
-  Keep owned upgrade recovery archives visible and protected, and
-  preserve maintenance replay history through reviewed application upgrades.
+  Keep historical recovery archives visible and protected.
 
 - Clarify that aborting onboarding during connection checks waits for those
   checks to finish and prevents the installer from starting.
@@ -154,10 +140,6 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 - Correct the backup guide's permission-repair procedure to preserve the
   recorded deployment and private file modes instead of changing whole stores.
-
-- Add reviewed, forward-recoverable application upgrades for source-built
-  single-host Docker installations, preserving accounts, keys and storage.
-  Split Docker, Kubernetes and prebuilt-release upgrades remain unsupported.
 
 - Remove temporary backup snapshots after a refused or failed capture while
   retaining operation history and any captured encrypted archives.

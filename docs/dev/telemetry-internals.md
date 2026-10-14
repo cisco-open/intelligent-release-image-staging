@@ -181,7 +181,7 @@ coverage for a given poll interval.
 
 Rebuilding the Guest Shell bundle, an IOx package, or the XR RPM does not
 change any device's already-running agent; see
-[Upgrade to a new release](../zensical/admin-guide/upgrade.md) to redeploy it.
+[Deploy a new release](../zensical/admin-guide/upgrade.md) to redeploy it.
 
 This matters for telemetry specifically because the server accepts only the
 report fields and peer identities it can validate. An agent still running an

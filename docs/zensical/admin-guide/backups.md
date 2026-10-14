@@ -85,7 +85,7 @@ worker and its transport credentials must remain available during downtime.
 
 ## Trust the backup signer
 
-Before your first restore or managed upgrade:
+Before your first restore:
 
 1. Select **Back up now**, confirm downtime and wait for `captured` in backup
    history. The first capture creates a separate backup signing key. Its public
@@ -112,11 +112,10 @@ trust. Keep this public record with the recovery material for future restores.
 and 20 saved backups. Failed attempts use history space. An attempt that leaves
 no saved files does not use a backup slot.
 
-**Protected upgrade backups** are listed separately. They also use host storage
-but stay with their upgrade recovery records, outside the 20 ordinary backup
-slots. The list shows which archives are present. Use the recorded upgrade
-operation on the installer host to [review recovery](upgrade.md#managed-single-host-docker);
-these archives cannot be deleted from the Console.
+Existing deployments can have a separate **Protected recovery backups** list
+from earlier maintenance. These historical archives still use host storage and
+remain outside the 20 ordinary backup slots. Keep their records and files;
+the Console treats them as read-only.
 
 Use **Clear finished history** to remove up to 25 finished records from the
 recent list. The worker keeps saved backups, security records, recovery records
@@ -138,7 +137,7 @@ Resolve the host error, then use that action to finish the original deletion.
 
 ## What to back up
 
-Back up before an upgrade, a key rotation, a move, or a reset.
+Back up before deployment replacement, a key rotation, a move, or a reset.
 
 | Item | Where it lives | What it holds |
 | --- | --- | --- |
@@ -248,7 +247,7 @@ restore to change permissions.
 
 ## Related
 
-- [Upgrade to a new release](upgrade.md)
+- [Deploy a new release](upgrade.md)
 - [Rotate credentials and certificates](rotations.md)
 - [Recover from an interrupted job or damaged state](recovery.md)
 - [Data formats and states](../reference/state-and-data.md)

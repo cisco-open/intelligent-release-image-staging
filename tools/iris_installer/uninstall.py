@@ -78,8 +78,16 @@ def public(base, record):
 
 
 def idle(journal):
-    from .application_upgrade import _idle
-    _idle(journal)
+    from .restore import guard
+    guard(journal.directory, instance_id=journal.document['id'])
+    upgrade_runtime.jobs_idle(journal.directory)
+    operation = journal.directory / 'credential-operation.json'
+    if operation.exists() or operation.is_symlink():
+        value = json.loads(regular_bytes(operation))
+        require(value.get('instance_id') == journal.document['id'] and (
+            value.get('phase') == 'rotated' or
+            value.get('phase') == 'refused' and value.get('mutations_admitted') is False),
+            'Finish or recover credential maintenance before uninstall')
     capture_idle(journal)
     for name in ('kube-update.json', 'worker-custody-intent.json'):
         require(not (journal.directory / name).exists() and not (journal.directory / name).is_symlink(),

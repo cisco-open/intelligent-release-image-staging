@@ -54,8 +54,8 @@ attach the agent to the same VirtualPortGroup.
 - On Guest Shell an Embedded Event Manager (EEM) applet starts the agent on a
   timer inside IOS. On IOx and IOS-XR the container's supervisor runs it. See
   [How an image reaches a device](../architecture/data-path.md).
-- Agent upgrades differ by path. See
-  [Upgrade to a new release](../admin-guide/upgrade.md).
+- Replace agents through undeploy and onboarding. See
+  [Deploy a new release](../admin-guide/upgrade.md).
 - For an unsigned IOx install, IRIS temporarily disables device-global signature
   verification when it was enabled, then restores that state before activation.
   An initially disabled setting stays disabled. Read

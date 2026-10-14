@@ -297,4 +297,4 @@ manifest recording that output's SHA-256.
 - [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 series devices for the IOx app](iox.md)
 - [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](ios-xr.md)
 - [Add and onboard devices](../user-guide/onboarding.md)
-- [Upgrade to a new release](../admin-guide/upgrade.md)
+- [Deploy a new release](../admin-guide/upgrade.md)

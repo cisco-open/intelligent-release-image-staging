@@ -107,10 +107,6 @@ ALLOWLIST = [
     ("server/tests/test_installer_restore.py",
      ("'schedule-receipts/record.d/00.json'",),
      "pins preservation of the existing schedule outcome path across restoration"),
-    ("tools/iris_installer/upgrade_runtime.py",
-     ("'schedule-receipts', 'report_ledger', 'report-attribution',",),
-     "upgrade validation preserves the established schedule outcome storage path; "
-     "not deployment or peer terminology"),
     ("tools/aria2c-source/COPYING3", None,
      "unmodified GNU GPL version 3 text; legal receipt is not IRIS terminology"),
     ("tools/api_exercise_fixtures.py",

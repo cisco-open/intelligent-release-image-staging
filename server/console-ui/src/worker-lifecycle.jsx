@@ -150,8 +150,8 @@ function WorkerLifecycle({controller: c, roots}) {
     {retention && <div id="backup-archive-retention"><h4>Saved backups</h4>
       <p id="backup-storage-capacity">{retention.capacity.backup_used} of {retention.capacity.backup_limit} backups saved on this host. Deleting a backup removes its deployment and recovery archives.</p>
       {retention.protected_upgrade_backups?.length > 0 && <details id="backup-upgrade-archives">
-        <summary>{retention.capacity.protected_upgrade_used} protected upgrade {retention.capacity.protected_upgrade_used === 1 ? 'backup' : 'backups'}</summary>
-        <p>These archives also use host storage. They stay with their upgrade recovery records and cannot be deleted here.</p>
+        <summary>{retention.capacity.protected_upgrade_used} protected recovery {retention.capacity.protected_upgrade_used === 1 ? 'backup' : 'backups'}</summary>
+        <p>These historical archives also use host storage. They stay with their original recovery records and cannot be deleted here.</p>
         <ul>{retention.protected_upgrade_backups.map(row => <li key={row.operation_id + ':' + row.attempt}>
           <span className="machine">{row.operation_id}</span> · Attempt {row.attempt} · {upgradeArchivePhases[row.phase]}<br />
           {row.deployment_archive && row.recovery_archive ? 'Deployment and identity recovery archives present.'

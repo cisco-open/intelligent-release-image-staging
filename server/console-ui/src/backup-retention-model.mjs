@@ -13,11 +13,11 @@ const unique = values => new Set(values).size === values.length;
 const actions = ['backup', 'verify', 'extract', 'restore', 'rotate', 'renew-transport'];
 const states = ['running', 'recovery-required', 'failed', 'captured', 'verified-files', 'verified-isolated-files', 'restored', 'rotated', 'renewed'];
 export const upgradeArchivePhases = Object.freeze({
-  building: 'Preparing upgrade', prepared: 'Ready to upgrade', fencing: 'Stopping new work',
+  building: 'Historical preparation', prepared: 'Historical operation prepared', fencing: 'Stopping new work',
   'backing-up': 'Saving recovery archives', stopped: 'Services stopped', publishing: 'Updating files',
   published: 'Updated files ready', starting: 'Starting services', verifying: 'Checking deployment',
-  worker: 'Updating maintenance worker', finishing: 'Completing upgrade', upgraded: 'Upgrade complete',
-  cancelled: 'Upgrade cancelled', 'recovery-required': 'Needs recovery',
+  worker: 'Updating maintenance worker', finishing: 'Completing recorded operation', upgraded: 'Recorded operation complete',
+  cancelled: 'Recorded operation cancelled', 'recovery-required': 'Needs recovery',
 });
 
 function protectedUpgradeBackups(value) {

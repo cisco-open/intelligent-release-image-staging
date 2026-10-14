@@ -66,7 +66,7 @@ matched set, because it mints a new capability and re-copies everything
 together. Re-onboarding from the Console is not the same path: its checks
 refuse a device that still carries a live agent, so undeploy a device first,
 then onboard it again. See
-[Upgrade to a new release](../zensical/admin-guide/upgrade.md) for the
+[Deploy a new release](../zensical/admin-guide/upgrade.md) for the
 operator procedure.
 
 ## Entrypoint and PID 1 on IOx and IOS-XR

@@ -148,10 +148,10 @@ try {
     backups: [{backup_id: accepted, created_at: now, delete_allowed: true, delete_reason: ''}], operation: null};
   await page.locator('#backup-refresh').click(); await idle();
   const protectedArchives = page.locator('#backup-upgrade-archives');
-  assert.equal(await protectedArchives.locator('summary').innerText(), '2 protected upgrade backups');
+  assert.equal(await protectedArchives.locator('summary').innerText(), '2 protected recovery backups');
   await protectedArchives.locator('summary').focus(); await page.keyboard.press('Enter');
   assert.notEqual(await protectedArchives.getAttribute('open'), null);
-  assert.match(await protectedArchives.innerText(), /Upgrade complete/);
+  assert.match(await protectedArchives.innerText(), /Recorded operation complete/);
   assert.match(await protectedArchives.innerText(), /Identity recovery archive present; deployment archive absent/);
   assert.equal(await protectedArchives.locator('button, select, input').count(), 0, 'Protected archives have no mutation control');
   assert.equal(await page.locator(`#backup-delete-selected option[value="${other}"]`).count(), 0);

@@ -158,24 +158,15 @@ The scoped worker requires a verified backup for credential maintenance;
 `irisctl maintenance` recovers interrupted work while the Console is stopped.
 Keep live qualification evidence separate from unit tests and build results.
 
-Managed application upgrade supports source-built single-host and split Docker.
-The prepare step binds the installed package, source inventory and controller
-runtime, then builds isolated server, Console and device-package candidates.
-Apply requires confirmed agent removal and an explicitly approved plan. It
-verifies encrypted backups, fences the old worker and publishes the new source
-and artifacts without replacing account, key or storage authority. A pinned
-systemd pre-start guard closes the old-worker reboot window. Recovery finishes
-the same approved generation; it never restarts old code after publication.
-Split upgrades preload the Console image over the recorded SSH transport,
-preserve remote credentials and browser TLS, and require an authenticated
-Console consumer proof. A remote inherited lock fences surviving commands;
-exact Compose publication and recorded container creation reconcile lost replies.
-Reconstructed management certificates use a separate, sequential public-trust
-publication intent bound to the unchanged key, subject and issuer. Private
-credentials are never included in that exception.
-Fault-injection and root-owned guard tests cover interruption boundaries. Real
-upgrade and device admission checks remain separate live qualification gates.
-See [the upgrade guide](../zensical/admin-guide/upgrade.md) for operator steps.
+Deploying a different server release uses undeploy, removal, a new installation
+and device re-onboarding. There is no public in-place application upgrade command.
+A new managed installation requires a new identity and dedicated state directory;
+it does not adopt old volumes or apply a backup to a different deployment.
+Existing backup, restore, credential rotation and scoped uninstall remain supported.
+Historical operation guards, protected archive readers and worker startup fences
+remain available to preserve existing state and refuse conflicting maintenance.
+They are not a new application replacement engine.
+See [Deploy a new release](../zensical/admin-guide/upgrade.md) for operator steps.
 
 ## Implemented: native-package runtime checks
 
@@ -567,7 +558,7 @@ authentication, approvals and public-kit qualification remain separate requireme
 ## Delivery and qualification contract
 
 Qualify single/split Docker and single-/multi-node Kubernetes, source and prebuilt
-inputs, both device architectures, signing, resume, upgrades, renewal, backup/restore
+inputs, both device architectures, signing, resume, replacement, renewal, backup/restore
 and failure recovery. The server remains single-replica. Multi-node scheduling
 and optional demo mode alone do not satisfy high-availability or production acceptance.
 

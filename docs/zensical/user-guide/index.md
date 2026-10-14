@@ -34,6 +34,6 @@ in [Automate with the API](automation.md).
 
 **Monitoring:** [Monitor transfers and device reports](monitoring.md) · [Export telemetry](telemetry-export.md) · [Import the Splunk and Grafana dashboards](dashboards.md) · [Send telemetry to Splunk](splunk.md) · [Search IRIS data in Splunk](splunk-searches.md)
 
-**Maintenance:** [Upgrade to a new release](../admin-guide/upgrade.md) · [Back up and restore](../admin-guide/backups.md) · [Routine maintenance tasks](../admin-guide/maintenance.md) · [Rotate credentials and certificates](../admin-guide/rotations.md) · [Replace or recover signing keys](../admin-guide/instruction-keys.md)
+**Maintenance:** [Deploy a new release](../admin-guide/upgrade.md) · [Back up and restore](../admin-guide/backups.md) · [Routine maintenance tasks](../admin-guide/maintenance.md) · [Rotate credentials and certificates](../admin-guide/rotations.md) · [Replace or recover signing keys](../admin-guide/instruction-keys.md)
 
 **Troubleshooting:** [Troubleshoot: symptoms and first steps](troubleshooting.md) · [Recover from an interrupted job or damaged state](../admin-guide/recovery.md)

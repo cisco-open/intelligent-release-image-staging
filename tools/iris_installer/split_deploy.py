@@ -324,9 +324,6 @@ class SplitDockerInstall(DockerInstall):
         if action == 'provision':
             payload['prebuilt'] = self.prebuilt()
         program = REMOTE_PROGRAM
-        if action.startswith('upgrade-'):
-            from .upgrade_split import remote_program
-            program = remote_program(program)
         command = 'sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive python3 -I -B -c ' + shlex.quote(program)
         return self.command(self.ssh_command(command), input=json.dumps(payload).encode(), capture=True, timeout=timeout)
 

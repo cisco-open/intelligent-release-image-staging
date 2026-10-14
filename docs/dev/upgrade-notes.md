@@ -9,9 +9,9 @@ SPDX-License-Identifier: Apache-2.0
 This page is for a contributor rolling out a change to the instruction
 envelope, the shared on-device agent, or role policy. It covers what a
 device on the old code still does and how to move a deployment backward
-without losing state. The operator-facing steps for a routine upgrade live
-on [Upgrade to a new release](../zensical/admin-guide/upgrade.md); this page
-covers what changes underneath that procedure.
+without losing state. These compatibility notes do not provide an in-place
+upgrade command. Operator replacement uses undeploy, removal and a new install;
+see [Deploy a new release](../zensical/admin-guide/upgrade.md).
 
 ## Upgrading the instruction envelope from v1 to v2
 
@@ -133,7 +133,7 @@ to import a certificate.
   how the v2 envelope is actually built.
 - [Build and publish the device packages](../zensical/install/device-packages.md#embedded-agent-packages):
   when a change under `device/agent/` needs a package rebuild.
-- [Upgrade to a new release](../zensical/admin-guide/upgrade.md): the operator
-  procedure for a routine upgrade.
+- [Deploy a new release](../zensical/admin-guide/upgrade.md): undeploy, remove,
+  install the replacement and onboard its agents.
 - [Roles and peer sharing](../zensical/architecture/security-model.md#roles-and-peer-sharing):
   how role policy and device quarantine are stored and enforced.

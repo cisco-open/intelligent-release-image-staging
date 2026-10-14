@@ -23,12 +23,12 @@ def pending(worker, state):
 
 
 @pytest.mark.parametrize('state', ['running', 'recovery-required'])
-@pytest.mark.parametrize('consumer', ['upgrade', 'image-folder', 'recovery-key', 'restore-signer', 'direct-backup-or-restore'])
+@pytest.mark.parametrize('consumer', ['removal', 'image-folder', 'recovery-key', 'restore-signer', 'direct-backup-or-restore'])
 def test_pending_retention_blocks_host_maintenance_before_any_mutation(worker, monkeypatch, state, consumer):
     pending(worker, state)
     monkeypatch.setattr(managed_worker, 'command', lambda *a, **k: pytest.fail('host command admitted'))
     monkeypatch.setattr(image_storage, 'require_approval', lambda *a: None)
-    if consumer == 'upgrade': action = lambda: upgrade_runtime.jobs_idle(worker.state_dir)
+    if consumer == 'removal': action = lambda: upgrade_runtime.jobs_idle(worker.state_dir)
     elif consumer == 'direct-backup-or-restore': action = lambda: restore.guard(worker.state_dir)
     elif consumer == 'image-folder': action = lambda: image_storage.change(SimpleNamespace(state_dir=worker.state_dir, path=worker.backup_dir))
     elif consumer == 'recovery-key': action = lambda: managed_worker._configure_recovery(worker.state_dir, None)

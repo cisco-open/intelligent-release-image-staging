@@ -4,8 +4,6 @@
 
 """Upgrade/retention compatibility with real private journals, no host services."""
 
-import copy
-from contextlib import nullcontext
 import json
 from pathlib import Path
 import shutil
@@ -17,10 +15,9 @@ import uuid
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
-from iris_installer import application_upgrade as upgrade, upgrade_plan, upgrade_state
-from iris_installer.lifecycle_history import Store
+from iris_installer import upgrade_plan, upgrade_state
 from iris_installer.lifecycle_worker import Worker
-from iris_installer.state import InstallError, Journal, atomic_write
+from iris_installer.state import InstallError, atomic_write
 
 
 def save(path, value):
@@ -150,118 +147,3 @@ assert.equal(value.protected_upgrade_backups[0].recovery_archive, true);
 assert.equal(value.busy, false);
 ''', module.as_uri()], input=json.dumps(worker.status()['retention']),
         text=True, capture_output=True, check=True, timeout=15)
-
-
-@pytest.fixture
-def preparing(owned, monkeypatch):
-    save(owned.base / 'compose.json', {'owned': True})
-    calls = []
-    class Install:
-        def __init__(self, journal):
-            self.journal, self.base = journal, owned.base
-            self.compose_file = owned.base / 'compose.json'
-        def verify_inputs(self): pass
-    monkeypatch.setattr(upgrade, '_root', lambda value: Path(value))
-    monkeypatch.setattr(upgrade.managed_worker, '_service_lock', lambda _: nullcontext())
-    def worker_state(_):
-        # Actual worker_state calls managed_worker._load -> _installation.
-        # A nested Journal lock must fail here exactly as it would on host.
-        with Journal(owned.base).locked():
-            return copy.deepcopy(owned.worker)
-    monkeypatch.setattr(upgrade.runtime, 'worker_state', worker_state)
-    monkeypatch.setattr(upgrade.restore, 'custody', lambda *a: None)
-    monkeypatch.setattr(upgrade, '_idle', lambda *a: None)
-    monkeypatch.setattr(upgrade.deploy, 'DockerInstall', Install)
-    monkeypatch.setattr(upgrade.backup, 'capture_plan', lambda _: ({}, {}, [{'running': True}]))
-    monkeypatch.setattr(upgrade.runtime, 'drain', lambda _: None)
-    def selected(*args):
-        calls.append('authenticated')
-        assert 'lifecycle_history' not in json.loads((owned.base / 'installation.json').read_bytes())
-        return {'commit': '9' * 40}, b'authenticated public proof'
-    def build(install, operation, selection, source):
-        calls.append('build')
-        # Starting the new worker's real history store must not change the
-        # approved generation, and must never be attempted under Journal.lock.
-        assert 'lifecycle_history' in install.journal.document
-        return {'selection': selection}
-    monkeypatch.setattr(upgrade.candidate, 'selected_source', selected)
-    monkeypatch.setattr(upgrade.candidate, 'build', build)
-    args = SimpleNamespace(state_dir=owned.base, accept_changes=True, source=owned.base / 'candidate',
-        source_proof=owned.base / 'proof', source_proof_sha256='1' * 64, source_commit='9' * 40)
-    return SimpleNamespace(owned=owned, args=args, calls=calls)
-
-
-def test_prepare_commits_history_before_immutable_plan_for_an_old_worker(preparing):
-    p = preparing
-    old_job = {'id': str(uuid.uuid4()), 'action': 'verify', 'state': 'failed', 'backup_id': str(uuid.uuid4()),
-               'started_at': 1, 'finished_at': 2, 'detail': ''}
-    save(p.owned.base / 'lifecycle-jobs.json', [old_job])
-    assert upgrade.prepare(p.args) == 0
-    pointer = json.loads((p.owned.base / 'application-upgrade.json').read_bytes())
-    op = upgrade_state.Operation(p.owned.base, pointer['operation_id'], p.owned.original['id']); op.load()
-    review = op.plan(op.record['plan_sha256'])
-    before = (p.owned.base / 'installation.json').read_bytes()
-    store = Store(p.owned.base)
-    assert before == (p.owned.base / 'installation.json').read_bytes()
-    assert review['original']['lifecycle_history'] == store.anchor == op.record['original']['lifecycle_history']
-    assert review['original'] == dict(p.owned.original, lifecycle_history=store.anchor)
-    assert json.loads((p.owned.base / 'lifecycle-jobs.json').read_bytes()) == [old_job]
-    assert p.calls == ['authenticated', 'build']
-
-
-def test_unauthenticated_candidate_never_initializes_history(preparing, monkeypatch):
-    def refused(*args): raise InstallError('candidate refused')
-    monkeypatch.setattr(upgrade.candidate, 'selected_source', refused)
-    with pytest.raises(InstallError, match='candidate refused'): upgrade.prepare(preparing.args)
-    assert json.loads((preparing.owned.base / 'installation.json').read_bytes()) == preparing.owned.original
-    assert not (preparing.owned.base / 'lifecycle-history.sqlite3').exists()
-
-
-def test_prepare_does_not_adopt_concurrent_journal_fields(preparing, monkeypatch):
-    def initialize(base):
-        current = json.loads((base / 'installation.json').read_bytes())
-        current['unapproved'] = True; save(base / 'installation.json', current)
-        return Store(base)
-    monkeypatch.setattr(upgrade, 'Store', initialize)
-    with pytest.raises(InstallError, match='deployment changed'): upgrade.prepare(preparing.args)
-    assert not (preparing.owned.base / 'application-upgrades').exists()
-    assert json.loads((preparing.owned.base / 'installation.json').read_bytes())['unapproved'] is True
-
-
-def test_prepare_refuses_changed_worker_between_history_initialization_and_plan(preparing, monkeypatch):
-    original = upgrade.runtime.worker_state
-    calls = 0
-    def worker_state(base):
-        nonlocal calls
-        calls += 1
-        result = original(base)
-        if calls == 2: result['unit_sha256'] = '0' * 64
-        return result
-    monkeypatch.setattr(upgrade.runtime, 'worker_state', worker_state)
-    with pytest.raises(InstallError, match='managed worker changed'): upgrade.prepare(preparing.args)
-    assert not (preparing.owned.base / 'application-upgrades').exists()
-
-
-def test_prepare_preserves_existing_retired_request_authority(preparing, monkeypatch):
-    worker = Worker(preparing.owned.base, preparing.owned.roots['backup'], preparing.owned.roots['recovery'])
-    job = {'id': str(uuid.uuid4()), 'action': 'verify', 'state': 'failed', 'backup_id': str(uuid.uuid4()),
-           'started_at': 1, 'finished_at': 2, 'detail': ''}
-    worker.jobs = [job]; worker.save()
-    worker.submit({'action': 'retire-history', 'request_id': str(uuid.uuid4()),
-        'expected_revision': worker.retention.status()['revision'], 'job_ids': [job['id']]})
-    paths = [worker.retention.store.path, worker.retention.store.marker, worker.record]
-    before = {str(p): p.read_bytes() for p in paths}
-    monkeypatch.setattr(upgrade.candidate, 'selected_source', lambda *a: ({'commit': '9' * 40}, b'public proof'))
-    assert upgrade.prepare(preparing.args) == 0
-    assert {str(p): p.read_bytes() for p in paths} == before
-    assert Store(preparing.owned.base).retired(job['id'])
-
-
-def test_prepare_refuses_lost_established_history_without_reinitializing(preparing, monkeypatch):
-    store = Store(preparing.owned.base)
-    store.path.unlink(); store.marker.unlink()
-    before = (preparing.owned.base / 'installation.json').read_bytes()
-    monkeypatch.setattr(upgrade.candidate, 'selected_source', lambda *a: ({'commit': '9' * 40}, b'public proof'))
-    with pytest.raises(InstallError, match='authority is missing'): upgrade.prepare(preparing.args)
-    assert before == (preparing.owned.base / 'installation.json').read_bytes()
-    assert not store.path.exists() and not store.marker.exists()
