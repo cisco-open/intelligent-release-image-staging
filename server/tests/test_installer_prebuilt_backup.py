@@ -66,7 +66,7 @@ def test_capture_adds_only_exact_recorded_cache_components_for_every_topology(ca
 
 
 def test_source_capture_and_legacy_journal_remain_unchanged(tmp_path):
-    journal = SimpleNamespace(document={'completed': {}})
+    journal = SimpleNamespace(document={'id': '9c0ab39c-59e6-44c4-822b-8f4cbd7d69f4', 'completed': {}})
     install = SimpleNamespace(base=tmp_path, journal=journal, capture_plan=lambda: ({'source': tmp_path}, {}, []))
     assert backup.capture_plan(install) == ({'source': tmp_path}, {}, [])
 

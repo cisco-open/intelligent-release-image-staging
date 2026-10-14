@@ -54,6 +54,9 @@ def initialize(journal, installation):
 
 
 def capture_plan(installation, *, allow_missing_prebuilt=False, cleanup_on_failure=False):
+    from .backup_capture import guard as capture_guard
+    capture_guard(installation.base, request_id=getattr(installation, 'backup_capture_id', None),
+                  instance_id=installation.journal.document['id'])
     from .restore import guard
     guard(installation.base, operation_id=getattr(installation, 'restore_operation_id', None),
           upgrade_operation_id=getattr(installation, 'application_upgrade_id', None))
@@ -286,6 +289,8 @@ def create(args):
             raise InstallError("No installer-owned deployment was found")
         installation = _installation(journal)
         installation.application_upgrade_id = getattr(args, 'application_upgrade_id', None)
+        if getattr(args, 'managed_capture', False) is True:
+            installation.backup_capture_id = args.request_id
         with _capture_workspace(installation) as (sources, volumes, containers):
             capacity_preflight(installation, sources, output, recovery)
             signer = initialize(journal, installation)
@@ -382,12 +387,34 @@ def verify(args):
     return 0
 
 
-def recover(state_dir, *, request_id, backup_id):
+def recover(state_dir, *, request_id, backup_id, pre_authority_recovery=False):
     """Settle only the exact managed capture; never call create() again."""
-    from .backup_capture import Capture
+    from .backup_capture import Capture, guard as capture_guard, writer_authority, _private
     from .upgrade_state import guard as upgrade_guard
     upgrade_guard(state_dir)
     with Journal(state_dir).locked() as journal:
         if journal.document is None:
             raise InstallError('No managed deployment was found')
-        return Capture(_installation(journal), request_id, backup_id).load().settle()
+        installation = _installation(journal)
+        capture_guard(state_dir, request_id=request_id, instance_id=journal.document['id'])
+        operation = Capture(installation, request_id, backup_id)
+        try:
+            operation.load()
+        except FileNotFoundError:
+            if pre_authority_recovery is not True:
+                raise InstallError('This capture has no saved same-job recovery authority. Preserve the original evidence; no services were restarted.') from None
+            jobs = json.loads(_private(Path(state_dir) / 'lifecycle-jobs.json'))
+            selected = [job for job in jobs if job.get('id') == request_id]
+            if (len(selected) != 1 or selected[0].get('action') != 'backup'
+                    or selected[0].get('backup_id') != backup_id
+                    or selected[0].get('capture_authority_started') is not False
+                    or selected[0].get('state') not in ('running', 'recovery-required')):
+                raise InstallError('Capture preflight recovery does not match the saved same-job handoff')
+            # The worker persisted this exact FALSE marker before dispatch,
+            # and intent publication precedes every exporter/stop command.
+            # No intent + FALSE therefore admits NO restart or recapture.
+            # Still prove actual worker/writer quiescence before unblocking.
+            writer_authority(installation)
+            return {'state': 'failed', 'services_healthy': False, 'recaptured': False,
+                    'partial_output_retained': True, 'preflight_only': True}
+        return operation.settle()

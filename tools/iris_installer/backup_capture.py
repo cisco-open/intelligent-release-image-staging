@@ -58,6 +58,29 @@ def _private(path):
     return regular_bytes(path, 4 * 1024 * 1024)
 
 
+def _record_paths(directory):
+    """Atomic publication scraps are inert files, not operation authority."""
+    records = []
+    children = sorted(directory.iterdir())
+    if len(children) > backup_archive.MAX_FILES:
+        raise InstallError('Capture recovery history exceeds its bounded census')
+    for path in children:
+        if path.name.startswith('.iris-'):
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600 or path.resolve() != path
+                    or info.st_size > 4 * 1024 * 1024):
+                raise InstallError('Unsafe interrupted capture record scratch file; preserve it')
+            # Never read, adopt or remove a mkstemp leftover. Only the
+            # separately validated UUID.json publication can grant authority.
+            continue
+        if path.suffix != '.json':
+            raise InstallError('Unrecognized capture recovery authority')
+        identifier(path.stem)
+        records.append(path)
+    return records
+
+
 def _unit_record(installation):
     """Validate against the already held journal; never acquire Journal twice."""
     state, document = installation.base, installation.journal.document
@@ -169,6 +192,39 @@ def generation(installation):
     return copy.deepcopy({'instance_id': doc['id'], 'config': doc['config'],
             'source_manifest': doc.get('source_manifest'), 'root_digests': doc.get('root_digests'),
             'completed': {name: doc['completed'][name] for name in fields if name in doc['completed']}})
+
+
+def guard(state_dir, *, request_id=None, instance_id=None):
+    """Ordinary host capture cannot bypass a pending managed capture."""
+    directory = Path(state_dir) / 'backup-captures'
+    own_set = None
+    if directory.exists() or directory.is_symlink():
+        backup_archive.private_directory(directory)
+        records = _record_paths(directory)
+        for path in records:
+            record = json.loads(_private(path))
+            if (record.get('schema') != 1 or record.get('request_id') != path.stem
+                    or instance_id is not None and record.get('generation', {}).get('instance_id') != instance_id):
+                raise InstallError('Capture recovery authority differs from this deployment')
+            if record.get('phase') not in ('settled-captured', 'settled-failed'):
+                if path.stem != request_id:
+                    raise InstallError('Recover the interrupted backup capture before another host capture')
+                own_set = record['set_id']
+    jobs_path = Path(state_dir) / 'lifecycle-jobs.json'
+    if jobs_path.exists() or jobs_path.is_symlink():
+        jobs = json.loads(_private(jobs_path))
+        if not isinstance(jobs, list) or len(jobs) > 100:
+            raise InstallError('Capture job history is invalid; preserve it for recovery')
+        for job in jobs:
+            if (job.get('action') == 'backup' and job.get('state') in ('running', 'recovery-required')
+                    and job.get('id') != request_id):
+                raise InstallError('Recover the interrupted backup job before another host capture')
+    status_path = Path(state_dir) / 'backup-operation.json'
+    if status_path.exists() or status_path.is_symlink():
+        status = json.loads(_private(status_path))
+        if ((status.get('state') == 'stopping' or status.get('restart_required'))
+                and (own_set is None or status.get('backup_set_id') != own_set)):
+            raise InstallError('An interrupted capture lacks exact same-job authority; preserve it for recovery review')
 
 
 class Capture:
@@ -365,13 +421,9 @@ def _protected_stages(state_dir, backup_dir, recovery_dir):
     backup_archive.private_directory(directory)
     installation = json.loads(_private(Path(state_dir) / 'installation.json'))
     found = {}
-    records = sorted(directory.iterdir())
-    if len(records) > backup_archive.MAX_FILES:
-        raise InstallError('Capture recovery history exceeds its bounded census')
+    records = _record_paths(directory)
     roots = {'data': Path(backup_dir), 'recovery': Path(recovery_dir)}
     for path in records:
-        if path.suffix != '.json':
-            raise InstallError('Unrecognized capture recovery authority')
         request_id = identifier(path.stem)
         record = json.loads(_private(path))
         if (record.get('schema') != 1 or record.get('request_id') != request_id

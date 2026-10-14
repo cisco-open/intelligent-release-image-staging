@@ -244,3 +244,115 @@ def test_retention_recoverable_selector_is_only_exact_sole_interrupted_job(state
     result = retained.status()
     assert result['recoverable_job_id'] == (jobs[0]['id'] if expected else None)
     assert result['busy'] is bool(pending or upgrading or any(state in ('running', 'recovery-required') for state in states))
+
+
+@pytest.mark.parametrize('source', ['intent', 'job', 'ambiguous-status'])
+def test_ordinary_host_capture_cannot_bypass_pending_capture(fixture, source):
+    operation = fixture.operation
+    if source != 'intent':
+        operation.path.unlink()
+    if source == 'job':
+        atomic_write(fixture.state / 'lifecycle-jobs.json', json.dumps([{
+            'id': operation.request_id, 'backup_id': operation.backup_id,
+            'action': 'backup', 'state': 'recovery-required'}]).encode())
+    elif source == 'ambiguous-status':
+        atomic_write(fixture.state / 'backup-operation.json', json.dumps({
+            'state': 'stopping', 'backup_set_id': operation.record['set_id']}).encode())
+    with pytest.raises(InstallError, match='[Rr]ecover|authority'):
+        capture.guard(fixture.state, instance_id=fixture.install.journal.document['id'])
+    assert fixture.events == []
+
+
+def test_guard_admits_only_same_intent_and_settled_history(fixture):
+    operation = fixture.operation
+    atomic_write(fixture.state / 'backup-operation.json', json.dumps({
+        'state': 'stopping', 'backup_set_id': operation.record['set_id']}).encode())
+    capture.guard(fixture.state, request_id=operation.request_id,
+                  instance_id=fixture.install.journal.document['id'])
+    with pytest.raises(InstallError):
+        capture.guard(fixture.state, request_id=str(uuid.uuid4()),
+                      instance_id=fixture.install.journal.document['id'])
+    operation.phase('settled-failed')
+    atomic_write(fixture.state / 'backup-operation.json', b'{"state":"failed","restart_required":[]}')
+    capture.guard(fixture.state, instance_id=fixture.install.journal.document['id'])
+
+
+@pytest.mark.parametrize('pre_authority', [False, True])
+def test_pre_intent_recovery_requires_exact_false_handoff_and_never_restarts(fixture, monkeypatch, pre_authority):
+    from contextlib import contextmanager
+    operation = fixture.operation
+    operation.path.unlink()
+    atomic_write(fixture.state / 'lifecycle-jobs.json', json.dumps([{
+        'id': operation.request_id, 'backup_id': operation.backup_id, 'action': 'backup',
+        'state': 'recovery-required', 'capture_authority_started': False}]).encode())
+    events = []
+    @contextmanager
+    def locked():
+        yield fixture.install.journal
+    monkeypatch.setattr(backup, 'Journal', lambda _p: SimpleNamespace(locked=locked))
+    monkeypatch.setattr(backup, '_installation', lambda _j: fixture.install)
+    monkeypatch.setattr(capture, 'writer_authority', lambda _i: events.append('actual-worker-gate'))
+    if pre_authority:
+        result = backup.recover(fixture.state, request_id=operation.request_id,
+                               backup_id=operation.backup_id, pre_authority_recovery=True)
+        assert result == {'state': 'failed', 'services_healthy': False, 'recaptured': False,
+                          'partial_output_retained': True, 'preflight_only': True}
+        assert events == ['actual-worker-gate']
+    else:
+        with pytest.raises(InstallError, match='no saved same-job recovery authority'):
+            backup.recover(fixture.state, request_id=operation.request_id, backup_id=operation.backup_id)
+        assert events == []
+    assert fixture.events == [] and list(operation.path.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize('change', ['name', 'directory', 'mode', 'owner', 'symlink', 'hardlink'])
+def test_only_inert_private_atomic_scratch_files_can_be_ignored(fixture, change):
+    operation = fixture.operation
+    scratch = operation.path.parent / '.iris-interrupted-atomic-save'
+    atomic_write(scratch, b'partial record bytes are never authority')
+    if change == 'name':
+        scratch.rename(scratch.with_name('foreign'))
+    elif change == 'directory':
+        scratch.unlink()
+        scratch.mkdir(mode=0o700)
+    elif change == 'mode':
+        scratch.chmod(0o644)
+    elif change == 'owner':
+        os.chown(scratch, 1001, 1001)
+    elif change == 'symlink':
+        scratch.unlink()
+        scratch.symlink_to(operation.path)
+    elif change == 'hardlink':
+        os.link(scratch, scratch.with_name('.iris-another-link'))
+    with pytest.raises(InstallError):
+        capture.guard(fixture.state, request_id=operation.request_id,
+                      instance_id=fixture.install.journal.document['id'])
+
+
+def test_interrupted_atomic_scratch_never_invents_intent_or_completion(fixture, monkeypatch):
+    from contextlib import contextmanager
+    operation = fixture.operation
+    operation.path.unlink()
+    scratch = operation.path.parent / '.iris-interrupted-atomic-save'
+    raw = b'not a published capture intent'
+    atomic_write(scratch, raw)
+    atomic_write(fixture.state / 'installation.json', json.dumps(fixture.install.journal.document).encode())
+    data_root = Path(operation.record['destinations']['data']['path']).parent
+    recovery_root = Path(operation.record['destinations']['recovery']['path']).parent
+    assert capture.protected_stages(fixture.state, data_root, recovery_root) == {}
+    @contextmanager
+    def locked():
+        yield fixture.install.journal
+    monkeypatch.setattr(backup, 'Journal', lambda _p: SimpleNamespace(locked=locked))
+    monkeypatch.setattr(backup, '_installation', lambda _j: fixture.install)
+    monkeypatch.setattr(capture, 'writer_authority', lambda _i: pytest.fail('scratch admitted capture recovery'))
+    with pytest.raises(InstallError, match='no saved same-job recovery authority'):
+        backup.recover(fixture.state, request_id=operation.request_id, backup_id=operation.backup_id)
+    for marker in (True, None, 'false'):
+        atomic_write(fixture.state / 'lifecycle-jobs.json', json.dumps([{
+            'id': operation.request_id, 'backup_id': operation.backup_id, 'action': 'backup',
+            'state': 'recovery-required', 'capture_authority_started': marker}]).encode())
+        with pytest.raises(InstallError, match='saved same-job handoff'):
+            backup.recover(fixture.state, request_id=operation.request_id, backup_id=operation.backup_id,
+                           pre_authority_recovery=True)
+    assert scratch.read_bytes() == raw and not operation.path.exists() and fixture.events == []

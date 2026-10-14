@@ -63,7 +63,7 @@ def capture(tmp_path, monkeypatch):
         destination.mkdir()
         (destination / 'captured').write_bytes(b'synthetic encrypted archive')
 
-    install = SimpleNamespace(base=state, config={'target': 'kubernetes'},
+    install = SimpleNamespace(base=state, journal=journal, config={'target': 'kubernetes'},
         backup_export_images=export, cleanup_snapshot_sources=clean,
         capture_backup_extras=lambda _sources: event('snapshot'))
     monkeypatch.setattr(backup.os, 'geteuid', lambda: 0)
@@ -152,6 +152,7 @@ def test_cache_validation_failure_cleans_only_standalone_capture(tmp_path, monke
 
     monkeypatch.setattr(prebuilt_backup, 'capture_sources', caches)
     install = SimpleNamespace(base=tmp_path, capture_plan=topology,
+                              journal=SimpleNamespace(document={'id': 'ac9e6839-49db-4a0d-8a5d-d4f9465b7ab2'}),
                               cleanup_snapshot_sources=cleanup)
     with pytest.raises(InstallError):
         backup.capture_plan(install, cleanup_on_failure=standalone_capture)

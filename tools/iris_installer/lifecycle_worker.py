@@ -517,9 +517,12 @@ class Worker:
 
     def perform_backup_recovery(self, job):
         try:
-            result = backup.recover(self.state_dir, request_id=job['id'], backup_id=job['backup_id'])
+            result = backup.recover(self.state_dir, request_id=job['id'], backup_id=job['backup_id'],
+                                    pre_authority_recovery=job.get('capture_authority_started') is False)
             state = result['state']
-            detail = ('Backup capture completed and original services are healthy. Verify both sets before using them.'
+            detail = ('Capture stopped before any service changes. No capture was repeated. Start a new backup to try again.'
+                      if result.get('preflight_only') is True else
+                      'Backup capture completed and original services are healthy. Verify both sets before using them.'
                       if state == 'captured' else
                       'Original services are healthy. The interrupted backup is incomplete; its private output has been kept. Start a new backup to try again.')
             proof = result

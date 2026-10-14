@@ -723,7 +723,7 @@ def serve_managed(args):
         def submit(self, request):
             with CAPTURE_PROCESS_LOCK:
                 check_storage(state, record)
-            return super().submit(request)
+                return super().submit(request)
 
         def deployment_info(self):
             with CAPTURE_PROCESS_LOCK:
@@ -736,7 +736,8 @@ def serve_managed(args):
         def submit_transport(self, request):
             # Transport recovery remains available even when backup disks are
             # detached; it never captures or decrypts a backup.
-            return super().submit_transport(request)
+            with CAPTURE_PROCESS_LOCK:
+                return super().submit_transport(request)
 
         def status(self, retention_request_id=None):
             with CAPTURE_PROCESS_LOCK:
