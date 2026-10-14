@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Preserve the running worker's verified startup guard while preparing a
+  subsequent application upgrade, including recovery of the original plan.
 - Upgrade a source-built managed deployment on separate Docker hosts with the
   existing approved-plan and same-operation recovery commands.
 - Remove a managed Docker, separate-host Docker, or Kubernetes deployment with

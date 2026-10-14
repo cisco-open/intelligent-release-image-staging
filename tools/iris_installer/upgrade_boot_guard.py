@@ -104,7 +104,26 @@ def describe(base, worker, *, expected=None):
         plan.require(not loaded, 'An unknown systemd worker drop-in is loaded')
         return None
     plan.require(loaded == [str(path)], 'Unexpected effective worker drop-ins')
-    selected = expected or upgrade_state.read(base / 'application-upgrade.json')
+    selected = expected
+    if selected is None:
+        # A later isolated candidate owns the current operation pointer, not
+        # the still-running worker's guard. Its exact preimage retains that
+        # authority; active or interrupted operations must still refuse.
+        upgrade_state.guard(base, instance_id=worker['instance_id'])
+        selected = upgrade_state.read(base / 'application-upgrade.json')
+        current_id = plan.identifier(selected.get('operation_id'))
+        current = upgrade_state.validate(
+            upgrade_state.read(base / 'application-upgrades' / current_id / 'record.json'),
+            operation_id=current_id, instance_id=worker['instance_id'])
+        if current['phase'] in ('building', 'prepared', 'cancelled'):
+            previous = current.get('worker_before')
+            plan.require(isinstance(previous, dict) and
+                         plan.canonical(previous.get('record')) == plan.canonical(worker),
+                         'The prepared upgrade worker preimage changed')
+            selected = expected = previous.get('boot_guard')
+            plan.require(isinstance(selected, dict) and set(selected) ==
+                         {'operation_id', 'dropin_sha256', 'launcher_sha256'},
+                         'The previous worker upgrade guard proof is missing')
     operation_id = plan.identifier(selected.get('operation_id'))
     saved = upgrade_state.read(base / 'application-upgrades' / operation_id / 'record.json')
     upgrade_state.validate(saved, operation_id=operation_id, instance_id=worker['instance_id'])
@@ -114,8 +133,11 @@ def describe(base, worker, *, expected=None):
     actual = managed_worker._file(path, mode=0o644)
     plan.require(actual == dropin(base, operation_id) and actual_code == code,
                  'Existing owned worker upgrade guard changed')
-    return {'operation_id': operation_id, 'dropin_sha256': hashlib.sha256(actual).hexdigest(),
-            'launcher_sha256': hashlib.sha256(code).hexdigest()}
+    observed = {'operation_id': operation_id, 'dropin_sha256': hashlib.sha256(actual).hexdigest(),
+                'launcher_sha256': hashlib.sha256(code).hexdigest()}
+    plan.require(expected is None or plan.canonical(expected) == plan.canonical(observed),
+                 'The previous worker upgrade guard proof changed')
+    return observed
 
 
 def install(base, operation, saved):
