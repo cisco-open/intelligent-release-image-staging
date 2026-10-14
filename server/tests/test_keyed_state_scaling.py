@@ -438,12 +438,24 @@ def test_rollback_guard_names_the_migrated_file_for_the_operator(tmp_path):
     catalog.CatalogStore(str(tmp_path)).get_device("d1")
     with open(path) as f:
         guard_text = f.read()
-    # An operator who only sees the exception (pointing at `path`) and cats
-    # the file needs the restore command in front of them, not a second
-    # lookup.
+    # Keep evidence discoverable without recommending a stale-state rollback.
     assert path + ".migrated" in guard_text
-    assert "mv " in guard_text
+    assert "per-device" in guard_text
+    assert "retained document can omit newer writes" in guard_text
+    assert "Do not replace this guard or run older application" in guard_text
+    assert "new\ninstallation and device re-onboarding" in guard_text
+    assert "mv " not in guard_text
+    assert "original document first" not in guard_text
     assert "docs/zensical/admin-guide/recovery.md" in guard_text
+
+    # The text change leaves both the refusal and live shard reads intact.
+    with pytest.raises(RuntimeError):
+        _legacy_style_read(path)
+    current = catalog.CatalogStore(str(tmp_path))
+    current.record_heartbeat("d1", {"stage_state": "staging"}, now=2.0)
+    assert current.get_device("d1")["stage_state"] == "staging"
+    assert json.loads(Path(path + ".migrated").read_text()) == {"d1": {"device_id": "d1"}}
+    assert Path(path).read_text() == guard_text
 
 
 def test_migration_is_one_shot_even_across_process_restarts(tmp_path):

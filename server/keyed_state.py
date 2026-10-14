@@ -59,10 +59,10 @@ on an unparseable state file (the pre-#51/#52/#53/#56/#58
 ``CatalogStore._read`` and ``peer_endpoints._load``, both of which treat a
 *missing* file as ``{}`` but an *existing-and-unreadable* one as corruption)
 trips that same fail-closed path instead of reading an empty store. The
-placeholder carries the recovery instructions in the clear, so ``cat``-ing
-the file the error points at is enough to find them. See
-``docs/zensical/admin-guide/recovery.md`` ("Roll back the per-device state
-split") for the full procedure.
+placeholder identifies retained evidence in the clear, so ``cat``-ing the
+file the error points at explains the refusal. See
+``docs/zensical/admin-guide/recovery.md`` ("Inspect retained per-device migration
+evidence") for the supported recovery procedure.
 """
 import contextlib
 import copy
@@ -435,15 +435,19 @@ class KeyedState:
             "fleet, so this file exists to make it fail loudly instead of\n"
             "silently reporting no devices, no policy and no telemetry.\n"
             "\n"
-            "If you are rolling back to that older code, restore the\n"
-            "original document first:\n"
+            "Keep this guard, the retained document and the per-device\n"
+            "files intact. The retained document can omit newer writes;\n"
+            "it is historical evidence, not a current restore set.\n"
             "\n"
-            "    mv %s %s\n"
+            "Use the original deployment's recorded release and state\n"
+            "paths. Do not replace this guard or run older application\n"
+            "code against this store. A different release requires a new\n"
+            "installation and device re-onboarding.\n"
             "\n"
-            "See docs/zensical/admin-guide/recovery.md, \"Roll back the\n"
-            "per-device state split\", for the full recovery procedure.\n"
-            % (self.dir, migrated_path, self.legacy_path,
-               migrated_path, self.legacy_path)
+            "See docs/zensical/admin-guide/recovery.md, \"Inspect retained\n"
+            "per-device migration evidence\", and the deployment-replacement\n"
+            "procedure in docs/zensical/admin-guide/upgrade.md.\n"
+            % (self.dir, migrated_path, self.legacy_path)
         )
         try:
             d = os.path.dirname(self.legacy_path) or "."

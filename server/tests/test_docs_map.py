@@ -324,10 +324,29 @@ def test_problem_registry_covers_literal_role_coordinator_codes():
     assert not codes - headings, sorted(codes - headings)
 
 
-def test_rollback_guard_recovery_section_stays_available():
+def test_migration_guard_recovery_keeps_evidence_without_old_code_rollout():
     page = _page("admin-guide/recovery.md")
-    assert "## Roll back the per-device state split" in page
-    assert "does not restore writes made after the" in page
+    assert "## Inspect retained per-device migration evidence { #rollback-after-the-shard-migration }" in page
+    assert "retained document can omit newer" in page
+    assert "Do not replace the placeholder" in page
+    assert "run older\n    application code" in page
+    assert "current security records and a consistent backup" in page
+    assert "[Deploy a new release](upgrade.md)" in page
+    assert "Restore the retained document at the original path" not in page
+    assert "state rollback" not in _page("admin-guide/index.md")
+
+
+def test_changed_package_source_uses_build_only_then_deployment_replacement():
+    page = _page("install/device-packages.md")
+    rebuild = _section(page, "When to rebuild the packages")
+    assert "docker compose -f server/docker-compose.yml build --pull" in rebuild
+    assert "[Deploy a new release](../admin-guide/upgrade.md)" in rebuild
+    assert "removes\nand re-onboards" in rebuild
+    assert "Verify readiness on the new deployment before onboarding" in rebuild
+    assert "same release and public roots when generating or signing its packages" in rebuild
+    assert "up -d --build" not in rebuild
+    assert "rollout restart" not in rebuild
+    assert "tools/provision-iox-packages.sh" not in rebuild
 
 
 def test_readme_api_reference_is_rendered_site_not_html_source():

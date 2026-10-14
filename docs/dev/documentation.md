@@ -226,7 +226,7 @@ The table below records the retained aliases for the reorganization.
 | `device-global-package-verification` | `install/iox.md` "Signature verification is a device-wide setting" | `device/iox/README.md:148-149`, six in-docs pages. |
 | `unassigned-image-park` | `user-guide/assignments.md` "What happens to an image you unassign" | `fleet/assignments.csv.example:15`, six in-docs pages. |
 | `recover-a-volume-whose-private-modes-were-changed` | `admin-guide/recovery.md` "Repair a volume whose file permissions were changed" | `kubernetes/README.md:352`. |
-| `rollback-after-the-shard-migration` | `admin-guide/recovery.md` "Roll back the per-device state split" | Guard files written by older `keyed_state.py` builds, CHANGELOG (two links). |
+| `rollback-after-the-shard-migration` | `admin-guide/recovery.md` "Inspect retained per-device migration evidence" | Guard files written by older `keyed_state.py` builds, CHANGELOG (two links). |
 | `crash-safe-same-name-replacement` | `architecture/data-path.md` "How the agent replaces an image without deleting it first" | `device/iox/README.md:193`, two in-docs pages. |
 
 Two test helpers already understand the attribute. `_section()` in

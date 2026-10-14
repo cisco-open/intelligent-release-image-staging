@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Preserve per-device migration evidence without recommending older application
+  code, and build changed device packages for a fresh deployment and re-onboarding.
 - Keep Docker removal checks stable when stopping a container changes the
   network's IP-use counters, while still checking resource identities and settings.
 - Include both prebuilt-release intake helpers in the source release archive.

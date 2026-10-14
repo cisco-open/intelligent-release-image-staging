@@ -89,7 +89,7 @@ file permissions, leaves IRIS stuck. Each procedure here clears one state.
 | An IOS-XR undeploy stopped partway and the device shows a red `needs-reconcile` badge | The job ended before teardown finished | Recovering an interrupted IOS-XR teardown |
 | A Guest Shell job reports `copy_failed`, and a later job says the hash launch was never confirmed | The native hash job's result was lost | Recover an interrupted Guest Shell root-hash job |
 | The server refuses to start and reports an unsafe deployment-authority or transcript mode | A volume mount rewrote private file modes | Repair a volume whose file permissions were changed |
-| A read of a device store fails, and the file at its old path is not valid JSON | Older code is reading the path the store moved away from | Roll back the per-device state split |
+| A read of a device store fails, and the file at its old path is not valid JSON | A reader used the retired whole-fleet path | Inspect retained per-device migration evidence |
 
 ## Recovering an IOx attempt cut off mid-run
 
@@ -222,26 +222,31 @@ storage:
     Never use recursive `chmod` or `chown`, never delete authority evidence,
     never weaken the validators, and never change permissions while a job runs.
 
-## Roll back the per-device state split { #rollback-after-the-shard-migration }
+## Inspect retained per-device migration evidence { #rollback-after-the-shard-migration }
 
 The server now keeps one file per device instead of one whole-fleet JSON
 document per store. See
 [Data formats and states](../reference/state-and-data.md). The original
-document keeps a `.migrated` suffix, and an invalid placeholder at its old path
-names the original and backup paths.
+document keeps a `.migrated` suffix. An invalid placeholder at its old path
+names the retained document and current data directory. Keep both as evidence.
 
 1. Stop every reader and writer of the selected store.
 2. Back up the whole state volume: per-device files, revision metadata,
    placeholders, and `.migrated` files.
-3. Restore the retained document at the original path. Code from before the
-   split can then read it, but it **does not restore writes made after the
-   migration**. If those writes matter, export them with the newer release, or
-   restore a consistent backup first.
+3. Check the original deployment's recorded source and state paths. Its
+   per-device readers use the current files, not the retired whole-fleet path.
+   For same-deployment recovery, follow [Restore a backup](backups.md#restore-a-backup)
+   with current security records and a consistent backup.
 4. Verify inventory and policy together. An empty store is not a successful
    recovery.
 
 !!! warning
-    Do not delete the per-device files, and do not overwrite the only backup.
+    Do not replace the placeholder with the retained document or run older
+    application code against this store. The retained document can omit newer
+    writes. Keep the per-device files, guard and backup intact.
+
+For another release, follow [Deploy a new release](upgrade.md): remove the old
+deployment, install its replacement and onboard devices to the new identity.
 
 ## Replace the two root keys { #instruction-root-ceremony-and-recovery }
 

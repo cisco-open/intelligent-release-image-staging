@@ -34,4 +34,4 @@ breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 - [Routine maintenance tasks](maintenance.md): audit export, the API request budget, and the admin account reset.
 - [Rotate credentials and certificates](rotations.md): one procedure per credential, per layout.
 - [Replace or recover signing keys](instruction-keys.md): the two root keys, a lost key, a leaked key, and hand delivery of the first instruction file.
-- [Recover from an interrupted job or damaged state](recovery.md): interrupted device jobs, damaged volumes, and state rollback.
+- [Recover from an interrupted job or damaged state](recovery.md): interrupted device jobs, damaged volumes, and retained migration evidence.
