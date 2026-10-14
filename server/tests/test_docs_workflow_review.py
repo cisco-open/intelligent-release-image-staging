@@ -246,3 +246,14 @@ def test_monitoring_explains_the_actual_sampling_limits():
     link = {"link": {"rtt_ms": [22, 26], "fail_streak": 0}}
     assert telemetry.classify(link, telemetry.SLOW_BPS - 1) == "constrained"
     assert telemetry.classify(link, telemetry.SLOW_BPS) == "good"
+
+
+def test_interrupted_backup_readers_fail_without_adopting_partial_extraction():
+    page = " ".join(_document("admin-guide/backups.md").split())
+    help_text = " ".join((ROOT / "server/webroot/help-server.html").read_text().split())
+    assert "worker restarts during verification or isolated extraction" in page
+    assert "marked failed" in page and "Start a new request" in page
+    for text in (page, help_text):
+        assert "Partial extraction files remain private on the host" in text
+        assert "not verified recovery data" in text
+    assert "Running work and interrupted deployment changes block new maintenance" in help_text

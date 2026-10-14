@@ -213,7 +213,11 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     after reconnecting. For backups, use <strong>Refresh backup history</strong>.
     Match the operation ID and check its result; acceptance is not completion.
     An uncertain response needs a refresh and review before another request.
-    Running or interrupted worker operations block new maintenance.</p>
+    Running work and interrupted deployment changes block new maintenance.</p>
+    <p>After a worker restart, interrupted backup verification or isolated
+    extraction is marked failed. Review the result, then start a new request.
+    Partial extraction files remain private on the host and are not verified
+    recovery data.</p>
     <p>Before a first restore or managed upgrade, complete a backup and record
     its public signer from <code>&lt;installation-state-directory&gt;/backup-custody/signer.pub</code>
     through a trusted host connection. Keep an independent public copy, then use

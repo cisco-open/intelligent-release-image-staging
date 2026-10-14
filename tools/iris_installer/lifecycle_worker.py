@@ -82,9 +82,24 @@ class Worker:
         if not isinstance(self.jobs, list) or len(self.jobs) > 100:
             raise InstallError("Lifecycle journal is invalid")
         self.retention = Retention(self)
-        # A stopped worker is not evidence that its last capture completed.
+        # serve() holds the exclusive worker lock before constructing us, and
+        # graceful shutdown joins the action thread. Verification/extraction
+        # writes are owned by that thread; age has only pipe descriptors, not
+        # extraction destinations. A restarted worker cannot finish those
+        # attempts, but they never fenced or changed the deployment. Preserve
+        # partial private output and require a NEW request, not an implicit
+        # retry. Include records stranded by previous worker versions.
         for job in self.jobs:
-            if job.get('state') == 'running':
+            if (job.get('action') in ('verify', 'extract')
+                    and job.get('state') in ('running', 'recovery-required')):
+                job['state'] = 'failed'
+                job.setdefault('finished_at', int(time.time()))
+                job['detail'] = (
+                    'Worker interrupted verification. No restore was performed. Start a new verification request.'
+                    if job['action'] == 'verify' else
+                    'Worker interrupted isolated extraction. Previous private output has been kept but is not verified. Start a new extraction to try again.')
+            elif job.get('state') == 'running':
+                # A stopped worker is not proof that capture or cutover finished.
                 job['state'] = 'recovery-required'
                 job['detail'] = 'Worker interrupted. Inspect backup-operation.json and service state before another capture.'
         self.save()

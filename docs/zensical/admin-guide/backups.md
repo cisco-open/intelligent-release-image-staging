@@ -18,6 +18,9 @@ An accepted request shows an operation ID, not a completed backup.
 After reconnecting, select **Refresh backup history** and check that operation.
 If its outcome is uncertain, review the history before starting another request.
 Returning to this page does not repeat a backup or restore.
+If the worker restarts during verification or isolated extraction, that attempt
+is marked failed. Start a new request after reviewing the result. Partial
+extraction files remain private on the host; they are not verified recovery data.
 Backups include Console uploads and the host image folder recorded by the
 managed Docker installer. A restore puts both back as they were in the backup;
 keep the host folder dedicated to IRIS and avoid editing it during maintenance.

@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Let operators retry interrupted backup verification or isolated extraction
+  without blocking deployment maintenance; retain unverified private output.
 - Validate the host-prepared recovery key before backup or downtime, then
   recheck its approved bytes before changing encrypted configuration.
 - Document first-time backup signer trust, separate IOx assembly from native
