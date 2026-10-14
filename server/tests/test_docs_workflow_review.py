@@ -96,6 +96,14 @@ def test_upgrade_keeps_three_steps_and_passes_reviewed_roots():
     assert "### Onboard the devices again" in source
 
 
+def test_uninstall_explains_retained_kubernetes_data_and_controller_credentials():
+    page = " ".join(_document("admin-guide/uninstall.md").split())
+    assert "`--purge-data`" in page
+    assert "A `Retain` policy keeps the volume and its data after the claim is removed" in page
+    assert "storage administrator" in page
+    assert "Private files retained on the controller can still contain credentials" in page
+
+
 def test_backup_signer_setup_names_the_producer_and_independent_trust_step():
     page = " ".join(_document("admin-guide/backups.md").split())
     upgrade = _document("admin-guide/upgrade.md")

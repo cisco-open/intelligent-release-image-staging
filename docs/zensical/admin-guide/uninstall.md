@@ -26,9 +26,10 @@ data choice before generating a plan:
 
 !!! warning "Data deletion"
     Purging application data is permanent. Kubernetes storage deletion follows
-    the existing storage provider's policy. Private files retained on the
-    controller can still contain credentials; protect that directory after
-    uninstall.
+    the existing storage provider's policy. A `Retain` policy keeps the volume
+    and its data after the claim is removed. Ask your storage administrator to
+    remove that data when required. Private files retained on the controller
+    can still contain credentials; protect that directory after uninstall.
 
 ## Review a plan
 
