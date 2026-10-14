@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Remove a managed Docker, separate-host Docker, or Kubernetes deployment with
+  a reviewed resource plan, explicit data-purge choice, and resumable removal.
 - Recover services after an interrupted managed backup from its original
   history entry or host command. Keep incomplete output, authenticate completed
   archives, and allow a new backup only after the original job is resolved.

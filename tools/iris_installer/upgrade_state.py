@@ -62,6 +62,8 @@ def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=Non
     From the first fence intent onwards every other maintenance write refuses.
     A missing or invalid pointer is never interpreted as an idle deployment.
     """
+    from .state import uninstall_guard
+    uninstall_guard(state_dir)
     base = Path(state_dir)
     directory = base / 'application-upgrades'
     current = base / 'application-upgrade.json'

@@ -17,6 +17,7 @@ breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 | Replace browser TLS or telemetry credentials in the UI | [Guided Console rotation](console-credentials.md) |
 | Replace deployment trust or backup recovery keys | [Rotate deployment trust and keys](deployment-rotation.md) |
 | Move to a new IRIS release | [Upgrade to a new release](upgrade.md) |
+| Remove a managed deployment | [Remove an IRIS deployment](uninstall.md) |
 | Back up the server, or restore it | [Back up and restore](backups.md) |
 | Export the audit trail, set the API request budget, reset the admin account | [Routine maintenance tasks](maintenance.md) |
 | Rotate a credential or a certificate | [Rotate credentials and certificates](rotations.md) |
@@ -28,6 +29,7 @@ breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 ## Pages in this guide
 
 - [Upgrade to a new release](upgrade.md): the order to upgrade the server, the Console and the device packages, per layout.
+- [Remove an IRIS deployment](uninstall.md): review exact removal targets, choose data retention, and recover interrupted removal.
 - [Back up and restore](backups.md): what to back up per layout, and how to restore it.
 - [Routine maintenance tasks](maintenance.md): audit export, the API request budget, and the admin account reset.
 - [Rotate credentials and certificates](rotations.md): one procedure per credential, per layout.

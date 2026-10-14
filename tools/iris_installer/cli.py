@@ -38,6 +38,18 @@ def parser():
     maintenance = commands.add_parser("maintenance", help="check or repair this deployment from the terminal")
     from .maintenance import add_arguments as maintenance_arguments
     maintenance_arguments(maintenance)
+    uninstall = commands.add_parser('uninstall', help='review and remove only this installation; preserve data by default')
+    uninstall_actions = uninstall.add_subparsers(dest='uninstall_action', required=True)
+    for verb in ('plan', 'apply', 'recover', 'status', 'cancel'):
+        action = uninstall_actions.add_parser(verb)
+        action.add_argument('--state-dir', type=Path, required=True)
+        if verb in ('apply', 'recover', 'cancel'):
+            action.add_argument('--operation-id', required=True)
+            action.add_argument('--plan-sha256', required=True)
+        if verb in ('plan', 'apply', 'recover'):
+            action.add_argument('--purge-data', action='store_true', help='delete recorded data volumes, or PVC and credential Secrets')
+        if verb in ('apply', 'recover'):
+            action.add_argument('--allow-downtime', action='store_true')
     upgrade = commands.add_parser('upgrade', help='review and apply a managed single-Docker application upgrade')
     upgrade_actions = upgrade.add_subparsers(dest='upgrade_action', required=True)
     upgrade_prepare = upgrade_actions.add_parser('prepare', help='build isolated candidates without changing running applications')
@@ -299,6 +311,11 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
+            if args.command == 'uninstall':
+                from . import uninstall
+                if args.uninstall_action in ('apply', 'recover'):
+                    return uninstall.apply(args, recovery=args.uninstall_action == 'recover')
+                return getattr(uninstall, args.uninstall_action)(args)
             if args.command == 'upgrade':
                 from . import application_upgrade
                 if args.upgrade_action in ('apply', 'recover'):
