@@ -98,6 +98,16 @@ def fence_worker(base, saved, *, new_runtime=None):
 
 def disable_restarts(install, containers):
     for container in containers:
+        if container.get('remote'):
+            plan.require(install.config['target'] == 'docker-split', 'Unexpected remote upgrade writer')
+            # The operation-specific inherited remote lock and exact Console
+            # identity were fenced before this local-only boundary.
+            from .upgrade_split import remote
+            row = remote(install, install.upgrade_operation, 'observe')
+            plan.require(row['Id'] == container['id'] and row['State']['Running'] is False
+                         and row['HostConfig']['RestartPolicy']['Name'] == 'no',
+                         'The reviewed remote Console is not fenced')
+            continue
         rows = json.loads(install.command(['docker', 'inspect', container['id']], capture=True))
         plan.require(len(rows) == 1 and rows[0]['Id'] == container['id']
                      and rows[0]['Config'].get('Labels', {}).get('com.cisco.iris.installer') == install.journal.document['id'],
@@ -162,7 +172,7 @@ def verify_backup(base, candidate, worker):
     for name, report in reports.items():
         metadata = report.get('metadata', {})
         plan.require(metadata.get('instance_id') == worker['instance_id']
-                     and metadata.get('target') == 'single-docker'
+                     and metadata.get('target') == {'docker': 'single-docker', 'docker-split': 'split-docker'}.get(worker['target'])
                      and metadata.get('scope') == ('managed-deployment-files' if name == 'data' else 'identity-recovery'),
                      'The decrypted upgrade backup belongs to another deployment')
         plan.identifier(metadata.get('backup_set_id'))
@@ -232,8 +242,17 @@ with tempfile.TemporaryDirectory(dir=os.environ.get('IRIS_RUN','/run/iris')) as 
                 'schedule-receipts', 'report_ledger', 'report-attribution', 'transfer-attestations', 'fleet')
     preserved = {path.name: storage.fingerprint(storage.inventory(path))
                  for path in sorted(state.iterdir()) if path.name.startswith(prefixes)}
-    return {'config_sha256': plan.fingerprint(records), 'authority': preserved, **secrets,
-            'age_identity_sha256': deploy.digest(install.base / 'age.txt')}
+    result = {'config_sha256': plan.fingerprint(records), 'authority': preserved, **secrets,
+              'age_identity_sha256': deploy.digest(install.base / 'age.txt')}
+    if install.config['target'] == 'docker-split':
+        from .upgrade_split import remote
+        # The reconstructed management public certificate has its own exact
+        # same-key publication journal. Private/browser/bearer authority does
+        # not receive a wildcard exception from that public-only transition.
+        result['remote_credentials'] = {name: value for name, value in
+            remote(install, install.upgrade_operation, 'credentials').items() if name != 'ca.pem'}
+        result['transport'] = install.transport_fingerprints()
+    return result
 
 
 def refresh_worker(base, operation, reviewed):

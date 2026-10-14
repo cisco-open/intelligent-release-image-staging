@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Explicit, forward-only application upgrades for source-built single Docker.
+"""Explicit, forward-only application upgrades for source-built Docker layouts.
 
 The operation preserves the existing installation identity and storage. Once
 publication starts, recovery finishes that same approved generation; it never
@@ -30,6 +30,28 @@ def _root(base):
     return managed_worker._path(base)
 
 
+def _construction(journal):
+    plan.require(journal.document['config']['target'] in ('docker', 'docker-split'),
+                 'Unsupported managed application upgrade topology')
+    if journal.document['config']['target'] == 'docker-split':
+        from .split_deploy import SplitDockerInstall
+        return SplitDockerInstall(journal)
+    return deploy.DockerInstall(journal)
+
+
+def _split(install):
+    return install.journal.document['config']['target'] == 'docker-split'
+
+
+def _next(original, operation, built, compose, guestshell, *, startup=False):
+    options = {}
+    if original['config']['target'] == 'docker-split':
+        options = {'console_compose': plan.startup_compose(built['console_compose'], services=('console',))
+                   if startup else built['console_compose'], 'console_build': built['console_build']}
+    return plan.next_journal(original, operation_id=operation.id, source=built['source'], compose=compose,
+        packages={name: built['files'][name] for name in plan.NATIVE_FILES}, guestshell=guestshell, **options)
+
+
 def _idle(journal, *, operation_id=None):
     restore.guard(journal.directory, instance_id=journal.document['id'], upgrade_operation_id=operation_id)
     runtime.jobs_idle(journal.directory)
@@ -53,7 +75,7 @@ def prepare(args):
         with Journal(base).locked() as journal:
             plan.require_source_build(journal.document)
             _idle(journal)
-            install = deploy.DockerInstall(journal)
+            install = _construction(journal)
             sources, volumes, containers = backup.capture_plan(install)
             runtime.drain(install)
             plan.require(all(row['running'] for row in containers),
@@ -72,7 +94,7 @@ def prepare(args):
             plan.require(runtime.equal(journal.document, expected),
                          'The deployment changed while preparing maintenance history')
             _idle(journal)
-            install = deploy.DockerInstall(journal)
+            install = _construction(journal)
             sources, volumes, containers = backup.capture_plan(install)
             runtime.drain(install)
             plan.require(all(row['running'] for row in containers),
@@ -94,8 +116,12 @@ def prepare(args):
                 'resources': resources, 'candidate': built,
                 'preserves': ['accounts', 'keys', 'installation-id', 'storage', 'replay-authority'],
                 'device_requirement': 'confirmed-removal-before-upgrade-then-reonboard',
-                'scope': 'source-build-single-docker', 'rollback': 'not-supported-forward-recovery-only'}
+                'scope': 'source-build-split-docker' if _split(install) else 'source-build-single-docker',
+                'rollback': 'not-supported-forward-recovery-only'}
             operation.record['candidate'] = built
+            if _split(install):
+                operation.record['split_before'] = built['split_before']
+                review['split_before'] = built['split_before']
             operation.write_plan(review)
             result = {'operation_id': operation.id, 'plan_sha256': operation.record['plan_sha256'],
                       'phase': 'prepared', 'source_commit': selection['commit'],
@@ -105,8 +131,9 @@ def prepare(args):
 
 
 def _install(journal, operation):
-    install = deploy.DockerInstall(journal)
+    install = _construction(journal)
     install.application_upgrade_id = operation.id
+    install.upgrade_operation = operation
     return install
 
 
@@ -115,6 +142,11 @@ def _check_original(journal, review):
                  'The current installation differs from the reviewed upgrade preimage')
     plan.require(regular_bytes(journal.directory / 'compose.json').decode('utf-8') == review['compose_before'],
                  'The current Compose file differs from the reviewed upgrade preimage')
+    if journal.document['config']['target'] == 'docker-split':
+        install = _construction(journal)
+        plan.require(regular_bytes(install.console_file).decode() == review['split_before']['compose_before']
+                     and regular_bytes(install.console_build_file).decode() == review['split_before']['build_before'],
+                     'The current local split definitions differ from the reviewed upgrade preimage')
 
 
 def _stopped(install, operation, review):
@@ -154,11 +186,9 @@ def _publish(journal, operation, review):
         runtime.stage_artifacts(install, operation, built)
         operation.record['source_before'] = storage.inventory(install.source)
         operation.record['source_after'] = storage.inventory(Path(built['source_directory']))
-        startup = plan.startup_compose(built['compose'])
-        provisional = plan.next_journal(review['original'], operation_id=operation.id,
-            source=built['source'], compose=startup,
-            packages={name: built['files'][name] for name in plan.NATIVE_FILES},
-            guestshell={'state': 'ok', 'scope': 'candidate-only-awaiting-runtime-proof'})
+        startup = plan.startup_compose(built['compose'], services=('iris',) if _split(install) else plan.SERVICES)
+        provisional = _next(review['original'], operation, built, startup,
+            {'state': 'ok', 'scope': 'candidate-only-awaiting-runtime-proof'}, startup=True)
         provisional['state'] = 'APPLICATION_UPGRADE_PENDING'
         operation.record.update(startup_compose=startup, provisional_journal=provisional,
                                 publication_admitted=True)
@@ -180,12 +210,21 @@ def _publish(journal, operation, review):
     plan.require(regular_bytes(install.compose_file) in (original, replacement),
                  'Compose publication found unapproved bytes')
     atomic_write(install.compose_file, replacement)
+    if _split(install):
+        from . import upgrade_split
+        upgrade_split.remote(install, operation, 'publish')
+        upgrade_split.publish_local(install, built, review['split_before'], startup=True)
     journal.document = copy.deepcopy(operation.record['provisional_journal'])
     journal.save()
     operation.phase('published', publication_complete=True)
 
 
 def _service_row(install, operation, service):
+    if _split(install) and service == 'console':
+        from .upgrade_split import remote
+        row = remote(install, operation, 'observe')
+        plan.require(row is not None, 'The remote Console creation is not acquired')
+        return row
     spec = operation.record['candidate']['compose']['services'][service]
     rows = json.loads(install.command(['docker', 'inspect', spec['container_name']], capture=True))
     plan.require(isinstance(rows, list) and len(rows) == 1, 'Cannot resolve one owned service')
@@ -221,6 +260,12 @@ def _start_service(install, operation, service):
     if service not in intents:
         intents[service] = {'image': built['images'][service]}
         operation.save()
+    if _split(install) and service == 'console':
+        from .upgrade_split import remote
+        row = remote(install, operation, 'start')
+        intents[service]['container_id'] = row['Id']
+        operation.save()
+        return
     name = built['compose']['services'][service]['container_name']
     present = install.command(['docker', 'container', 'ls', '--all', '--no-trunc',
         '--filter', 'name=^/' + re.escape(name) + '$', '--format', '{{.ID}}'], capture=True).strip()
@@ -244,11 +289,8 @@ def _start_service(install, operation, service):
 def _verify_started(journal, operation, review):
     install = _install(journal, operation)
     built = review['candidate']
-    final_journal = plan.next_journal(review['original'], operation_id=operation.id,
-        source=built['source'], compose=built['compose'],
-        packages={name: built['files'][name] for name in plan.NATIVE_FILES},
-        guestshell=operation.record.get('runtime_proof', {}).get('guestshell',
-            {'state': 'ok', 'scope': 'not-finalized'}))
+    final_journal = _next(review['original'], operation, built, built['compose'],
+        operation.record.get('runtime_proof', {}).get('guestshell', {'state': 'ok', 'scope': 'not-finalized'}))
     plan.require(runtime.equal(journal.document, operation.record['provisional_journal']) or
                  runtime.equal(journal.document, final_journal), 'The approved journal generation changed')
     # Re-enter restart=no on EVERY recovery, including a crash in final policy
@@ -256,6 +298,11 @@ def _verify_started(journal, operation, review):
     plan.require(regular_bytes(install.compose_file) in (plan.canonical(operation.record['startup_compose']),
                  plan.canonical(built['compose'])), 'The approved Compose generation changed')
     atomic_write(install.compose_file, plan.canonical(operation.record['startup_compose']))
+    if _split(install):
+        from . import upgrade_split
+        upgrade_split.remote(install, operation, 'fence')
+        upgrade_split.remote(install, operation, 'publish')
+        upgrade_split.publish_local(install, built, review['split_before'], startup=True)
     journal.document = copy.deepcopy(operation.record['provisional_journal'])
     journal.save()
     install.verify_inputs()
@@ -283,6 +330,15 @@ def _verify_started(journal, operation, review):
     current = runtime.authority(install, sources)
     plan.require(runtime.equal(current, operation.record['authority_before']),
                  'Upgrade changed owner, key, certificate or replay authority; services remain fenced')
+    if _split(install):
+        from .upgrade_split import sync_ca
+        row = _owned_service(install, operation, 'iris')
+        producer = {'container_id': row['Id'], 'started_at': row['State']['StartedAt'],
+                    'image': row['Image']}
+        operation.record['remote_ca_after'] = sync_ca(install, operation, producer)
+        plan.require(_owned_service(install, operation, 'iris')['State']['StartedAt'] == producer['started_at'],
+                     'The server generation changed during public certificate publication')
+        operation.save()
     # Expose the Console only after existing owner and security authority have
     # been checked in the new server. Then require a real authenticated hop.
     _start_service(install, operation, 'console')
@@ -317,6 +373,10 @@ def _fail_stopped(base, operation):
             for service in plan.SERVICES:
                 try:
                     row = _owned_service(install, operation, service)
+                    if _split(install) and service == 'console':
+                        from .upgrade_split import remote
+                        remote(install, operation, 'fence')
+                        continue
                     install.command(['docker', 'update', '--restart=no', row['Id']])
                     install.command(['docker', 'stop', '--time', '120', row['Id']], timeout=180)
                 except (InstallError, OSError, ValueError, KeyError):
@@ -339,6 +399,10 @@ def apply(args, *, recovery=False):
                 and runtime.equal(operation.record.get('candidate'), review.get('candidate'))
                 and runtime.equal(operation.record.get('worker_before'), review.get('worker_before')),
                 'Operation authority differs from its reviewed immutable plan')
+            if journal.document['config']['target'] == 'docker-split':
+                plan.require(runtime.equal(operation.record.get('split_before'), review.get('split_before'))
+                             and runtime.equal(review['candidate'].get('split_before'), review.get('split_before')),
+                             'Remote Console authority differs from the reviewed plan')
             if operation.record['phase'] == 'upgraded':
                 print(json.dumps({'operation_id': operation.id, 'phase': 'upgraded'}))
                 return 0
@@ -369,6 +433,9 @@ def apply(args, *, recovery=False):
                 with Journal(base).locked() as journal:
                     _check_original(journal, review)
                     install = _install(journal, operation)
+                    if _split(install):
+                        from .upgrade_split import remote
+                        remote(install, operation, 'fence')
                     runtime.disable_restarts(install, review['resources']['containers'])
                 if 'backup' not in operation.record:
                     operation.phase('backing-up')
@@ -389,24 +456,30 @@ def apply(args, *, recovery=False):
             with Journal(base).locked() as journal:
                 install = _install(journal, operation)
                 final_compose = review['candidate']['compose']
-                final_journal = plan.next_journal(review['original'], operation_id=operation.id,
-                    source=review['candidate']['source'], compose=final_compose,
-                    packages={name: review['candidate']['files'][name] for name in plan.NATIVE_FILES},
-                    guestshell=operation.record['runtime_proof']['guestshell'])
+                final_journal = _next(review['original'], operation, review['candidate'], final_compose,
+                                     operation.record['runtime_proof']['guestshell'])
                 plan.require(runtime.equal(journal.document, operation.record['provisional_journal']) or
                              runtime.equal(journal.document, final_journal), 'Final journal has unapproved changes')
                 current = regular_bytes(install.compose_file)
                 plan.require(current in (plan.canonical(operation.record['startup_compose']), plan.canonical(final_compose)),
                              'Final Compose generation changed')
                 atomic_write(install.compose_file, plan.canonical(final_compose))
+                if _split(install):
+                    from .upgrade_split import publish_local
+                    publish_local(install, review['candidate'], review['split_before'], startup=False)
                 journal.document = final_journal
                 journal.save()
                 # Exact containers only; enabling restart is last, after all
                 # application checks and the new guarded worker are healthy.
                 for row in operation.record['new_containers']:
-                    policy = final_compose['services'][row['service']].get('restart', 'no')
+                    selected = review['candidate']['console_compose'] if _split(install) and row['service'] == 'console' else final_compose
+                    policy = selected['services'][row['service']].get('restart', 'no')
                     observed = _owned_service(install, operation, row['service'])
                     plan.require(observed['Id'] == row['id'], 'Verified service was replaced before finalization')
+                    if _split(install) and row['service'] == 'console':
+                        from .upgrade_split import remote
+                        remote(install, operation, 'finish')
+                        continue
                     install.command(['docker', 'update', '--restart=' + policy, row['id']])
                     observed = _owned_service(install, operation, row['service'])
                     plan.require(observed['HostConfig']['RestartPolicy']['Name'] == policy

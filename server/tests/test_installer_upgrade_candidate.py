@@ -129,7 +129,8 @@ def test_upgrade_cli_requires_explicit_operation_plan_and_package_proof():
 @pytest.mark.parametrize('damage', [None, 'verifier-build', 'crypto-build',
     'missing-verifier-arm64', 'wrong-verifier-arm64', 'missing-aead-amd64',
     'wrong-aead-arm64', 'missing-verifier-license', 'missing-aead-license', 'one-root'])
-def test_candidate_builds_helpers_and_runs_actual_bundle_packer(tmp_path, monkeypatch, damage):
+@pytest.mark.parametrize('layout', ['docker', 'docker-split'])
+def test_candidate_builds_helpers_and_runs_actual_bundle_packer(tmp_path, monkeypatch, damage, layout):
     """Real helper scripts/packer, but nonexecuted ELF stand-ins, not native proof."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives import serialization
@@ -274,13 +275,23 @@ else:
             atomic_write(artifacts / filename, b'unit-test output, not a native package', 0o644)
         return b''
 
-    install = SimpleNamespace(base=base, source=source, compose_file=compose_file,
+    install = SimpleNamespace(base=base, source=source, compose_file=compose_file, config={'target': layout},
         env=dict(candidate.deploy.clean_env(), XDG_CACHE_HOME=str(old_cache),
                  PATH=str(commands) + ':' + candidate.deploy.clean_env()['PATH'],
                  TMPDIR=str(scratch),
                  IRIS_CRYPTO_ARCHES='arm64', IRIS_AEAD_HELPER='/must-not-use/inherited-helper',
                  TEST_HELPER_DAMAGE=damage or ''),
         command=command, runner=runner)
+    if layout == 'docker-split':
+        from iris_installer import upgrade_split
+        # Only the remote boundary is modelled here. The same real package
+        # scripts and packer execute for both admitted Docker layouts.
+        def handoff(owned, old, new, images):
+            assert owned is install and images == {'iris': 'sha256:' + '1' * 64, 'console': 'sha256:' + '2' * 64}
+            server = plan.candidate_compose(template, old, new, images)
+            console = {'services': {'console': server['services'].pop('console')}}
+            return server, console, console, {'modelled_remote_boundary': True}
+        monkeypatch.setattr(upgrade_split, 'candidate', handoff)
     if damage:
         with pytest.raises(subprocess.CalledProcessError) as error:
             candidate.build(install, operation, {'source': manifest}, source)
@@ -297,6 +308,9 @@ else:
             'stage-iox-package.sh', 'build-xr-package.sh', 'build-ssh-verifiers.sh',
             'build-instruction-crypto.sh', 'pack-agent-bundle.sh', 'pack-agent-bundle.sh']
         assert built['native_admission'] == 'not-qualified-by-this-build'
+        if layout == 'docker-split':
+            assert set(built['compose']['services']) == {'iris'}
+            assert set(built['console_compose']['services']) == {'console'}
         for filename, machine in (('iris-agent.tgz', 62), ('iris-agent-arm.tgz', 183)):
             bundle = artifacts / filename
             with tarfile.open(bundle) as archive:
@@ -363,7 +377,7 @@ def test_actual_upgrade_candidate_callers_retain_private_failure_output(tmp_path
     install.base = tmp_path / 'installation'; install.base.mkdir(mode=0o700)
     install.source = tmp_path / 'source'; install.source.mkdir()
     install.env = deploy.clean_env()
-    install.config = {'instance': 'upgrade-fixture', 'host': '192.0.2.10', 'console_bind': '192.0.2.10', 'console_port': 28080,
+    install.config = {'target': 'docker', 'instance': 'upgrade-fixture', 'host': '192.0.2.10', 'console_bind': '192.0.2.10', 'console_port': 28080,
                       'recovery_recipient': 'age1' + 'q' * 58, 'peer_tls': 'required'}
     install.runner = deploy.run
     monkeypatch.setattr(image_storage, 'image_root', lambda current: current.base / 'images')

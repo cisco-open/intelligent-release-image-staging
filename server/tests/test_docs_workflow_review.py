@@ -104,6 +104,18 @@ def test_uninstall_explains_retained_kubernetes_data_and_controller_credentials(
     assert "Private files retained on the controller can still contain credentials" in page
 
 
+def test_managed_split_upgrade_documents_same_operation_and_remote_trust_boundary():
+    page = ' '.join(_document('admin-guide/upgrade.md').split())
+    developer = ' '.join((ROOT / 'docs/dev/installer.md').read_text().split())
+    assert '## Managed Docker deployments { #managed-single-host-docker }' in page
+    assert 'run every upgrade command on the server host' in page
+    assert 'same public key and issuer' in page
+    assert 'bearer credentials and browser private key are unchanged' in page
+    assert 'Managed upgrades of prebuilt release kits and Kubernetes are not supported' in page
+    assert 'source-built single-host and split Docker' in developer
+    assert 'sequential public-trust publication intent' in developer
+
+
 def test_backup_signer_setup_names_the_producer_and_independent_trust_step():
     page = " ".join(_document("admin-guide/backups.md").split())
     upgrade = _document("admin-guide/upgrade.md")

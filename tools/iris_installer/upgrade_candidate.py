@@ -110,7 +110,15 @@ def build(install, operation, selection, source):
         plan.require(isinstance(records, list) and len(records) == 1, 'Candidate image identity is unavailable')
         images[service] = records[0]['Id']
     current = json.loads(regular_bytes(install.compose_file))
-    compose = plan.candidate_compose(current, old, new, images)
+    split = install.config['target'] == 'docker-split'
+    split_inputs = {}
+    if split:
+        from .upgrade_split import candidate as split_candidate
+        install.application_upgrade_id = operation.id
+        compose, console, console_build, before = split_candidate(install, old, new, images)
+        split_inputs = {'console_compose': console, 'console_build': console_build, 'split_before': before}
+    else:
+        compose = plan.candidate_compose(current, old, new, images)
     for spec in compose['services'].values():
         labels = spec.setdefault('labels', {})
         plan.require(isinstance(labels, dict), 'Candidate service labels must be explicit mappings')
@@ -153,4 +161,4 @@ def build(install, operation, selection, source):
     return {'selection': selection, 'compose': compose, 'images': images,
             'source': selection['source'], 'files': outputs,
             'source_directory': str(candidate_source), 'artifacts_directory': str(artifacts),
-            'native_admission': 'not-qualified-by-this-build'}
+            'native_admission': 'not-qualified-by-this-build', **split_inputs}

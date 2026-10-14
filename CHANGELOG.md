@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Upgrade a source-built managed deployment on separate Docker hosts with the
+  existing approved-plan and same-operation recovery commands.
 - Remove a managed Docker, separate-host Docker, or Kubernetes deployment with
   a reviewed resource plan, explicit data-purge choice, and resumable removal.
   Explain that Kubernetes storage retention can leave the underlying data.

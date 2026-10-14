@@ -50,7 +50,7 @@ def parser():
             action.add_argument('--purge-data', action='store_true', help='delete recorded data volumes, or PVC and credential Secrets')
         if verb in ('apply', 'recover'):
             action.add_argument('--allow-downtime', action='store_true')
-    upgrade = commands.add_parser('upgrade', help='review and apply a managed single-Docker application upgrade')
+    upgrade = commands.add_parser('upgrade', help='review and apply a managed source-built Docker application upgrade')
     upgrade_actions = upgrade.add_subparsers(dest='upgrade_action', required=True)
     upgrade_prepare = upgrade_actions.add_parser('prepare', help='build isolated candidates without changing running applications')
     upgrade_prepare.add_argument('--state-dir', type=Path, required=True)

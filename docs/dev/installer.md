@@ -158,7 +158,7 @@ The scoped worker requires a verified backup for credential maintenance;
 `irisctl maintenance` recovers interrupted work while the Console is stopped.
 Keep live qualification evidence separate from unit tests and build results.
 
-Managed application upgrade currently supports source-built single-host Docker.
+Managed application upgrade supports source-built single-host and split Docker.
 The prepare step binds the installed package, source inventory and controller
 runtime, then builds isolated server, Console and device-package candidates.
 Apply requires confirmed agent removal and an explicitly approved plan. It
@@ -166,6 +166,13 @@ verifies encrypted backups, fences the old worker and publishes the new source
 and artifacts without replacing account, key or storage authority. A pinned
 systemd pre-start guard closes the old-worker reboot window. Recovery finishes
 the same approved generation; it never restarts old code after publication.
+Split upgrades preload the Console image over the recorded SSH transport,
+preserve remote credentials and browser TLS, and require an authenticated
+Console consumer proof. A remote inherited lock fences surviving commands;
+exact Compose publication and recorded container creation reconcile lost replies.
+Reconstructed management certificates use a separate, sequential public-trust
+publication intent bound to the unchanged key, subject and issuer. Private
+credentials are never included in that exception.
 Fault-injection and root-owned guard tests cover interruption boundaries. Real
 upgrade and device admission checks remain separate live qualification gates.
 See [the upgrade guide](../zensical/admin-guide/upgrade.md) for operator steps.

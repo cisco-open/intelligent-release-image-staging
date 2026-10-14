@@ -7,12 +7,12 @@ SPDX-License-Identifier: Apache-2.0
 # Upgrade to a new release
 
 !!! warning "Check how this deployment was installed"
-    Use the managed procedure below for a source-built, single-host Docker
-    deployment created by `irisctl`. The source-checkout procedure later on
-    this page is separate. Managed upgrades of prebuilt release kits, split
-    Docker and Kubernetes are not supported by this command yet.
+    Use the managed procedure below for source-built Docker on one or separate
+    hosts, created by `irisctl`. The source-checkout procedure later on
+    this page is separate. Managed upgrades of prebuilt release kits and
+    Kubernetes are not supported by this command yet.
 
-## Managed single-host Docker
+## Managed Docker deployments { #managed-single-host-docker }
 
 Installing a newer `.deb` updates the installer tools. The separate upgrade
 command rebuilds and replaces the server, Console and device packages while
@@ -55,6 +55,19 @@ maintenance worker. The backups use your recorded backup locations. Previous
 source, device packages and container images are retained for inspection.
 Rebuilding an IOx package does not certify its native platform signature.
 
+For separate Docker hosts, run every upgrade command on the server host with
+the existing state directory. Keep its recorded SSH key, host-key file and
+remote Console directory. Preparation transfers the candidate Console image
+through that pinned SSH connection before downtime. The approved plan records
+both hosts' existing service identities and separate Compose definitions.
+Apply verifies the new server first, then the remote Console's authenticated
+management connection. The Console's credentials and browser certificate stay
+in their existing remote directory; server keys and data stay on the server.
+If the server recreates its internal certificate, IRIS updates only the Console's
+public management trust file after verifying the same public key and issuer.
+That update is recorded before writing and reconciled during same-operation
+recovery. The bearer credentials and browser private key are unchanged.
+
 If preparation reports a build failure before printing a plan SHA256, the
 running deployment is unchanged. Fix that problem and run `upgrade prepare` again.
 It creates a new operation and retains the failed attempt's files for inspection.
@@ -74,7 +87,7 @@ changed. Do not delete the operation files, edit installer checkpoints or run
 Compose commands to bypass a refusal.
 
 After a successful upgrade, onboard the devices again to receive the new agent.
-This initial managed upgrade refuses a release that changes the Docker storage
+Managed upgrade refuses a release that changes the Docker storage
 or service layout; such a change needs a separately supported migration.
 
 ## Source-checkout deployments

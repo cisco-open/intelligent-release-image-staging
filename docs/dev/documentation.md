@@ -213,6 +213,7 @@ The table below records the retained aliases for the reorganization.
 
 | Alias id | Page and new heading text | Who depends on the id |
 | --- | --- | --- |
+| `managed-single-host-docker` | `admin-guide/upgrade.md` → Managed Docker deployments | Existing backup recovery link |
 | `build-and-publish-the-arm64-iox-package` | `install/device-packages.md` "Build the packages" | `test_aiagent_arm_package_docs.py`, in-docs links from two install pages. |
 | `embedded-agent-packages` | `install/device-packages.md` "When to rebuild the packages" | `help-server.html:118` (shipped in images). |
 | `initialise-instruction-custody` | `install/activate-signing.md` "Start signing instructions" | `test_aiagent_arm_package_docs.py`; in-docs links. The id keeps the old spelling; the text is American. |
