@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private intent and real cryptographic receipts with modeled service state."""
+"""Private intent and real cryptographic evidence with modeled service state."""
 
 import copy
 import hashlib

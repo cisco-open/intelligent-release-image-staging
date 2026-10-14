@@ -228,7 +228,7 @@ def guard(state_dir, *, request_id=None, instance_id=None):
 
 
 class Capture:
-    """A bounded root-private intent; completed receipts are never guessed."""
+    """A bounded root-private intent; completed publications are never guessed."""
 
     def __init__(self, installation, request_id, backup_id):
         self.installation = installation
@@ -292,10 +292,10 @@ class Capture:
         path = Path(self.record['destinations'][kind]['path'])
         # Record only a genuine successful create() return, with exact signed
         # bytes. A crash in publication leaves incomplete, retained output.
-        receipt = {name: hashlib.sha256(regular_bytes(path / name, 16384)).hexdigest()
-                   for name in ('manifest.json', 'manifest.json.sig')}
-        receipt['envelope'] = envelope
-        self.record['publications'][kind] = receipt
+        publication = {name: hashlib.sha256(regular_bytes(path / name, 16384)).hexdigest()
+                       for name in ('manifest.json', 'manifest.json.sig')}
+        publication['envelope'] = envelope
+        self.record['publications'][kind] = publication
         self.save()
 
     def check(self):
@@ -398,13 +398,13 @@ class Capture:
         if self.record['clean_stop'] is not True or set(self.record['publications']) != {'data', 'recovery'}:
             return False
         public = self.installation.base / 'backup-custody/signer.pub'
-        for kind, receipt in self.record['publications'].items():
+        for kind, publication in self.record['publications'].items():
             path = Path(self.record['destinations'][kind]['path'])
             for name in ('manifest.json', 'manifest.json.sig'):
-                if hashlib.sha256(regular_bytes(path / name, 16384)).hexdigest() != receipt[name]:
+                if hashlib.sha256(regular_bytes(path / name, 16384)).hexdigest() != publication[name]:
                     raise InstallError('Published capture changed; retain the original output')
-            if backup_archive.authenticate(path, public) != receipt['envelope']:
-                raise InstallError('Published capture differs from its completion receipt')
+            if backup_archive.authenticate(path, public) != publication['envelope']:
+                raise InstallError('Published capture differs from its completion evidence')
         return True
 
 

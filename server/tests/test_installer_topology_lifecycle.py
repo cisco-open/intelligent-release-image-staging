@@ -285,7 +285,7 @@ def test_topology_hooks_preserve_transport_and_stopped_writer_checks(tmp_path):
     sources, volumes, writers = {'source': tmp_path / 'source'}, {}, ['owned']
     adapter = SimpleNamespace(
         base=tmp_path,
-        journal=SimpleNamespace(document={}),
+        journal=SimpleNamespace(document={'id': '76036ed3-5b8e-4b46-9f19-ad50d79f6cd3'}),
         pin_runtime=lambda: calls.append('pin'),
         stop_writers=lambda c, **kw: calls.append(('stop', c, kw)),
         assert_writers_stopped=lambda: calls.append('assert'),

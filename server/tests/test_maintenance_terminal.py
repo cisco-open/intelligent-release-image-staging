@@ -27,10 +27,16 @@ def job(**updates):
                  "state": "recovery-required", "proof": None}, **updates)
 
 
-@pytest.mark.parametrize("updates", [{"action": "backup"}, {"state": "completed"},
-    {"state": "running"}, {"family": "shell"}, {"id": "../other"}])
-def test_recovery_requires_exact_interrupted_operation(updates):
-    with pytest.raises(InstallError, match="interrupted rotation"):
+@pytest.mark.parametrize("updates,message", [
+    ({"action": "backup"}, "interrupted backup"),
+    ({"action": "shell"}, "interrupted rotation"),
+    ({"state": "completed"}, "interrupted rotation"),
+    ({"state": "running"}, "interrupted rotation"),
+    ({"family": "shell"}, "interrupted rotation"),
+    ({"id": "../other"}, "interrupted rotation"),
+])
+def test_recovery_requires_exact_interrupted_operation(updates, message):
+    with pytest.raises(InstallError, match=message):
         gui.recovery_request(job(**updates))
 
 

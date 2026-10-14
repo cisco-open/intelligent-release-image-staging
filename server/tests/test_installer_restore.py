@@ -459,7 +459,8 @@ def test_direct_capture_credential_and_resume_refuse_pending_restore(tmp_path, m
     monkeypatch.setattr(credential_maintenance, 'Journal', factory)
     monkeypatch.setattr(deploy, 'Journal', factory)
     monkeypatch.setattr(deploy.os, 'geteuid', lambda: 0)
-    adapter = SimpleNamespace(base=tmp_path, capture_plan=lambda: pytest.fail('must not capture'))
+    adapter = SimpleNamespace(base=tmp_path, journal=journal,
+                              capture_plan=lambda: pytest.fail('must not capture'))
     with pytest.raises(InstallError, match='interrupted deployment restore'):
         backup.capture_plan(adapter)
     transaction = credential_maintenance.Transaction.__new__(credential_maintenance.Transaction)

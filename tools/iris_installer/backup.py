@@ -337,16 +337,16 @@ def create(args):
                     extras = getattr(installation, 'capture_backup_extras', None)
                     if extras is not None:
                         extras(sources)
-                    receipt = backup_archive.create({'service-identity': installation.base / 'age.txt',
+                    envelope = backup_archive.create({'service-identity': installation.base / 'age.txt',
                                            'backup-signer': signer}, recovery, recipient, signer,
                         metadata=dict(metadata, scope='identity-recovery'),
                         **({'on_stage': lambda path: capture.stage('recovery', path)} if capture else {}))
                     if capture:
-                        capture.published('recovery', receipt)
-                    receipt = backup_archive.create(sources, output, recipient, signer, metadata=metadata,
+                        capture.published('recovery', envelope)
+                    envelope = backup_archive.create(sources, output, recipient, signer, metadata=metadata,
                         **({'on_stage': lambda path: capture.stage('data', path)} if capture else {}))
                     if capture:
-                        capture.published('data', receipt)
+                        capture.published('data', envelope)
                     status['state'] = 'captured'
                 except Exception:
                     status['state'] = 'failed'
