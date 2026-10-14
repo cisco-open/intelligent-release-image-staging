@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Keep backup history and recovery controls visible when saved backup storage
+  cannot be fully listed. Show unavailable counts and block archive changes.
 - Name the interrupted maintenance action in its recovery message and explain
   how to resume a restore interrupted during its initial backup checks.
 - Replace deployments through undeploy, removal, a new installation and device

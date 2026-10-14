@@ -175,6 +175,7 @@ class Worker:
             if any(job['id'] != request_id and job['state'] in ('running', 'recovery-required') for job in self.jobs):
                 raise InstallError('Finish the active lifecycle operation first')
             if prior is None:
+                self.retention.backup_inventory()
                 if len(self.jobs) >= 100:
                     raise InstallError('Lifecycle history limit reached')
                 if not any(job['action'] == 'backup' and job.get('backup_id') == backup_id

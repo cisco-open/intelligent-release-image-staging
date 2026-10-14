@@ -137,6 +137,25 @@ try {
   assert.equal(await page.locator('#backup-delete').isDisabled(), true);
   await recoverBackup.click(); await idle();
   assert.deepEqual(writes.at(-1), {action: 'recover-backup', request_id: accepted, backup_id: other, allow_downtime: true});
+  fixtures.backups.jobs = [{...job('backup', 'captured'), id: accepted, backup_id: accepted},
+    {...job('restore', 'recovery-required'), id: restore.request_id, backup_id: accepted}];
+  fixtures.backups.retention = {schema: 1, revision: hash, busy: true, recoverable_job_id: restore.request_id,
+    inventory_available: false, storage_problem: 'Saved backup inventory is unavailable.',
+    capacity: {history_used: 2, history_limit: 100, backup_used: null, backup_limit: 20, protected_upgrade_used: null},
+    jobs: fixtures.backups.jobs.map(row => ({id: row.id, action: row.action, state: row.state, backup_id: row.backup_id,
+      family: null, finished_at: null, retire_allowed: false, retire_reason: 'Storage inventory unavailable.'})),
+    backups: [], protected_upgrade_backups: [], operation: null};
+  await page.locator('#backup-refresh').click(); await idle();
+  assert.match(await page.locator('#backup-storage-problem').innerText(), /inventory is unavailable/);
+  assert.equal(await page.locator('#backup-storage-capacity').innerText(), 'Saved backup count is unavailable.');
+  assert.equal(await page.locator('#backup-create').isDisabled(), true);
+  assert.equal(await page.locator('#backup-restore').isDisabled(), true);
+  assert.equal(await page.locator('#backup-history-clear').isDisabled(), true);
+  assert.equal(await page.locator('#backup-delete').isDisabled(), true);
+  assert.equal(await page.locator('#backup-recover').isEnabled(), true);
+  await page.locator('#backup-recover').click(); await idle();
+  assert.deepEqual(writes.at(-1), {action: 'recover-restore', request_id: restore.request_id,
+    backup_id: accepted, allow_downtime: true, confirm_restore: true});
   fixtures.backups = beforeRecovery;
   fixtures.backups.jobs.push({...job('backup', 'captured'), id: accepted, backup_id: accepted});
   fixtures.backups.retention = {schema: 1, revision: hash, busy: false,

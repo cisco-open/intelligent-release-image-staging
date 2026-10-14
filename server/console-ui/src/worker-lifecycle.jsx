@@ -148,7 +148,9 @@ function WorkerLifecycle({controller: c, roots}) {
     <p className="worker-actions">{backupButton('verify', 'verify', 'Verify backup')}{backupButton('extract', 'extract', 'Extract for isolated recovery')}{backupButton('restore', 'restore', 'Restore selected backup')}{backupButton('recover-restore', 'recover', 'Resume interrupted restore')}</p>
     <p className="muted">Restore stops this deployment, verifies the backup against current security authority, replaces saved content and checks restarted services. Changed credentials or missing instruction history prevent cutover. Use the host recovery window if the Console is offline.</p>
     {retention && <div id="backup-archive-retention"><h4>Saved backups</h4>
-      <p id="backup-storage-capacity">{retention.capacity.backup_used} of {retention.capacity.backup_limit} backups saved on this host. Deleting a backup removes its deployment and recovery archives.</p>
+      <p id="backup-storage-capacity">{retention.inventory_available === false ? 'Saved backup count is unavailable.' :
+        `${retention.capacity.backup_used} of ${retention.capacity.backup_limit} backups saved on this host. Deleting a backup removes its deployment and recovery archives.`}</p>
+      {retention.inventory_available === false && <p id="backup-storage-problem" role="status">{retention.storage_problem}</p>}
       {retention.protected_upgrade_backups?.length > 0 && <details id="backup-upgrade-archives">
         <summary>{retention.capacity.protected_upgrade_used} protected recovery {retention.capacity.protected_upgrade_used === 1 ? 'backup' : 'backups'}</summary>
         <p>These historical archives also use host storage. They stay with their original recovery records and cannot be deleted here.</p>

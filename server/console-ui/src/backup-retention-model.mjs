@@ -39,20 +39,27 @@ export function retentionOperation(value) {
 export function retentionStatus(value) {
   const upgraded = object(value) && Object.hasOwn(value, 'protected_upgrade_backups');
   const recoverable = object(value) && Object.hasOwn(value, 'recoverable_job_id');
-  if (!exact(value, 'schema revision busy capacity jobs backups operation' + (upgraded ? ' protected_upgrade_backups' : '') + (recoverable ? ' recoverable_job_id' : '')) || value.schema !== 1 ||
+  const inventory = object(value) && Object.hasOwn(value, 'inventory_available');
+  const unavailable = inventory && value.inventory_available === false;
+  if (!exact(value, 'schema revision busy capacity jobs backups operation' + (upgraded ? ' protected_upgrade_backups' : '') +
+      (recoverable ? ' recoverable_job_id' : '') + (inventory ? ' inventory_available storage_problem' : '')) || value.schema !== 1 ||
+      (inventory && (typeof value.inventory_available !== 'boolean' || (unavailable ?
+        !upgraded || !text(value.storage_problem) || !value.storage_problem : value.storage_problem !== null))) ||
       typeof value.revision !== 'string' || !/^[a-f0-9]{64}$/.test(value.revision) || typeof value.busy !== 'boolean' ||
       !exact(value.capacity, 'history_used history_limit backup_used backup_limit' + (upgraded ? ' protected_upgrade_used' : '')) ||
       (upgraded && (!protectedUpgradeBackups(value.protected_upgrade_backups) ||
-        value.capacity.protected_upgrade_used !== value.protected_upgrade_backups.length)) ||
+        (unavailable ? value.capacity.protected_upgrade_used !== null || value.protected_upgrade_backups.length !== 0 :
+          value.capacity.protected_upgrade_used !== value.protected_upgrade_backups.length))) ||
       value.capacity.history_limit !== 100 || value.capacity.backup_limit !== 20 ||
-      !count(value.capacity.history_used, 100) || !count(value.capacity.backup_used, Number.MAX_SAFE_INTEGER) ||
+      !count(value.capacity.history_used, 100) || (unavailable ? value.capacity.backup_used !== null :
+        !count(value.capacity.backup_used, Number.MAX_SAFE_INTEGER)) ||
       !Array.isArray(value.jobs) || value.jobs.length !== value.capacity.history_used || !unique(value.jobs.map(row => row?.id)) ||
       !value.jobs.every(row => exact(row, 'id action state backup_id family finished_at retire_allowed retire_reason') &&
         requestId(row.id) && actions.includes(row.action) && states.includes(row.state) &&
         (row.backup_id === null || requestId(row.backup_id)) && (row.family === null || text(row.family)) &&
         (row.finished_at === null || stamp(row.finished_at)) && typeof row.retire_allowed === 'boolean' && text(row.retire_reason) &&
-        (!row.retire_allowed || !['running', 'recovery-required', 'captured'].includes(row.state))) ||
-      !Array.isArray(value.backups) || value.backups.length !== value.capacity.backup_used ||
+        (!row.retire_allowed || !unavailable && !['running', 'recovery-required', 'captured'].includes(row.state))) ||
+      !Array.isArray(value.backups) || value.backups.length !== (unavailable ? 0 : value.capacity.backup_used) ||
       !unique(value.backups.map(row => row?.backup_id)) ||
       !value.backups.every(row => exact(row, 'backup_id created_at delete_allowed delete_reason') && requestId(row.backup_id) &&
         (row.created_at === null || stamp(row.created_at)) && typeof row.delete_allowed === 'boolean' && text(row.delete_reason)) ||

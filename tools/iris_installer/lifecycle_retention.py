@@ -21,6 +21,14 @@ from .state import InstallError, Journal, regular_bytes
 
 TERMINAL = {'captured', 'verified-files', 'verified-isolated-files', 'failed', 'restored', 'rotated', 'renewed'}
 FILES = ('manifest.json', 'manifest.json.sig', 'payload.tar.age')
+STORAGE_PROBLEM = 'Saved backup inventory is unavailable. Existing recovery and backup verification remain available; new captures, restores and archive cleanup are blocked.'
+
+
+class InventoryUnavailable(RetentionConflict):
+    """An archive child is unknown; protected operation authority is intact."""
+    def __init__(self, upgrading):
+        super().__init__('Saved backup inventory is unavailable; preserve unrecognized files')
+        self.upgrading = upgrading
 
 
 def _exists(path):
@@ -171,6 +179,7 @@ class Retention:
         stages = protected_stages(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir)
         found = set()
         protected = {}
+        unavailable = False
         for kind, root in (('backup', self.worker.backup_dir), ('recovery', self.worker.recovery_dir)):
             backup_archive.private_directory(root)
             for path in root.iterdir():
@@ -198,18 +207,31 @@ class Retention:
                     backup_archive.private_directory(path)
                     continue
                 # No guessing about unmanaged children or partial staging.
-                identifier(path.name)
-                backup_archive.private_directory(path)
+                try:
+                    identifier(path.name)
+                    backup_archive.private_directory(path)
+                except (InstallError, OSError, ValueError):
+                    # Only read-only status may expose an unavailable inventory.
+                    # The path is neither an archive nor adopted temporary work.
+                    unavailable = True
+                    continue
                 found.add(path.name)
         if protected_backups(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir) != (upgrades, upgrading):
             raise InstallError('Application upgrade backup custody changed during storage observation')
         if protected_stages(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir) != stages:
             raise InstallError('Capture staging custody changed during storage observation')
+        if unavailable:
+            raise InventoryUnavailable(upgrading)
         return found, [protected[key] for key in sorted(protected)], upgrading
 
     def status(self, request_id=None):
         pending = self.store.pending()
-        physical, upgrades, upgrading = self.backup_inventory()
+        try:
+            physical, upgrades, upgrading = self.backup_inventory()
+            inventory_available, storage_problem = True, None
+        except InventoryUnavailable as error:
+            physical, upgrades, upgrading = None, [], error.upgrading
+            inventory_available, storage_problem = False, STORAGE_PROBLEM
         jobs = []
         active = [row for row in self.worker.jobs if row.get('state') in ('running', 'recovery-required')]
         busy = upgrading or bool(pending) or bool(active)
@@ -219,10 +241,11 @@ class Retention:
             allowed, reason = self.eligible(row)
             jobs.append({'id': row['id'], 'action': row['action'], 'state': row['state'],
                          'backup_id': row.get('backup_id'), 'family': row.get('family'),
-                         'finished_at': row.get('finished_at'), 'retire_allowed': allowed and not busy,
-                         'retire_reason': 'Finish the active maintenance operation first.' if busy else reason})
+                         'finished_at': row.get('finished_at'), 'retire_allowed': allowed and not busy and inventory_available,
+                         'retire_reason': storage_problem if not inventory_available else
+                             'Finish the active maintenance operation first.' if busy else reason})
         backups = []
-        for backup_id in sorted(physical):
+        for backup_id in sorted(physical or []):
             owners = self.owners(backup_id)
             both = all(_exists(root / backup_id) for root in (self.worker.backup_dir, self.worker.recovery_dir))
             partial_capture = (len(owners) == 1 and owners[0].get('action') == 'backup'
@@ -245,11 +268,12 @@ class Retention:
                             'delete_allowed': allowed,
                             'delete_reason': reason})
         revision = digest({'jobs': self.worker.jobs, 'backups': backups, 'pending': pending,
-                           'protected_upgrade_backups': upgrades})
+                           'protected_upgrade_backups': upgrades, 'inventory_available': inventory_available})
         return {'schema': 1, 'revision': revision, 'busy': busy, 'recoverable_job_id': recoverable,
+                'inventory_available': inventory_available, 'storage_problem': storage_problem,
                 'capacity': {'history_used': len(self.worker.jobs), 'history_limit': 100,
-                             'backup_used': len(physical), 'backup_limit': 20,
-                             'protected_upgrade_used': len(upgrades)},
+                             'backup_used': len(physical) if inventory_available else None, 'backup_limit': 20,
+                             'protected_upgrade_used': len(upgrades) if inventory_available else None},
                 'jobs': jobs, 'backups': backups, 'protected_upgrade_backups': upgrades,
                 'operation': public_operation(self.store.operation(request_id))}
 
@@ -277,7 +301,10 @@ class Retention:
             previous = self.store.observe(normalized)
             if previous is not None and action != 'resume-delete':
                 return {'retention_operation': public_operation(previous)}
+            self.backup_inventory()  # Mutation never uses the degraded read-only projection.
             current = self.status()
+            if current['inventory_available'] is False:
+                raise RetentionConflict('Saved backup inventory is unavailable; preserve unrecognized files')
             if current['revision'] != request['expected_revision']:
                 raise RetentionConflict('Maintenance history changed. Refresh and review the selection again.')
             if action == 'resume-delete':

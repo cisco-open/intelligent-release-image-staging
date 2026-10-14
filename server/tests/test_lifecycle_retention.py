@@ -121,8 +121,13 @@ def test_only_exact_private_managed_storage_marker_is_exempt(worker, change):
         else: record['unit'] = 'foreign.service'
         atomic_write(worker.state_dir / 'worker-service.json', json.dumps(record).encode())
     before = marker.read_bytes()
+    if change == 'other-dotfile':
+        assert worker.status()['retention']['inventory_available'] is False
+    else:
+        with pytest.raises((InstallError, OSError)):
+            worker.status()
     with pytest.raises((InstallError, OSError)):
-        worker.status()
+        worker.retention.backup_ids()
     assert marker.read_bytes() == before
 
 
@@ -459,7 +464,7 @@ def test_actual_excess_backup_count_stays_visible_and_blocks_new_rotation(worker
     assert worker.jobs == []
 
 
-def test_decryption_temporary_workspace_is_observable_only_during_active_work(worker, monkeypatch):
+def test_decryption_temporary_workspace_never_becomes_a_saved_archive(worker, monkeypatch):
     backup_id = pair(worker, monkeypatch); original = retention.backup_archive.read; observed = []
     def decrypt(path, *args):
         temporary = path.parent / '.iris-restore-product-unit'; temporary.mkdir(mode=0o700)
@@ -472,7 +477,9 @@ def test_decryption_temporary_workspace_is_observable_only_during_active_work(wo
     selected = delete_request(worker, backup_id); worker.submit(selected); worker.thread.join(3)
     assert observed == [True, True] and worker.retention.store.operation(selected['request_id'])['state'] == 'completed'
     (worker.backup_dir / '.iris-restore-orphan-unit').mkdir(mode=0o700)
-    with pytest.raises(RetentionConflict): worker.status()
+    status = worker.status()['retention']
+    assert status['inventory_available'] is False and status['capacity']['backup_used'] is None
+    with pytest.raises(RetentionConflict): worker.retention.backup_ids()
 
 
 def test_substituted_parent_does_not_redirect_fd_relative_directory_removal(worker, monkeypatch, tmp_path):

@@ -35865,6 +35865,17 @@
                         "busy": {
                           "type": "boolean"
                         },
+                        "inventory_available": {
+                          "type": "boolean",
+                          "description": "False when unrecognized archive storage prevents a complete read-only inventory. Recovery job evidence remains available."
+                        },
+                        "storage_problem": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 1024
+                        },
                         "recoverable_job_id": {
                           "type": [
                             "string",
@@ -35885,14 +35896,20 @@
                               "const": 100
                             },
                             "backup_used": {
-                              "type": "integer",
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
                               "minimum": 0
                             },
                             "backup_limit": {
                               "const": 20
                             },
                             "protected_upgrade_used": {
-                              "type": "integer",
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
                               "minimum": 0
                             }
                           },
@@ -36098,7 +36115,85 @@
                         "backups",
                         "operation"
                       ],
-                      "additionalProperties": false
+                      "additionalProperties": false,
+                      "dependentRequired": {
+                        "inventory_available": [
+                          "storage_problem"
+                        ],
+                        "storage_problem": [
+                          "inventory_available"
+                        ]
+                      },
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "inventory_available": {
+                                "const": false
+                              }
+                            },
+                            "required": [
+                              "inventory_available"
+                            ]
+                          },
+                          "then": {
+                            "required": [
+                              "protected_upgrade_backups"
+                            ],
+                            "properties": {
+                              "storage_problem": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "capacity": {
+                                "required": [
+                                  "protected_upgrade_used"
+                                ],
+                                "properties": {
+                                  "backup_used": {
+                                    "type": "null"
+                                  },
+                                  "protected_upgrade_used": {
+                                    "type": "null"
+                                  }
+                                }
+                              },
+                              "backups": {
+                                "maxItems": 0
+                              },
+                              "protected_upgrade_backups": {
+                                "maxItems": 0
+                              },
+                              "jobs": {
+                                "items": {
+                                  "properties": {
+                                    "retire_allowed": {
+                                      "const": false
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "storage_problem": {
+                                "type": "null"
+                              },
+                              "capacity": {
+                                "properties": {
+                                  "backup_used": {
+                                    "type": "integer"
+                                  },
+                                  "protected_upgrade_used": {
+                                    "type": "integer"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
                     },
                     "can_recover_backup": {
                       "type": "boolean",
@@ -78029,6 +78124,17 @@
                         "busy": {
                           "type": "boolean"
                         },
+                        "inventory_available": {
+                          "type": "boolean",
+                          "description": "False when unrecognized archive storage prevents a complete read-only inventory. Recovery job evidence remains available."
+                        },
+                        "storage_problem": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 1024
+                        },
                         "recoverable_job_id": {
                           "type": [
                             "string",
@@ -78049,14 +78155,20 @@
                               "const": 100
                             },
                             "backup_used": {
-                              "type": "integer",
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
                               "minimum": 0
                             },
                             "backup_limit": {
                               "const": 20
                             },
                             "protected_upgrade_used": {
-                              "type": "integer",
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
                               "minimum": 0
                             }
                           },
@@ -78262,7 +78374,85 @@
                         "backups",
                         "operation"
                       ],
-                      "additionalProperties": false
+                      "additionalProperties": false,
+                      "dependentRequired": {
+                        "inventory_available": [
+                          "storage_problem"
+                        ],
+                        "storage_problem": [
+                          "inventory_available"
+                        ]
+                      },
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "inventory_available": {
+                                "const": false
+                              }
+                            },
+                            "required": [
+                              "inventory_available"
+                            ]
+                          },
+                          "then": {
+                            "required": [
+                              "protected_upgrade_backups"
+                            ],
+                            "properties": {
+                              "storage_problem": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "capacity": {
+                                "required": [
+                                  "protected_upgrade_used"
+                                ],
+                                "properties": {
+                                  "backup_used": {
+                                    "type": "null"
+                                  },
+                                  "protected_upgrade_used": {
+                                    "type": "null"
+                                  }
+                                }
+                              },
+                              "backups": {
+                                "maxItems": 0
+                              },
+                              "protected_upgrade_backups": {
+                                "maxItems": 0
+                              },
+                              "jobs": {
+                                "items": {
+                                  "properties": {
+                                    "retire_allowed": {
+                                      "const": false
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "else": {
+                            "properties": {
+                              "storage_problem": {
+                                "type": "null"
+                              },
+                              "capacity": {
+                                "properties": {
+                                  "backup_used": {
+                                    "type": "integer"
+                                  },
+                                  "protected_upgrade_used": {
+                                    "type": "integer"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
                     },
                     "can_recover_backup": {
                       "type": "boolean",

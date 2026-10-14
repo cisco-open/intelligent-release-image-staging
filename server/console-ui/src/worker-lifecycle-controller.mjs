@@ -40,12 +40,14 @@ export class WorkerLifecycleController {
     return this.workerReady() && (!retention?.busy || except !== null && retention.recoverable_job_id === except) &&
       !activeJobs(this.state).some(row => row.id !== except);
   }
-  backupSpace() {const capacity = this.state.backups?.retention?.capacity; return !capacity || capacity.backup_used < capacity.backup_limit;}
+  backupSpace() {const retention = this.state.backups?.retention; return retention?.inventory_available !== false &&
+    (!retention?.capacity || retention.capacity.backup_used < retention.capacity.backup_limit);}
   historySpace() {const capacity = this.state.backups?.retention?.capacity; return !capacity || capacity.history_used < capacity.history_limit;}
   retirableJobs() {return this.state.backups?.retention?.jobs.filter(row => row.retire_allowed).slice(0, 25) || [];}
   canRetire(action) {
     const retention = this.state.backups?.retention;
-    if (this.pane !== 'backups' || !this.available('backups') || !this.workerReady() || !this.state.backups.available || !retention) return false;
+    if (this.pane !== 'backups' || !this.available('backups') || !this.workerReady() || !this.state.backups.available || !retention ||
+        retention.inventory_available === false) return false;
     if (action === 'resume-delete') return !activeJobs(this.state).length && retention.operation?.action === 'delete-backup' && retention.operation.state === 'recovery-required';
     if (!this.workerIdle()) return false;
     if (action === 'retire-history') return this.retirableJobs().length > 0;
@@ -76,6 +78,7 @@ export class WorkerLifecycleController {
     }
     if (!['backup', 'verify', 'extract', 'restore'].includes(action) || !this.workerIdle() || !this.historySpace()) return false;
     if (action === 'backup') return this.backupSpace();
+    if (action === 'restore' && this.state.backups.retention?.inventory_available === false) return false;
     return this.state.backups['can_' + action] && this.state.backups.jobs.some(row => row.backup_id === this.state.backupSelected && row.action === 'backup' && row.state === 'captured');
   }
   recoveryRestore() {

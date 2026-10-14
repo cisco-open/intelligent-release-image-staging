@@ -17,6 +17,9 @@ const retained = () => ({schema: 1, revision: hash, busy: false,
   backups: [{backup_id: id, created_at: now, delete_allowed: true, delete_reason: ''}], operation: null});
 const operation = (action = 'retire-history', state = 'completed') => ({request_id: third, action, state,
   retired_count: action === 'retire-history' ? 1 : 0, backup_id: action === 'retire-history' ? null : id});
+const unavailable = () => ({...retained(), inventory_available: false, storage_problem: 'Saved backup inventory is unavailable.',
+  capacity: {...retained().capacity, backup_used: null, protected_upgrade_used: null},
+  jobs: [{...row(), retire_allowed: false}], backups: [], protected_upgrade_backups: [], recoverable_job_id: null});
 test('historical archive labels do not advertise a current upgrade workflow', () => {
   assert.equal(upgradeArchivePhases.upgraded, 'Recorded operation complete');
   assert.equal(upgradeArchivePhases.cancelled, 'Recorded operation cancelled');
@@ -56,6 +59,43 @@ test('retention status validates limits, exact fields, unique IDs and protected 
     const value = retained(); mutate(value); assert.equal(retentionStatus(value), null);
     assert.equal(workerStatus({...backups(), retention: value}, 'backups'), null);
   }
+});
+test('unavailable inventory has only null archive counts, empty unknown lists and disabled retirement', () => {
+  const value = unavailable(); assert.deepEqual(retentionStatus(value), value);
+  assert.ok(workerStatus({...backups(), retention: value}, 'backups'));
+  for (const mutate of [v => {v.inventory_available = true;}, v => {v.storage_problem = null;},
+    v => {delete v.inventory_available;}, v => {v.capacity.backup_used = 0;},
+    v => {v.capacity.protected_upgrade_used = 0;}, v => {v.jobs[0].retire_allowed = true;},
+    v => {v.backups = retained().backups;}, v => {delete v.protected_upgrade_backups;}]) {
+    const bad = structuredClone(value); mutate(bad); assert.equal(retentionStatus(bad), null);
+  }
+  const complete = retained(); complete.capacity.backup_used = null; assert.equal(retentionStatus(complete), null);
+  assert.ok(retentionStatus({...retained(), inventory_available: true, storage_problem: null}));
+});
+test('unavailable storage blocks capture/new restore/retention but permits independent fresh reads', async () => {
+  const {c, f} = await setup(); f.backups.retention = unavailable(); await c.refresh('backups');
+  assert.equal(c.state.valid.backups, true); assert.equal(c.canBackup('backup'), false); assert.equal(c.canBackup('restore'), false);
+  assert.equal(c.canBackup('verify'), true); assert.equal(c.canBackup('extract'), true);
+  for (const action of ['retire-history', 'delete-backup', 'resume-delete']) assert.equal(c.canRetire(action), false);
+  await c.retire('delete-backup'); await c.backup('backup'); await c.backup('restore'); assert.deepEqual(f.writes, []);
+  await c.select('certificates'); assert.equal(c.canRotate(), false);
+});
+for (const action of ['restore', 'backup']) test('unavailable storage preserves guarded same-job ' + action + ' recovery', async () => {
+  const {c, f} = await setup(), selected = {...job(action, 'recovery-required'), id: other};
+  f.backups.can_recover_backup = true; f.backups.jobs = [job('backup', 'captured'), selected];
+  f.backups.retention = unavailable(); f.backups.retention.busy = true; f.backups.retention.recoverable_job_id = other;
+  f.backups.retention.jobs[0] = {...row(), action, state: 'recovery-required', retire_allowed: false};
+  await c.refresh('backups'); assert.equal(c.canBackup('recover-' + action, other), true);
+  assert.equal(c.canBackup('recover-' + action, id), false);
+  f.backups.retention.recoverable_job_id = null; await c.refresh('backups');
+  assert.equal(c.canBackup('recover-' + action, other), false);
+});
+test('unavailable inventory does not disable same-job rotation recovery', async () => {
+  const {c, f} = await setup(); f.rotation.jobs = [{...job('rotate', 'recovery-required'), id: other}];
+  f.backups.retention = unavailable(); f.backups.retention.busy = true; f.backups.retention.recoverable_job_id = other;
+  f.backups.retention.jobs[0] = {...row(), action: 'rotate', state: 'recovery-required', family: 'management-tls', retire_allowed: false};
+  await c.select('certificates'); assert.equal(c.state.valid.backups, true); assert.equal(c.canRotate(other), true);
+  f.backups.retention.recoverable_job_id = null; await c.refresh('backups'); assert.equal(c.canRotate(other), false);
 });
 test('same-job recovery hint requires one exact interrupted row and a busy worker', () => {
   const value = retained(); value.busy = true; value.recoverable_job_id = other;

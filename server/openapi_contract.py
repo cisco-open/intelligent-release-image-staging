@@ -2297,14 +2297,17 @@ def _retention_operation_schema():
 
 
 def _retention_schema():
-    return _schedule_object({'schema': {'const': 1}, 'revision': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
+    schema = _schedule_object({'schema': {'const': 1}, 'revision': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
         'busy': {'type': 'boolean'},
+        'inventory_available': {'type': 'boolean',
+            'description': 'False when unrecognized archive storage prevents a complete read-only inventory. Recovery job evidence remains available.'},
+        'storage_problem': {'type': ['string', 'null'], 'maxLength': 1024},
         'recoverable_job_id': {'type': ['string', 'null'], 'format': 'uuid',
             'description': 'The sole interrupted operation that can be explicitly recovered; null while another maintenance action blocks it.'},
         'capacity': _schedule_object({
             'history_used': {'type': 'integer', 'minimum': 0, 'maximum': 100}, 'history_limit': {'const': 100},
-            'backup_used': {'type': 'integer', 'minimum': 0}, 'backup_limit': {'const': 20},
-            'protected_upgrade_used': {'type': 'integer', 'minimum': 0}},
+            'backup_used': {'type': ['integer', 'null'], 'minimum': 0}, 'backup_limit': {'const': 20},
+            'protected_upgrade_used': {'type': ['integer', 'null'], 'minimum': 0}},
             required=['history_used', 'history_limit', 'backup_used', 'backup_limit']),
         'jobs': {'type': 'array', 'maxItems': 100, 'items': _schedule_object({
             'id': {'type': 'string', 'format': 'uuid'}, 'action': {'type': 'string'}, 'state': {'type': 'string'},
@@ -2320,6 +2323,19 @@ def _retention_schema():
             'deployment_archive': {'type': 'boolean'}, 'recovery_archive': {'type': 'boolean'}})},
         'operation': {'oneOf': [_retention_operation_schema(), {'type': 'null'}]}},
         required=['schema', 'revision', 'busy', 'capacity', 'jobs', 'backups', 'operation'])
+    # Legacy complete statuses remain readable. Null counts are valid only for
+    # the explicitly unavailable variant, never an invented empty inventory.
+    schema['dependentRequired'] = {'inventory_available': ['storage_problem'], 'storage_problem': ['inventory_available']}
+    schema['allOf'] = [{'if': {'properties': {'inventory_available': {'const': False}}, 'required': ['inventory_available']},
+        'then': {'required': ['protected_upgrade_backups'], 'properties': {
+            'storage_problem': {'type': 'string', 'minLength': 1},
+            'capacity': {'required': ['protected_upgrade_used'], 'properties': {
+                'backup_used': {'type': 'null'}, 'protected_upgrade_used': {'type': 'null'}}},
+            'backups': {'maxItems': 0}, 'protected_upgrade_backups': {'maxItems': 0},
+            'jobs': {'items': {'properties': {'retire_allowed': {'const': False}}}}}},
+        'else': {'properties': {'storage_problem': {'type': 'null'}, 'capacity': {'properties': {
+            'backup_used': {'type': 'integer'}, 'protected_upgrade_used': {'type': 'integer'}}}}}}]
+    return schema
 
 
 def _json_success_example(route):
