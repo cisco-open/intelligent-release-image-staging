@@ -282,6 +282,19 @@ def test_readonly_startup_settlement_never_clears_mutating_operation_fences(work
     worker.save()
     recovered = worker_module.Worker(worker.state_dir, worker.backup_dir, worker.recovery_dir)
     assert recovered.jobs[0]['state'] == 'recovery-required'
+    if prior_state == 'running':
+        expected = {
+            'backup': 'Backup interrupted.', 'restore': 'Restore interrupted.',
+            'rotate': 'Credential rotation interrupted.',
+            'renew-transport': 'Worker connection renewal interrupted.',
+        }
+        assert recovered.jobs[0]['detail'].startswith(expected[action])
+        assert 'recovery control' in recovered.jobs[0]['detail'] or 'then use ' in recovered.jobs[0]['detail']
+        assert 'backup-operation.json' not in recovered.jobs[0]['detail']
+        assert json.loads(recovered.record.read_bytes())[0]['detail'] == recovered.jobs[0]['detail']
+    else:
+        assert recovered.jobs[0]['detail'] == 'Original'
+    assert recovered.thread is None
     with pytest.raises(InstallError, match='active or requires recovery'):
         recovered.submit(dict(action='backup', request_id=str(uuid.uuid4()), allow_downtime=True))
 

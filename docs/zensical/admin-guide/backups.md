@@ -207,11 +207,13 @@ restarting. Check its status before relying on enforcement.
     deleting journals, resetting counters or choosing a later timestamp.
     Recovery onto a replacement host or cluster requires separate security review.
 
-If publication or restart fails, select **Resume this interrupted restore** beside
+If a restore is interrupted, select **Resume this interrupted restore** beside
 the matching operation. If the Console is offline, use the same operation ID
 with the [host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).
-The worker keeps affected services stopped and resumes its approved publication.
-It preserves newer data written after a restart attempt.
+Recovery repeats interrupted initial backup checks before stopping services or
+replacing data. Once replacement has started, recovery follows the recorded
+operation and preserves newer data
+written after a restart attempt. Keep the original operation records and files.
 
 For deployments configured manually, stop all writers and restore matching state,
 configuration, images and identity together. Establish current revocation and

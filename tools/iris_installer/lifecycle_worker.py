@@ -101,7 +101,12 @@ class Worker:
             elif job.get('state') == 'running':
                 # A stopped worker is not proof that capture or cutover finished.
                 job['state'] = 'recovery-required'
-                job['detail'] = 'Worker interrupted. Inspect backup-operation.json and service state before another capture.'
+                job['detail'] = {
+                    'backup': 'Backup interrupted. Review this operation and service status, then use Recover services after this backup.',
+                    'restore': 'Restore interrupted. Review this operation and service status, then use Resume this interrupted restore.',
+                    'rotate': 'Credential rotation interrupted. Review this operation and use its recovery control before starting another change.',
+                    'renew-transport': 'Worker connection renewal interrupted. Review this operation and use its recovery control before starting another change.',
+                }.get(job.get('action'), 'Maintenance interrupted. Review this operation and service status before starting more work.')
         self.save()
 
     def deployment_info(self):

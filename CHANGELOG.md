@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Name the interrupted maintenance action in its recovery message and explain
+  how to resume a restore interrupted during its initial backup checks.
 - Replace deployments through undeploy, removal, a new installation and device
   re-onboarding. Remove the in-place application upgrade command and build
   engines while preserving historical worker fences and backup protection.

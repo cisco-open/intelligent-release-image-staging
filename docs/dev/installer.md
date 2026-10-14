@@ -132,6 +132,11 @@ backup, verification, isolated extraction and same-deployment restore cutover
 are implemented as described in [Lifecycle development](lifecycle.md).
 Restore requires current security authority and the same credential generation;
 it does not adopt a replacement host or reset missing replay history.
+After a worker restart, an unfinished restore requires explicit `recover-restore`
+with the original job and backup IDs. Only a persisted false
+`restore_authority_started` marker permits recovery before the restore record
+was created; missing or damaged started authority remains fenced. That early
+recovery repeats archive authentication before it can stop services or replace data.
 The managed worker keeps its Python runtime separate from the deployment source.
 Restore loads distribution-access validation from the verified live source, not
 from the backup. Test this layout in an isolated Python process so checkout
