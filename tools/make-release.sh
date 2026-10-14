@@ -75,6 +75,7 @@ SHIP=(
   tools/check-package-freshness.sh
   tools/irisctl tools/iris_installer tools/iris-key-setup
   tools/release-auth.py tools/release-stage.py
+  tools/prebuilt-intake.py tools/hosted-prebuilt-stage.py
   tools/build-installer-package.py tools/finalize-device-image.py
   tools/build-release-kit.py tools/build-release-candidate.py tools/complete-release-candidate.py tools/prepare-prebuilt-release.py tools/inspect-image-components.py tools/build-alpine-sources.py
   tools/build-packaging-inputs.py tools/build-offline-dependencies.py tools/build-guest-inputs.py

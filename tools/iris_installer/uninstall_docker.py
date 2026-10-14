@@ -31,6 +31,27 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def network_definition(row):
+    """Keep configuration pinned, excluding only known live IP usage counts."""
+    result = copy.deepcopy({key: value for key, value in row.items() if key != 'Containers'})
+    status = result.get('Status')
+    if status is not None:
+        require(isinstance(status, dict))
+        ipam = status.get('IPAM')
+        if ipam is not None:
+            require(isinstance(ipam, dict))
+            subnets = ipam.get('Subnets')
+            if subnets is not None:
+                require(isinstance(subnets, dict) and len(subnets) <= 64)
+                for subnet, values in subnets.items():
+                    require(isinstance(subnet, str) and 0 < len(subnet) <= 128 and isinstance(values, dict))
+                    for key in ('IPsInUse', 'DynamicIPsAvailable'):
+                        if key in values:
+                            require(type(values[key]) is int and 0 <= values[key] <= 2**128)
+                            del values[key]
+    return result
+
+
 def command(argv):
     result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
                             timeout=180, check=False, env={'PATH': '/usr/bin:/bin'},
@@ -72,7 +93,7 @@ def inventory(request, run):
                 pinned = row
                 value = {'mountpoint': row['Mountpoint']}
             else:
-                pinned = {k: v for k, v in row.items() if k != 'Containers'}
+                pinned = network_definition(row)
                 value = {'attached': sorted(row.get('Containers', {}))}
             resources[key] = {'id': row.get('Id', name), 'sha256': digest(pinned), **value}
     # Shared writers and existing network connections do not authorize removal.

@@ -28,7 +28,9 @@ class DockerEngine:
                 'Config': {'Labels': dict(labels, **{'com.docker.compose.service': 'iris'}), 'Env': ['SECRET=not-output']},
                 'HostConfig': {'RestartPolicy': {'Name': 'unless-stopped'}}, 'Mounts': [],
                 'State': {'Running': True, 'ExitCode': 0, 'OOMKilled': False}}},
-            'network': {'b' * 64: {'Id': 'b' * 64, 'Name': 'iris-net', 'Labels': labels, 'Containers': {'a' * 64: {}}, 'Driver': 'bridge'}},
+            'network': {'b' * 64: {'Id': 'b' * 64, 'Name': 'iris-net', 'Labels': labels, 'Containers': {'a' * 64: {}}, 'Driver': 'bridge',
+                'IPAM': {'Driver': 'default', 'Options': None, 'Config': [{'Subnet': '172.18.0.0/16', 'Gateway': '172.18.0.1'}]},
+                'Status': {'IPAM': {'Subnets': {'172.18.0.0/16': {'IPsInUse': 4, 'DynamicIPsAvailable': 65532}}}}}},
             'volume': {'iris-data': {'Name': 'iris-data', 'Labels': labels, 'Driver': 'local', 'Options': {},
                                      'Mountpoint': '/var/lib/docker/volumes/iris-data/_data', 'CreatedAt': 'original'}}}
         self.calls = []
@@ -45,6 +47,11 @@ class DockerEngine:
             return b''
         if argv[:2] == ['docker', 'stop']:
             self.rows['container'][argv[-1]]['State']['Running'] = False
+            for row in self.rows['network'].values():
+                if row['Containers'].pop(argv[-1], None) is not None:
+                    counts = row['Status']['IPAM']['Subnets']['172.18.0.0/16']
+                    counts['IPsInUse'] -= 1
+                    counts['DynamicIPsAvailable'] += 1
             return b''
         _, kind, verb, *rest = argv
         if verb == 'ls':
@@ -118,6 +125,57 @@ def test_docker_running_container_blocks_removal():
     expected = docker.stable(docker.perform(engine.request, engine.run))
     with pytest.raises(ValueError):
         docker.perform(dict(engine.request, action='remove', key='container/iris-server', expected=expected), engine.run)
+
+
+def test_docker_network_runtime_status_changes_on_owned_clean_stop():
+    # This is the real Docker inspect shape observed at the live refusal. Only
+    # the transport is modeled; the shipped inventory/stop engine is exercised.
+    engine = DockerEngine()
+    before = docker.perform(engine.request, engine.run)
+    stopped = docker.perform(dict(engine.request, action='stop', key='container/iris-server',
+                                  expected=docker.stable(before)), engine.run)
+    assert docker.stable(stopped) == docker.stable(before)
+    assert engine.rows['network']['b' * 64]['Status']['IPAM']['Subnets']['172.18.0.0/16'] == {
+        'IPsInUse': 3, 'DynamicIPsAvailable': 65533}
+    assert not stopped['resources']['container/iris-server']['running']
+
+
+@pytest.mark.parametrize('change', ['driver', 'options', 'ipam-config', 'unknown-status', 'unknown-subnet-field', 'subnet-key'])
+def test_docker_network_configuration_and_unknown_status_are_still_pinned(change):
+    engine = DockerEngine()
+    expected = docker.stable(docker.perform(engine.request, engine.run))
+    row = engine.rows['network']['b' * 64]
+    if change == 'driver': row['Driver'] = 'overlay'
+    elif change == 'options': row['Options'] = {'unexpected': 'changed'}
+    elif change == 'ipam-config': row['IPAM']['Config'][0]['Gateway'] = '172.18.0.2'
+    elif change == 'unknown-status': row['Status']['Unexpected'] = 'changed'
+    elif change == 'unknown-subnet-field': row['Status']['IPAM']['Subnets']['172.18.0.0/16']['Unexpected'] = 'changed'
+    else: row['Status']['IPAM']['Subnets']['192.0.2.0/24'] = row['Status']['IPAM']['Subnets'].pop('172.18.0.0/16')
+    before = len(engine.calls)
+    with pytest.raises(ValueError):
+        docker.perform(dict(engine.request, action='stop', key='container/iris-server', expected=expected), engine.run)
+    assert not any(call[:2] in (['docker', 'update'], ['docker', 'stop']) for call in engine.calls[before:])
+
+
+@pytest.mark.parametrize('bad', [None, True, -1, 1.5, '4', 2**128 + 1])
+def test_docker_network_status_counter_types_refuse_before_mutation(bad):
+    engine = DockerEngine()
+    engine.rows['network']['b' * 64]['Status']['IPAM']['Subnets']['172.18.0.0/16']['IPsInUse'] = bad
+    with pytest.raises(ValueError): docker.perform(engine.request, engine.run)
+    assert not any(call[:2] in (['docker', 'update'], ['docker', 'stop']) for call in engine.calls)
+
+
+def test_historical_network_status_fingerprint_is_not_silently_adopted():
+    engine = DockerEngine()
+    expected = docker.stable(docker.perform(engine.request, engine.run))
+    row = engine.rows['network']['b' * 64]
+    # Retained plans made by the old producer included these runtime counters.
+    expected['resources']['network/iris-net']['sha256'] = docker.digest({
+        key: value for key, value in row.items() if key != 'Containers'})
+    before = len(engine.calls)
+    with pytest.raises(ValueError):
+        docker.perform(dict(engine.request, action='stop', key='container/iris-server', expected=expected), engine.run)
+    assert not any(call[:2] in (['docker', 'update'], ['docker', 'stop']) for call in engine.calls[before:])
 
 
 class Cluster:

@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
 from iris_installer import upgrade_plan, upgrade_state
 from iris_installer.lifecycle_worker import Worker
+from iris_installer.lifecycle_retention import InventoryUnavailable, STORAGE_PROBLEM
 from iris_installer.state import InstallError, atomic_write
 
 
@@ -105,7 +106,19 @@ def test_upgrade_prefix_never_waives_exact_archive_authority(owned, damage):
                 path = Path(paths[name]); (path / 'preserved-archive').unlink(); path.rmdir()
     save(operation.path, operation.record)
     before = {str(p): p.read_bytes() for p in owned.base.rglob('*') if p.is_file()}
-    with pytest.raises((InstallError, OSError)): worker.status()
+    if damage == 'unrecorded':
+        # Unknown output must not hide recovery status or become an authorized
+        # archive. Only the read-only projection degrades; mutation scans fail.
+        observed = worker.status()['retention']
+        assert observed['inventory_available'] is False
+        assert observed['storage_problem'] == STORAGE_PROBLEM
+        assert observed['capacity']['backup_used'] is None
+        assert observed['capacity']['protected_upgrade_used'] is None
+        assert observed['backups'] == observed['protected_upgrade_backups'] == []
+        assert observed['busy'] is True
+        with pytest.raises(InventoryUnavailable): worker.retention.backup_ids()
+    else:
+        with pytest.raises((InstallError, OSError)): worker.status()
     assert before == {str(p): p.read_bytes() for p in owned.base.rglob('*') if p.is_file()}
 
 

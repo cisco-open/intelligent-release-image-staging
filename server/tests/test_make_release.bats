@@ -168,6 +168,7 @@ _make_release_fixture() {
            build-alpine-sources.py build-core-python-sources.py \
            build-runtime-sources.py build-image-source-notices.py \
            complete-release-candidate.py prepare-prebuilt-release.py release-stage.py \
+           prebuilt-intake.py hosted-prebuilt-stage.py \
            build-ssh-verifier.sh build-ssh-verifiers.sh \
            iris-aead.c build-instruction-crypto.sh build-instruction-crypto-inner.sh \
            build-instruction-crypto.Dockerfile \
@@ -252,6 +253,7 @@ _make_release_fixture() {
   for present in iris/server/tracker.py iris/server/certs/cisco_bulkhash_verify.pem \
                  iris/tools/aria2c-patches/0001.patch iris/fleet/devices.csv.example \
                  iris/lab/iris-ssh-policy.sh iris/lab/guest-publish.py \
+                 iris/tools/prebuilt-intake.py iris/tools/hosted-prebuilt-stage.py \
                  iris/bin/aria2c iris/deliverables/aria2c-x86_64 \
                  iris/deliverables/aria2c-aarch64 \
                  iris/bin/.gitkeep iris/artifacts/.gitkeep iris/MANIFEST.txt; do
