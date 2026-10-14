@@ -97,12 +97,12 @@ def test_real_hosted_writer_preserves_review_payload_and_rebinds_only_current_ru
     assert (output / gate.REVIEW_NAME).read_bytes() == original[gate.REVIEW_NAME]
     record = json.loads((output / gate.STAGE_NAME).read_bytes())
     assert (record['run_id'], record['run_attempt']) == (51, 3)
-    receipt = json.loads((output / subject.RECEIPT).read_bytes())
-    assert receipt['incoming']['artifact_id'] == 47
-    assert receipt['incoming']['artifact_sha256'] == selected['artifact_sha256']
-    assert receipt['incoming']['run_id'] == 31 and receipt['incoming']['run_attempt'] == 2
-    assert receipt['external_pins'] == selected['external_pins']
-    assert receipt['review_authority_verified'] is receipt['payloads_rebuilt'] is False
+    incoming_record = json.loads((output / subject.INCOMING_RECORD).read_bytes())
+    assert incoming_record['incoming']['artifact_id'] == 47
+    assert incoming_record['incoming']['artifact_sha256'] == selected['artifact_sha256']
+    assert incoming_record['incoming']['run_id'] == 31 and incoming_record['incoming']['run_attempt'] == 2
+    assert incoming_record['external_pins'] == selected['external_pins']
+    assert incoming_record['review_authority_verified'] is incoming_record['payloads_rebuilt'] is False
     files = {p.name: {'sha256': sha(p.read_bytes()), 'size': p.stat().st_size} for p in output.iterdir()}
     joined = STAGE._prebuilt_metadata(output, files,
         dict(prebuilt['selected'], run_id=51, run_attempt=3), prebuilt['profile'], unsigned=True)

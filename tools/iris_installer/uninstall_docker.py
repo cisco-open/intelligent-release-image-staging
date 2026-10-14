@@ -75,7 +75,7 @@ def inventory(request, run):
                 pinned = {k: v for k, v in row.items() if k != 'Containers'}
                 value = {'attached': sorted(row.get('Containers', {}))}
             resources[key] = {'id': row.get('Id', name), 'sha256': digest(pinned), **value}
-    # Shared writers and network attachments are not removal authority.
+    # Shared writers and existing network connections do not authorize removal.
     owned = {v['id'] for k, v in resources.items() if k.startswith('container/')}
     for key, value in resources.items():
         if key.startswith('network/'):

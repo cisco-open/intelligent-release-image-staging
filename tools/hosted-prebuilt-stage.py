@@ -21,7 +21,7 @@ import tempfile
 from iris_installer import prebuilt_release as gate, release_kit as kit
 from iris_installer.state import InstallError, regular_bytes
 
-RECEIPT = 'prebuilt-incoming.json'
+INCOMING_RECORD = 'prebuilt-incoming.json'
 SCHEMA = 'iris-hosted-prebuilt-input-v1'
 
 
@@ -223,7 +223,7 @@ def prepare(selected, *, repository, output_dir, keyring, current_run_id, curren
         incoming.mkdir(mode=0o700)
         stage._download(selected, archive, incoming_origin['artifact_size'], token)
         files = stage._unpack(archive, incoming)
-        if 'attestations.jsonl' in files or RECEIPT in files:
+        if 'attestations.jsonl' in files or INCOMING_RECORD in files:
             fail('incoming preparation must be unsigned, not a previous hosted stage')
         evidence = _completed(incoming, files, selected, work / 'completed')
         keyring_copy = work / 'independent-debian-keyring.gpg'
@@ -245,11 +245,11 @@ def prepare(selected, *, repository, output_dir, keyring, current_run_id, curren
                 if path.name in ('release.json', 'SHA256SUMS'):
                     continue
                 kit._snapshot(path, sealed / path.name, kit.MAX_ASSET)
-            receipt = {'schema': SCHEMA, 'repository': stage.REPOSITORY,
+            incoming_record = {'schema': SCHEMA, 'repository': stage.REPOSITORY,
                 **{key: selected[key] for key in ('tag', 'commit', 'profile', 'candidate_evidence_sha256', 'source_review_sha256', 'external_pins')},
                 'incoming': incoming_origin, 'hosted_run': {'run_id': current_run_id, 'run_attempt': current_run_attempt},
                 'review_authority_verified': False, 'payloads_rebuilt': False}
-            _write_metadata(sealed, RECEIPT, stage._canonical(receipt))
+            _write_metadata(sealed, INCOMING_RECORD, stage._canonical(incoming_record))
             assets = _inventory(sealed)
             inventory = {'schema': 1, 'repository': stage.REPOSITORY, 'workflow': stage.WORKFLOW,
                          'tag': selected['tag'], 'commit': selected['commit'], 'assets': assets}

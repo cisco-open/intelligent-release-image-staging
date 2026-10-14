@@ -501,7 +501,7 @@ def _prebuilt_metadata(directory, files, selected, profile, *, require_incoming=
                 or not isinstance(origin["artifact_name"], str)
                 or not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", origin["artifact_name"])
                 or type(origin["artifact_size"]) is not int or not 0 < origin["artifact_size"] <= MAX_TOTAL):
-            fail("hosted prebuilt origin receipt differs")
+            fail("hosted prebuilt origin record differs")
     sidecar = metadata(package + ".source.json")
     _keys(sidecar, {"schema", "commit", "files"})
     if type(sidecar["schema"]) is not int or sidecar["schema"] != 1 or sidecar["commit"] != selected["commit"]:
