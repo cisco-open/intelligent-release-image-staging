@@ -447,11 +447,67 @@ It checks the original source manifest rather than replacing it.
 
 These inputs remain unsigned until the authorized hosted workflow authenticates
 them. The helper checks the review's file bindings, not the reviewer's authority.
-The hosted consumer requires the complete unsigned output in an immutable
-artifact of a completed, reviewed workflow in the public repository.
-The local-to-Actions uploader is still pending; this consumer alone is not a
-complete prebuilt release procedure. Source-only tag builds remain available.
-For an existing input artifact, independently record its run,
+For hosted intake, an authorized repository owner first supplies a dedicated
+unpublished draft release in the public repository. Its tag is
+`iris-prebuilt-intake-<first 16 characters of candidate-evidence SHA256>` and its
+target is the full reviewed commit. Keep it separate from the final release tag.
+The intake helper never creates a draft, changes a tag or publishes a release.
+
+Set `GH_TOKEN` in the environment for both local commands, using the same
+independently authenticated GitHub identity for this repository. The plan needs
+draft-read access; upload additionally needs repository contents-write access.
+The helper's GET requests do not read cached `gh auth login` credentials.
+Keep shell tracing disabled and obtain the value without putting it in arguments
+or command history:
+
+```bash
+set +x
+export GH_TOKEN="$(/usr/bin/gh auth token --hostname github.com)"
+```
+
+Prepare a new private upload plan from the completed candidate and independently
+approved review:
+
+```bash
+python3 tools/prebuilt-intake.py plan --completed-dir /path/to/completed \
+  --evidence-sha256 '<candidate-evidence-sha256>' \
+  --source-review /protected/source-review.json --review-sha256 '<review-sha256>' \
+  --repository /path/to/reviewed-checkout --tag 'v<version>' --commit '<full-commit>' \
+  --profile prepared-host --draft-release-id '<existing-draft-id>' \
+  --debian-keyring /protected/debian-keyring.gpg --keyring-sha256 '<keyring-sha256>' \
+  --pip-sdist-sha256 '<independently-reviewed-pip-source-sha256>' \
+  --output-dir /path/to/new-private-upload-plan
+```
+
+This step rechecks the complete candidate and review, snapshots exact bytes and
+reads the existing empty draft. It reports the local plan hash. Upload requires
+separate repository write authority, an independently installed protected GitHub
+CLI, and explicit confirmation:
+
+```bash
+python3 tools/prebuilt-intake.py upload --state-dir /path/to/new-private-upload-plan \
+  --plan-sha256 '<reported-plan-sha256>' \
+  --confirmation 'upload prebuilt intake <reported-plan-sha256>'
+```
+
+Every upload saves intent first. Resume uses the same plan and command: it
+reconciles a pending upload by exact asset ID, hash and size before progressing.
+An unresolved response stops without repeating the POST. Preserve the plan and
+upload state; missing records, foreign assets and changed inputs are refused.
+The manifest is uploaded last and the helper reports its ID and SHA-256.
+The draft is input storage, not authentication or approval; existing assets are
+never overwritten, deleted or published by this helper.
+
+Run `.github/workflows/prepare-prebuilt.yml` manually on the exact release tag.
+Select the draft and manifest IDs/hash, profile, candidate evidence, review and
+independent keyring/pip hashes. Confirm
+`prepare prebuilt intake <tag> <manifest SHA256>`. The read-only workflow repeats
+full source validation and exports `iris-prebuilt-unsigned-<run-id>-<attempt>`.
+Its summary records the real run, attempt, artifact ID and raw ZIP digest.
+Qualify actual hosted `GITHUB_TOKEN` access to the dedicated draft before
+approving this route; modeled local tests do not prove that permission behavior.
+Source-only tag builds remain available independently of this route.
+For the resulting unsigned input artifact, independently record its run,
 attempt, artifact ID and raw ZIP SHA-256. The artifact API binds the run and
 ZIP digest; the selected attempt must also match the unsigned stage record.
 

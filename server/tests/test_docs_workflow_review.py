@@ -141,8 +141,10 @@ def test_prebuilt_release_docs_separate_independent_input_validation_authenticat
     assert "selected attempt must also match the unsigned stage record" in installer
     assert "keyring from the operating system, rather than the incoming artifact" in installer
     for page in (installer, checklist):
-        assert "local-to-Actions uploader is still pending" in page
-        assert "Source-only tag builds remain available" in page or "source-only tag builds remain available" in page
+        assert "Source-only tag builds remain available" in page
+        assert "prepare-prebuilt.yml" in page
+        assert "tools/prebuilt-intake.py" in page
+        assert "manifest is uploaded last" in page.lower()
         assert "exact release tag" in page
         assert "authenticate <tag> <candidate-evidence SHA256>" in page
         assert "prepared-host" in page and "ubuntu-dependencies" in page
@@ -152,6 +154,23 @@ def test_prebuilt_release_docs_separate_independent_input_validation_authenticat
     for retired in ("Prebuilt authentication still needs", "prebuilt upload and authentication require",
                     "Release preparation refuses the new prebuilt assets"):
         assert retired not in installer + checklist
+
+
+def test_prebuilt_intake_docs_require_separate_upload_authority_and_same_intent_reconciliation():
+    installer = " ".join((ROOT / "docs/dev/installer.md").read_text().split())
+    assert "existing empty draft" in installer
+    assert "separate repository write authority" in installer
+    assert "--confirmation 'upload prebuilt intake <reported-plan-sha256>'" in installer
+    assert "Resume uses the same plan and command" in installer
+    assert "stops without repeating the POST" in installer
+    assert "Preserve the plan and upload state" in installer
+    assert "independent keyring/pip hashes" in installer
+    assert "helper never creates a draft, changes a tag or publishes a release" in installer
+    assert "prepare prebuilt intake <tag> <manifest SHA256>" in installer
+    assert "Set `GH_TOKEN` in the environment for both local commands" in installer
+    assert "draft-read access" in installer and "contents-write access" in installer
+    assert 'export GH_TOKEN="$(/usr/bin/gh auth token --hostname github.com)"' in installer
+    assert "modeled local tests do not prove that permission behavior" in installer
 
 
 def test_manual_server_build_requires_emulation_before_iox_registration():

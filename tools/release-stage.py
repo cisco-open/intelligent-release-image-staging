@@ -118,8 +118,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _request(url, token=None):
-    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10",
+def _request(url, token=None, *, accept="application/vnd.github+json"):
+    headers = {"Accept": accept, "X-GitHub-Api-Version": "2026-03-10",
                "User-Agent": "iris-release-stage"}
     if token:
         headers["Authorization"] = "Bearer " + token

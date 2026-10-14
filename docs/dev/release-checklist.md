@@ -43,10 +43,22 @@ not a claim that the publication helper ran those tests.
 
 For prebuilt inputs, first complete the source companions and independently
 approved review, then [prepare the unsigned output](installer.md#prepare-prebuilt-authentication-inputs).
-The hosted consumer requires an immutable artifact from a completed
-same-repository workflow. The local-to-Actions uploader is still pending;
-prebuilt intake is an implementation gate, while source-only tag builds remain
-available. For an existing input artifact, record the following selections.
+The owner supplies a separate existing draft intake, then uses the documented
+`tools/prebuilt-intake.py plan` and explicitly confirmed `upload` commands.
+Both commands require `GH_TOKEN` in the environment for the same independently
+authenticated repository identity; keep its value out of arguments and history.
+Plan needs draft-read access; upload also needs contents-write access.
+The local helper retains pending intent and reconciles an unknown upload without
+repeating it. The manifest is uploaded last; no draft, tag or final release is
+created, overwritten, deleted or published by the helper.
+
+Run `.github/workflows/prepare-prebuilt.yml` on the exact release tag with the
+selected draft/manifest IDs and independent hashes. It repeats full validation
+and exports an unsigned immutable Actions artifact, recording its actual IDs
+and digest in the workflow summary. It has no signing or publication permission.
+Record actual hosted-token draft access as qualification, not a modeled-test result.
+Source-only tag builds remain available independently. Record these selections
+for the unsigned artifact before separately authorizing authentication.
 Independently record its run, attempt, artifact ID and raw ZIP SHA-256, plus the
 candidate-evidence, review, Debian keyring and pip source hashes. Artifact API
 metadata binds the run and digest; its unsigned stage record binds the selected
