@@ -295,9 +295,20 @@ def create(args):
                         'target': target_name(installation), 'volumes': volumes,
                         'image_ids': journal.document['completed']['images'],
                         'scope': 'managed-deployment-files', 'cutover_permitted': False}
+            capture = None
+            if getattr(args, 'managed_capture', False) is True:
+                from .backup_capture import Capture
+                capture = Capture(installation, args.request_id, args.backup_id).begin(
+                    output=output, recovery=recovery, signer=signer, containers=containers,
+                    volumes=volumes, set_id=set_id)
+                callback = getattr(args, 'on_capture_started', None)
+                if callback is not None:
+                    callback()
             # Export immutable service images while the deployment is still running.
             with tempfile.TemporaryDirectory(prefix='backup-images-', dir=journal.directory) as temporary:
                 images = Path(temporary) / 'images.tar'
+                if capture:
+                    capture.phase('exporting')
                 export = getattr(installation, 'backup_export_images', None)
                 if export is not None:
                     export(images)
@@ -312,30 +323,49 @@ def create(args):
                 atomic_write(status_path, json.dumps(status).encode())
                 restart_errors = []
                 try:
+                    if capture:
+                        capture.phase('stopping')
                     stop_writers(installation, containers)
+                    if capture:
+                        capture.record['clean_stop'] = True
+                        capture.phase('capturing')
                     extras = getattr(installation, 'capture_backup_extras', None)
                     if extras is not None:
                         extras(sources)
-                    backup_archive.create({'service-identity': installation.base / 'age.txt',
+                    receipt = backup_archive.create({'service-identity': installation.base / 'age.txt',
                                            'backup-signer': signer}, recovery, recipient, signer,
-                                          metadata=dict(metadata, scope='identity-recovery'))
-                    backup_archive.create(sources, output, recipient, signer, metadata=metadata)
+                        metadata=dict(metadata, scope='identity-recovery'),
+                        **({'on_stage': lambda path: capture.stage('recovery', path)} if capture else {}))
+                    if capture:
+                        capture.published('recovery', receipt)
+                    receipt = backup_archive.create(sources, output, recipient, signer, metadata=metadata,
+                        **({'on_stage': lambda path: capture.stage('data', path)} if capture else {}))
+                    if capture:
+                        capture.published('data', receipt)
                     status['state'] = 'captured'
                 except Exception:
                     status['state'] = 'failed'
                     raise
                 finally:
+                    if capture:
+                        capture.phase('restarting')
                     # Original services only, in server-then-Console order. Capturing
                     # never changes live bytes, so restart is safe even after failure.
                     for container in reversed(containers):
                         if container['running']:
                             try:
                                 restart_writer(installation, container)
+                                if capture:
+                                    capture.record['restarted'].append(container['service'])
+                                    capture.save()
                             except (InstallError, OSError):
                                 restart_errors.append(container['service'])
                     status['restart_required'] = restart_errors
                     status['finished_at'] = int(time.time())
                     atomic_write(status_path, json.dumps(status).encode())
+                    if capture:
+                        capture.record['restart_required'] = restart_errors
+                        capture.phase('settled-' + status['state'] if not restart_errors else 'restarting')
                 if restart_errors:
                     raise InstallError("Backup captured, but service restart needs attention")
         print('Captured encrypted deployment and separate identity recovery sets: ' + set_id)
@@ -350,3 +380,14 @@ def verify(args):
                                  max_bytes=args.max_bytes)
     print(json.dumps(report, sort_keys=True))
     return 0
+
+
+def recover(state_dir, *, request_id, backup_id):
+    """Settle only the exact managed capture; never call create() again."""
+    from .backup_capture import Capture
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state_dir)
+    with Journal(state_dir).locked() as journal:
+        if journal.document is None:
+            raise InstallError('No managed deployment was found')
+        return Capture(_installation(journal), request_id, backup_id).load().settle()

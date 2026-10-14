@@ -134,10 +134,12 @@ class Worker:
                     'can_verify': self.identity is not None,
                     'can_extract': self.identity is not None and self.extract_dir is not None,
                     'can_restore': self.identity is not None and (self.state_dir / 'restore-custody/signer.pub').is_file(),
+                    'can_recover_backup': bool(getattr(self, 'managed_captures', False)),
                     'restore_scope': 'same-deployment-same-security-generation',
                     'retention': self.retention.status(retention_request_id),
                     'jobs': json.loads(json.dumps([{key: value for key, value in job.items()
-                        if key != 'restore_authority_started'} for job in self.jobs
+                        if key not in ('restore_authority_started', 'capture_authority_started',
+                                       'capture_recovery_requested')} for job in self.jobs
                         if job['action'] not in ('rotate', 'renew-transport')])),
                     'note': 'Keep encrypted copies and pinned backup signer trust off this host. Restore requires the existing owned deployment, unchanged credentials and current producer replay authority.'}
 
@@ -436,6 +438,8 @@ class Worker:
             return self.retention.submit(request)
         if isinstance(request, dict) and request.get('action') in ('restore', 'recover-restore'):
             return self.submit_restore(request)
+        if isinstance(request, dict) and request.get('action') == 'recover-backup':
+            return self.submit_backup_recovery(request)
         if isinstance(request, dict) and request.get('action') == 'sync-management':
             return self.sync_management(request)
         if isinstance(request, dict) and request.get('action') in ('rotate', 'recover-rotation'):
@@ -476,11 +480,57 @@ class Worker:
                     raise InstallError("Choose a captured backup from this deployment")
             job = {'id': request_id, 'action': action, 'backup_id': backup_id,
                    'state': 'running', 'started_at': int(time.time()), 'detail': ''}
+            if action == 'backup' and getattr(self, 'managed_captures', False):
+                job['capture_authority_started'] = False
             self.jobs.append(job)
             self.save()
             self.thread = threading.Thread(target=self.perform, args=(job,), daemon=False)
             self.thread.start()
             return {'job_id': job['id']}
+
+    def submit_backup_recovery(self, request):
+        from .backup_capture import identifier
+        if (set(request) != {'action', 'request_id', 'backup_id', 'allow_downtime'}
+                or request['allow_downtime'] is not True):
+            raise InstallError('Confirm service recovery for the original interrupted backup')
+        request_id, backup_id = identifier(request['request_id']), identifier(request['backup_id'])
+        if not getattr(self, 'managed_captures', False):
+            raise InstallError('Backup recovery requires the installed managed lifecycle service')
+        with self.lock:
+            self.retention.guard(request_id)
+            job = next((job for job in self.jobs if job['id'] == request_id), None)
+            if not job or job['action'] != 'backup' or job['backup_id'] != backup_id:
+                raise InstallError('Choose the original interrupted backup job')
+            if job['state'] != 'recovery-required':
+                # Duplicate accepted recovery only observes the same job.
+                if job.get('capture_recovery_requested') is True:
+                    return {'job_id': request_id}
+                raise InstallError('Choose an interrupted backup job')
+            if any(other['id'] != request_id and other['state'] in ('running', 'recovery-required') for other in self.jobs):
+                raise InstallError('Another lifecycle operation requires recovery')
+            job.update(state='running', detail='Recovering services after the original backup capture.',
+                       capture_recovery_requested=True)
+            self.save()
+            self.thread = threading.Thread(target=self.perform_backup_recovery, args=(job,), daemon=False)
+            self.thread.start()
+            return {'job_id': request_id}
+
+    def perform_backup_recovery(self, job):
+        try:
+            result = backup.recover(self.state_dir, request_id=job['id'], backup_id=job['backup_id'])
+            state = result['state']
+            detail = ('Backup capture completed and original services are healthy. Verify both sets before using them.'
+                      if state == 'captured' else
+                      'Original services are healthy. The interrupted backup is incomplete; its private output has been kept. Start a new backup to try again.')
+            proof = result
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, InstallError) else type(exc).__name__
+            print('Backup recovery failed: ' + reason, file=sys.stderr, flush=True)
+            state, proof = 'recovery-required', None
+            detail = 'Backup recovery is not complete. Original capture was not repeated. ' + reason
+        with self.lock:
+            job.update(state=state, detail=detail, proof=proof, finished_at=int(time.time()))
+            self.save()
 
     def perform(self, job):
         destination = None
@@ -491,8 +541,14 @@ class Worker:
             recovery = self.recovery_dir / backup_id
             signer = self.state_dir / 'backup-custody/signer.pub'
             if job['action'] == 'backup':
+                def capture_started():
+                    with self.lock:
+                        job['capture_authority_started'] = True
+                        self.save()
                 backup.create(SimpleNamespace(state_dir=self.state_dir, output=data,
-                                              recovery_output=recovery, allow_downtime=True))
+                    recovery_output=recovery, allow_downtime=True,
+                    managed_capture=getattr(self, 'managed_captures', False),
+                    request_id=job['id'], backup_id=backup_id, on_capture_started=capture_started))
                 result = 'captured'
             else:
                 # No service starts, ownership changes, image loads or network.
@@ -546,6 +602,14 @@ class Worker:
             print('Lifecycle operation failed: ' + reason, file=sys.stderr, flush=True)
             result, detail = 'failed', 'Operation failed. Inspect the protected host state; no reset was performed.'
             if job['action'] == 'backup':
+                if getattr(self, 'managed_captures', False):
+                    try:
+                        captured = json.loads(regular_bytes(self.state_dir / 'backup-captures' / (job['id'] + '.json')))
+                        if captured.get('phase') not in ('settled-captured', 'settled-failed'):
+                            result = 'recovery-required'
+                    except (OSError, ValueError, InstallError):
+                        if job.get('capture_authority_started') is True:
+                            result = 'recovery-required'
                 try:
                     operation = json.loads(regular_bytes(self.state_dir / 'backup-operation.json'))
                     if operation.get('restart_required') or operation.get('state') == 'stopping':

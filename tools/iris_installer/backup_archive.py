@@ -149,7 +149,7 @@ def _capture(archive, parent_fd, name, member, records):
         os.close(fd)
 
 
-def create(sources, output, recipient, signing_key, *, metadata=None):
+def create(sources, output, recipient, signing_key, *, metadata=None, on_stage=None):
     """Publish a signed encrypted set into a NEW directory under a private parent."""
     output = Path(output).absolute()
     parent = private_directory(output.parent)
@@ -171,7 +171,21 @@ def create(sources, output, recipient, signing_key, *, metadata=None):
         source = Path(source).absolute()
         if source.resolve() != source or parent == source or source in parent.parents:
             raise InstallError("Backup destination must be outside the capture sources")
-    with tempfile.TemporaryDirectory(prefix='.iris-backup-', dir=parent) as temporary:
+    if on_stage is not None:
+        # Do not expose an unbound new stage to this worker's inventory between
+        # mkdir and the durable callback. Only allocation/admission is locked;
+        # encryption remains observable and never blocks status for its duration.
+        from .managed_worker import CAPTURE_PROCESS_LOCK
+        with CAPTURE_PROCESS_LOCK:
+            workspace = tempfile.TemporaryDirectory(prefix='.iris-backup-', dir=parent)
+            try:
+                on_stage(Path(workspace.name))
+            except BaseException:
+                workspace.cleanup()
+                raise
+    else:
+        workspace = tempfile.TemporaryDirectory(prefix='.iris-backup-', dir=parent)
+    with workspace as temporary:
         stage = Path(temporary)
         encrypted = stage / 'payload.tar.age'
         records = []

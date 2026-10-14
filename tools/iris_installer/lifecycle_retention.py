@@ -58,6 +58,11 @@ class Retention:
                      'renew-transport': 'lifecycle-transport-operations'}.get(action)
         if directory is None:
             if action == 'backup':
+                capture = self.worker.state_dir / 'backup-captures' / (identifier(job['id']) + '.json')
+                if _exists(capture):
+                    operation = json.loads(regular_bytes(capture))
+                    return (operation.get('request_id') == job['id'] and operation.get('backup_id') == job.get('backup_id')
+                            and operation.get('phase') in ('settled-captured', 'settled-failed'))
                 path = self.worker.state_dir / 'backup-operation.json'
                 if _exists(path):
                     operation = json.loads(regular_bytes(path))
@@ -161,7 +166,9 @@ class Retention:
 
     def backup_inventory(self):
         from .upgrade_state import protected_backups
+        from .backup_capture import protected_stages
         upgrades, upgrading = protected_backups(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir)
+        stages = protected_stages(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir)
         found = set()
         protected = {}
         for kind, root in (('backup', self.worker.backup_dir), ('recovery', self.worker.recovery_dir)):
@@ -177,7 +184,14 @@ class Retention:
                     row = protected.setdefault(key, dict(public, deployment_archive=False, recovery_archive=False))
                     row[side] = True
                     continue
-                if (path.name.startswith(('.iris-backup-', '.iris-verify-', '.iris-restore-'))
+                if str(path) in stages:
+                    # This exact inode was committed before age received its
+                    # writable FD. It is not a captured/verified backup set.
+                    # Preserve it on interruption and never remove it here.
+                    continue
+                temporary_prefixes = ('.iris-verify-', '.iris-restore-') + (
+                    () if getattr(self.worker, 'managed_captures', False) else ('.iris-backup-',))
+                if (path.name.startswith(temporary_prefixes)
                         and (self.store.pending() or any(row.get('state') == 'running' for row in self.worker.jobs))):
                     # Product-owned temporary authentication/capture workspaces
                     # are not saved backup sets. Never delete them here.
@@ -189,13 +203,18 @@ class Retention:
                 found.add(path.name)
         if protected_backups(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir) != (upgrades, upgrading):
             raise InstallError('Application upgrade backup custody changed during storage observation')
+        if protected_stages(self.worker.state_dir, self.worker.backup_dir, self.worker.recovery_dir) != stages:
+            raise InstallError('Capture staging custody changed during storage observation')
         return found, [protected[key] for key in sorted(protected)], upgrading
 
     def status(self, request_id=None):
         pending = self.store.pending()
         physical, upgrades, upgrading = self.backup_inventory()
         jobs = []
-        busy = upgrading or bool(pending) or any(row.get('state') in ('running', 'recovery-required') for row in self.worker.jobs)
+        active = [row for row in self.worker.jobs if row.get('state') in ('running', 'recovery-required')]
+        busy = upgrading or bool(pending) or bool(active)
+        recoverable = (identifier(active[0]['id']) if not upgrading and not pending and len(active) == 1
+                       and active[0]['state'] == 'recovery-required' else None)
         for row in self.worker.jobs:
             allowed, reason = self.eligible(row)
             jobs.append({'id': row['id'], 'action': row['action'], 'state': row['state'],
@@ -227,7 +246,7 @@ class Retention:
                             'delete_reason': reason})
         revision = digest({'jobs': self.worker.jobs, 'backups': backups, 'pending': pending,
                            'protected_upgrade_backups': upgrades})
-        return {'schema': 1, 'revision': revision, 'busy': busy,
+        return {'schema': 1, 'revision': revision, 'busy': busy, 'recoverable_job_id': recoverable,
                 'capacity': {'history_used': len(self.worker.jobs), 'history_limit': 100,
                              'backup_used': len(physical), 'backup_limit': 20,
                              'protected_upgrade_used': len(upgrades)},

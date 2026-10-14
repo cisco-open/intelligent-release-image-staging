@@ -35,9 +35,18 @@ RECOVERY_ROOT = Path('/var/lib/iris-recovery')
 RECOVERY_ACCESS_ROOT = Path('/var/lib/iris-worker-recovery')
 RECORD = 'worker-service.json'
 PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+# Read-only storage/inventory probes may spawn subprocesses in this same unit.
+# Serialize their birth with capture's cgroup census, not with the entire job:
+# status remains available while the capture/recovery action runs.
+CAPTURE_PROCESS_LOCK = threading.RLock()
 
 
 def command(argv, *, timeout=120):
+    with CAPTURE_PROCESS_LOCK:
+        return _command(argv, timeout=timeout)
+
+
+def _command(argv, *, timeout=120):
     try:
         result = subprocess.run(argv, env={'PATH': PATH, 'LANG': 'C.UTF-8'},
                                 stdin=subprocess.DEVNULL, capture_output=True,
@@ -709,9 +718,20 @@ def serve_managed(args):
     original = lifecycle_worker.Worker
 
     class ManagedWorker(original):
+        managed_captures = True
+
         def submit(self, request):
-            check_storage(state, record)
+            with CAPTURE_PROCESS_LOCK:
+                check_storage(state, record)
             return super().submit(request)
+
+        def deployment_info(self):
+            with CAPTURE_PROCESS_LOCK:
+                return super().deployment_info()
+
+        def transport_status(self):
+            with CAPTURE_PROCESS_LOCK:
+                return super().transport_status()
 
         def submit_transport(self, request):
             # Transport recovery remains available even when backup disks are
@@ -719,12 +739,13 @@ def serve_managed(args):
             return super().submit_transport(request)
 
         def status(self, retention_request_id=None):
-            result = super().status(retention_request_id)
-            ready = True
-            try:
-                check_storage(state, record)
-            except (InstallError, OSError, ValueError):
-                ready = False
+            with CAPTURE_PROCESS_LOCK:
+                result = super().status(retention_request_id)
+                ready = True
+                try:
+                    check_storage(state, record)
+                except (InstallError, OSError, ValueError):
+                    ready = False
             result['managed_service'] = {'managed': True, 'storage_ready': ready,
                                          'custody': record['storage_layout'],
                                          'off_host_protection': 'not-proven'}

@@ -107,11 +107,13 @@ if shutil.which('docker'):
 # One fixed program, with a bounded JSON request on stdin. Neither credentials
 # nor caller-supplied commands are interpolated into the remote shell command.
 REMOTE_PROGRAM = r'''
-import base64, hashlib, json, os, pathlib, platform, stat, subprocess, sys, tempfile
+import base64, fcntl, hashlib, json, os, pathlib, platform, re, stat, subprocess, sys, tempfile
 r=json.loads(sys.stdin.buffer.read(8*1024*1024+1))
 root=pathlib.Path(r['root']); identity=r['identity']; project=r['project']
+capture_lock=None
 def run(args, data=None):
- p=subprocess.run(args,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+ p=subprocess.run(args,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False,
+                  pass_fds=(capture_lock,) if capture_lock is not None else ())
  if p.returncode: raise RuntimeError('Remote operation failed: '+args[0])
  return p.stdout
 def check_path(path):
@@ -133,6 +135,15 @@ if r['action']=='claim':
 elif r['action']!='ownership' or root.exists():
  if not marker.is_file() or marker.is_symlink() or json.loads(marker.read_bytes())!={'instance_id':identity,'project':project}:
   raise RuntimeError('Console ownership could not be verified')
+if 'capture_id' in r:
+ if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',r['capture_id']):
+  raise RuntimeError('Invalid capture authority')
+ capture_lock=os.open(root/'.backup-capture.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+ info=os.fstat(capture_lock)
+ if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600:
+  raise RuntimeError('Unsafe remote capture lock')
+ try: fcntl.flock(capture_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError: raise RuntimeError('An earlier remote capture command is still active')
 def owned():
  for kind in ('container','volume','network'):
   args=['docker',kind,'ls','-q']+(['-a'] if kind=='container' else [])
@@ -307,6 +318,9 @@ class SplitDockerInstall(DockerInstall):
             raise InstallError('Pinned SSH transport custody changed; remote operation refused')
         payload = dict(action=action, root=self.config['console_state_dir'],
                        identity=self.journal.document['id'], project=self.config['instance'], **values)
+        capture_id = getattr(self, 'backup_capture_id', None)
+        if capture_id is not None:
+            payload['capture_id'] = capture_id
         if action == 'provision':
             payload['prebuilt'] = self.prebuilt()
         command = 'sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive python3 -I -B -c ' + shlex.quote(REMOTE_PROGRAM)
@@ -381,6 +395,37 @@ class SplitDockerInstall(DockerInstall):
 
     def remote_container(self):
         return json.loads(self.remote('container', image=self.journal.document['completed']['console-image']))
+
+    def capture_recovery_authority(self, containers, volumes):
+        return {'transport': self.transport_fingerprints()}
+
+    def capture_recovery_inventory(self, authority):
+        if authority != {'transport': self.transport_fingerprints()}:
+            raise InstallError('Original split capture transport changed')
+        from .backup import docker_capture_plan
+        _sources, volumes, containers = docker_capture_plan(self, services=('iris',))
+        # Every remote operation takes the same inherited lock. A surviving
+        # old SSH-side Python/docker command cannot overlap this read/restart.
+        containers.insert(0, self.remote_container())
+        return volumes, containers
+
+    def capture_recovery_health(self, container):
+        if container.get('remote'):
+            self.verify_console_management()
+        else:
+            # This branch is only health observation; do not restart a running
+            # container via compose or change its accepted incarnation.
+            import time
+            deadline = time.monotonic() + 180
+            while True:
+                record, = json.loads(self.command(['docker', 'container', 'inspect', container['id']], capture=True))
+                if record['Id'] != container['id'] or not record['State']['Running']:
+                    raise InstallError('Original split server did not resume')
+                if record['State'].get('Health', {}).get('Status', 'healthy') == 'healthy':
+                    return
+                if time.monotonic() >= deadline:
+                    raise InstallError('Original split server did not become healthy')
+                time.sleep(1)
 
     def stop_writers(self, containers, *, recovering_clean_operation=False):
         for container in containers:

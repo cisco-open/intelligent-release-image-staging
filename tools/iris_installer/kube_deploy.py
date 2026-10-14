@@ -1134,7 +1134,7 @@ print(json.dumps(proof))
     def restart_writer(self, container):
         self.maintenance_close()
         service = container["service"]
-        self.scale(service, 1 if service == "iris" else self.config["kube_console_replicas"])
+        self.scale(service, container.get('replicas', 1 if service == "iris" else self.config["kube_console_replicas"]))
         self.kube("rollout", "status", "deployment/" + SERVICES[service], "--timeout=300s", timeout=330)
 
     def seeder_maintenance_start(self, operation_id):
@@ -1209,9 +1209,73 @@ print(json.dumps(proof))
         containers = []
         for service in ("console", "iris"):
             current = self.get("deployment", SERVICES[service])
-            containers.append({"id": current["metadata"]["uid"], "service": service, "running": current["spec"].get("replicas", 0) > 0})
+            containers.append({"id": current["metadata"]["uid"], "service": service,
+                               "replicas": current["spec"].get("replicas", 0),
+                               "running": current["spec"].get("replicas", 0) > 0})
         pvc = self.get("persistentvolumeclaim", "iris-data")
         return sources, {"iris-data": pvc["metadata"]["uid"]}, containers
+
+    def capture_recovery_authority(self, containers, volumes):
+        isolation = self._object('NetworkPolicy', 'iris-maintenance-isolation', spec={
+            'podSelector': {'matchLabels': {LABEL: self.journal.document['id'], 'iris.cisco.com/maintenance': 'true'}},
+            'policyTypes': ['Ingress', 'Egress'], 'ingress': [], 'egress': []})
+        manifests = {}
+        for resource in self.manifests():
+            key = resource['kind'] + '/' + resource['metadata']['name']
+            if key == 'NetworkPolicy/iris-maintenance-isolation':
+                if resource != isolation:
+                    raise InstallError('Maintenance isolation differs from owned capture policy')
+                continue
+            manifests[key] = self._capture_resource_digest(resource)
+        return {'resources': {key: value['uid'] for key, value in
+                              self.journal.document['completed']['kube-resources'].items()
+                              if key != 'NetworkPolicy/iris-maintenance-isolation'}, 'manifests': manifests}
+
+    @staticmethod
+    def _capture_resource_digest(resource):
+        resource = copy.deepcopy(resource)
+        if resource['kind'] == 'Deployment' and resource['metadata']['name'] in SERVICES.values():
+            resource['spec'].pop('replicas', None)
+            annotations = resource['metadata'].get('annotations', {})
+            annotations.pop(INTENT, None)
+            if not annotations:
+                resource['metadata'].pop('annotations', None)
+        return hashlib.sha256(_canonical(resource)).hexdigest()
+
+    def capture_recovery_inventory(self, authority):
+        pending = self.base / 'kube-update.json'
+        if pending.exists() or pending.is_symlink():
+            update = json.loads(regular_bytes(pending, 8 * 1024 * 1024))
+            for name in ('before', 'after'):
+                resource = copy.deepcopy(update[name])
+                key = resource['kind'] + '/' + resource['metadata']['name']
+                if resource['kind'] != 'Deployment' or resource['metadata']['name'] not in SERVICES.values():
+                    raise InstallError('Pending Kubernetes change is not this capture stop/start')
+                if self._capture_resource_digest(resource) != authority['manifests'].get(key):
+                    raise InstallError('Pending Kubernetes change differs from original capture authority')
+        self._recover_object_update()
+        self.verify_inputs()
+        self.pin_runtime()
+        if self.capture_recovery_authority([], {}) != authority:
+            raise InstallError('Kubernetes capture ownership or deployment specification changed')
+        containers = []
+        for service in ('console', 'iris'):
+            current = self.get('deployment', SERVICES[service])
+            replicas = current['spec'].get('replicas', 0)
+            containers.append({'id': current['metadata']['uid'], 'service': service,
+                               'replicas': replicas, 'running': replicas > 0})
+        pvc = self.get('persistentvolumeclaim', 'iris-data')
+        return {'iris-data': pvc['metadata']['uid']}, containers
+
+    def capture_recovery_health(self, container):
+        current = self.get('deployment', SERVICES[container['service']])
+        if (current['metadata']['uid'] != container['id']
+                or current['spec'].get('replicas', 0) != container['replicas']):
+            raise InstallError('Original Kubernetes replica state changed')
+        self.maintenance_close()
+        self.kube('rollout', 'status', 'deployment/' + SERVICES[container['service']], '--timeout=300s', timeout=330)
+        if container['service'] == 'console':
+            self.lifecycle_consumer_proof()
 
     def capture_backup_extras(self, sources):
         from .topology_lifecycle import snapshot_tree
