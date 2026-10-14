@@ -132,6 +132,28 @@ def test_release_checklist_uses_the_matching_client_for_each_architecture():
     assert "same pinned aria2c binary" not in checklist
 
 
+def test_prebuilt_release_docs_separate_independent_input_validation_authentication_and_publication():
+    installer = " ".join((ROOT / "docs/dev/installer.md").read_text().split())
+    checklist = " ".join((ROOT / "docs/dev/release-checklist.md").read_text().split())
+    assert "tools/hosted-prebuilt-stage.py" in installer
+    assert "complete candidate/source validator before attestation" in installer
+    assert "artifact API binds the run and ZIP digest" in installer
+    assert "selected attempt must also match the unsigned stage record" in installer
+    assert "keyring from the operating system, rather than the incoming artifact" in installer
+    for page in (installer, checklist):
+        assert "local-to-Actions uploader is still pending" in page
+        assert "Source-only tag builds remain available" in page or "source-only tag builds remain available" in page
+        assert "exact release tag" in page
+        assert "authenticate <tag> <candidate-evidence SHA256>" in page
+        assert "prepared-host" in page and "ubuntu-dependencies" in page
+    assert "Neither source-review authority nor validation roots come from the ZIP" in checklist
+    assert "does not qualify or publish it" in checklist
+    assert "iris-release-qualification-v2" in checklist
+    for retired in ("Prebuilt authentication still needs", "prebuilt upload and authentication require",
+                    "Release preparation refuses the new prebuilt assets"):
+        assert retired not in installer + checklist
+
+
 def test_manual_server_build_requires_emulation_before_iox_registration():
     start = (ROOT / "tools/start-compose-server.sh").read_text()
     stage = (ROOT / "tools/stage-iox-package.sh").read_text()

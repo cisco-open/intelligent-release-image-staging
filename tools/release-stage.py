@@ -164,7 +164,8 @@ def _api(endpoint, token):
     return _json(output.getvalue())
 
 
-def _hosted_identity(selected, token):
+def _hosted_identity(selected, token, profile="source-only"):
+    _profile(profile)
     run = _api(f"/actions/runs/{selected['run_id']}/attempts/{selected['run_attempt']}", token)
     workflow_path = ".github/workflows/release.yml"
     paths = (workflow_path, workflow_path + "@" + selected["tag"],
@@ -173,9 +174,17 @@ def _hosted_identity(selected, token):
             or run["id"] != selected["run_id"] or type(run.get("run_attempt")) is not int
             or run["run_attempt"] != selected["run_attempt"]
             or run.get("path") not in paths
-            or run.get("head_sha") != selected["commit"] or run.get("event") != "push"
+            or run.get("head_sha") != selected["commit"]
+            or run.get("event") != ("push" if profile == "source-only" else "workflow_dispatch")
             or run.get("status") != "completed" or run.get("conclusion") != "success"):
-        fail("selected run attempt is not the successful tag authentication workflow")
+        fail("selected run attempt is not the successful profile-specific tag authentication workflow")
+    if profile != "source-only":
+        # API head_branch is only an additional consistency check, not proof
+        # of a tag rather than a same-named branch. Current peeled-tag checks
+        # and every asset's attestation source-ref still establish that boundary.
+        if run.get("head_branch") not in (selected["tag"], "refs/tags/" + selected["tag"]):
+            fail("prebuilt authentication run does not name the selected tag")
+        _current_tag(selected, token)
     repository = run.get("repository")
     head_repository = run.get("head_repository")
     if (not isinstance(repository, dict) or not isinstance(head_repository, dict)
@@ -355,11 +364,13 @@ def _same(actual, expected, message):
         fail(message)
 
 
-def _prebuilt_metadata(directory, files, selected, profile):
-    """Join authenticated exporter records, without repeating source validation.
+def _prebuilt_metadata(directory, files, selected, profile, *, require_incoming=True, unsigned=False):
+    """Join exporter records, without replacing complete source validation.
 
-    Every input has already passed the fixed tag-workflow signature boundary.
-    These checks bind its technical report and externally supplied statement;
+    Acquisition uses this only after the fixed tag-workflow signature boundary.
+    The trusted hosted producer also uses the explicitly unsigned form before
+    repeating the existing complete candidate validator. Neither use infers trust
+    from an unsigned record. These checks bind the externally supplied statement;
     neither a signature nor this join authenticates the original reviewer or
     proves source sufficiency, lab results, or binary reproduction.
     """
@@ -431,8 +442,12 @@ def _prebuilt_metadata(directory, files, selected, profile):
     delivery_names = {"release-auth.py", "aria2c-x86_64", "aria2c-aarch64", "MANIFEST.txt", "aria2c.sha256",
                       "iris.tgz.sha256", refs["aria2"]["asset"] + ".sha256"}
     payload_names = completed_names | {completion.MANIFEST} | delivery_names
-    if set(files) != payload_names | {gate.REVIEW_NAME, gate.PREPARATION_NAME, gate.STAGE_NAME,
-                                     "release.json", "SHA256SUMS", "attestations.jsonl"}:
+    metadata_names = {gate.REVIEW_NAME, gate.PREPARATION_NAME, gate.STAGE_NAME, "release.json", "SHA256SUMS"}
+    if not unsigned:
+        metadata_names.add("attestations.jsonl")
+    if require_incoming:
+        metadata_names.add("prebuilt-incoming.json")
+    if set(files) != payload_names | metadata_names:
         fail("prebuilt stage contains missing or unsupported assets")
     payload = {name: files[name] for name in payload_names}
     preparation = metadata(gate.PREPARATION_NAME)
@@ -461,6 +476,32 @@ def _prebuilt_metadata(directory, files, selected, profile):
     _same(preparation["review_attribution"], {"reviewer": review["reviewer"], "reference": review["reference"],
           "authority": "Externally supplied statement; this helper checks binding, not reviewer identity or approval authority."},
           "prebuilt review attribution differs")
+    if require_incoming:
+        incoming = metadata("prebuilt-incoming.json")
+        _keys(incoming, {"schema", "repository", "tag", "commit", "profile", "incoming", "hosted_run",
+                         "candidate_evidence_sha256", "source_review_sha256", "external_pins",
+                         "review_authority_verified", "payloads_rebuilt"})
+        expected = {"schema": "iris-hosted-prebuilt-input-v1", "repository": REPOSITORY,
+                    **identity, "profile": profile,
+                    "hosted_run": {key: selected[key] for key in ("run_id", "run_attempt")},
+                    "candidate_evidence_sha256": files[completion.MANIFEST]["sha256"],
+                    "source_review_sha256": files[gate.REVIEW_NAME]["sha256"],
+                    "external_pins": evidence["external_pins"],
+                    "review_authority_verified": False, "payloads_rebuilt": False}
+        _same({key: incoming[key] for key in expected}, expected, "hosted prebuilt input binding differs")
+        origin = incoming["incoming"]
+        _keys(origin, {"run_id", "run_attempt", "workflow", "event", "repository_id", "artifact_id",
+                       "artifact_name", "artifact_sha256", "artifact_size"})
+        for key in ("run_id", "run_attempt", "repository_id", "artifact_id"):
+            _positive(origin[key])
+        kit._sha(origin["artifact_sha256"])
+        if (not isinstance(origin["workflow"], str)
+                or not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml(?:@[^\s]+)?", origin["workflow"])
+                or origin["event"] not in ("push", "workflow_dispatch")
+                or not isinstance(origin["artifact_name"], str)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", origin["artifact_name"])
+                or type(origin["artifact_size"]) is not int or not 0 < origin["artifact_size"] <= MAX_TOTAL):
+            fail("hosted prebuilt origin receipt differs")
     sidecar = metadata(package + ".source.json")
     _keys(sidecar, {"schema", "commit", "files"})
     if type(sidecar["schema"]) is not int or sidecar["schema"] != 1 or sidecar["commit"] != selected["commit"]:
@@ -700,7 +741,7 @@ def _publication(destination):
 
 
 def _acquire(selected, stage, parent_fd, token, profile="source-only"):
-    expected_size = _hosted_identity(selected, token)
+    expected_size = _hosted_identity(selected, token, profile)
     archive, assets, config = stage / "stage.zip", stage / "assets", stage / "verifier-config"
     assets.mkdir(mode=0o700)
     config.mkdir(mode=0o700)

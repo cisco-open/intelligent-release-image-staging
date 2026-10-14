@@ -8,6 +8,51 @@ on:
   push:
     tags:
       - 'v20*'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Explicit prebuilt profile; run this workflow on its exact release tag
+        required: true
+        type: choice
+        options:
+          - prepared-host
+          - ubuntu-dependencies
+      incoming_run_id:
+        description: Successful same-repository run that holds the reviewed unsigned preparation
+        required: true
+        type: string
+      incoming_run_attempt:
+        description: Exact incoming run attempt
+        required: true
+        type: string
+      artifact_id:
+        description: Immutable incoming artifact ID
+        required: true
+        type: string
+      artifact_sha256:
+        description: Independently selected raw ZIP SHA256
+        required: true
+        type: string
+      evidence_sha256:
+        description: Independently selected completed candidate evidence SHA256
+        required: true
+        type: string
+      review_sha256:
+        description: Independently approved source review statement SHA256
+        required: true
+        type: string
+      keyring_sha256:
+        description: Independently trusted Debian archive keyring SHA256
+        required: true
+        type: string
+      pip_sdist_sha256:
+        description: Independently reviewed pip source archive SHA256
+        required: true
+        type: string
+      confirmation:
+        description: "authenticate <tag> <candidate-evidence SHA256>"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,17 +63,19 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'cisco-open/intelligent-release-image-staging'
+    if: github.repository == 'cisco-open/intelligent-release-image-staging' && startsWith(github.ref, 'refs/tags/v20')
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.ref_name }}
       RELEASE_COMMIT: ${{ github.sha }}
+      RELEASE_PROFILE: ${{ github.event_name == 'push' && 'source-only' || inputs.profile }}
     steps:
       - name: Check out the tagged source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -36,6 +83,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Check tag and prepare artifacts
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
@@ -51,6 +99,37 @@ jobs:
             --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
           python3 tools/release-auth.py prepare --out release-assets --tag "$RELEASE_TAG"
+          (cd release-assets && sha256sum --check SHA256SUMS && sha256sum --check aria2c.sha256)
+      - name: Revalidate the exact reviewed prebuilt preparation
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INCOMING_RUN_ID: ${{ inputs.incoming_run_id }}
+          INCOMING_RUN_ATTEMPT: ${{ inputs.incoming_run_attempt }}
+          INCOMING_ARTIFACT_ID: ${{ inputs.artifact_id }}
+          INCOMING_ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+          CANDIDATE_EVIDENCE_SHA256: ${{ inputs.evidence_sha256 }}
+          SOURCE_REVIEW_SHA256: ${{ inputs.review_sha256 }}
+          DEBIAN_KEYRING_SHA256: ${{ inputs.keyring_sha256 }}
+          PIP_SDIST_SHA256: ${{ inputs.pip_sdist_sha256 }}
+          AUTHENTICATION_CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v$(cat VERSION)"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y debian-archive-keyring
+          python3 tools/hosted-prebuilt-stage.py --repository "$GITHUB_WORKSPACE" \
+            --output-dir "$GITHUB_WORKSPACE/release-assets" \
+            --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT" --ref "$GITHUB_REF" \
+            --profile "$RELEASE_PROFILE" \
+            --incoming-run-id "$INCOMING_RUN_ID" --incoming-run-attempt "$INCOMING_RUN_ATTEMPT" \
+            --artifact-id "$INCOMING_ARTIFACT_ID" --artifact-sha256 "$INCOMING_ARTIFACT_SHA256" \
+            --evidence-sha256 "$CANDIDATE_EVIDENCE_SHA256" --review-sha256 "$SOURCE_REVIEW_SHA256" \
+            --debian-keyring /usr/share/keyrings/debian-archive-keyring.gpg \
+            --keyring-sha256 "$DEBIAN_KEYRING_SHA256" --pip-sdist-sha256 "$PIP_SDIST_SHA256" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --confirmation "$AUTHENTICATION_CONFIRMATION"
           (cd release-assets && sha256sum --check SHA256SUMS && sha256sum --check aria2c.sha256)
       - name: Attest every staged asset
         id: attest

@@ -274,10 +274,10 @@ request. Resume reuses that generation and keeps the original caches. A complete
 successor can be restored from its own backup without earlier cache directories.
 Before publication completes, recovery still requires the exact predecessor caches.
 
-The current publication workflow supplies source-build artifacts. Complete kit
-publication and offline topology qualification remain release gates. A local
-candidate does not prove publisher authentication or native Cisco signature acceptance.
-Release preparation refuses the new prebuilt assets until those gates are connected.
+The hosted authentication workflow supports source-build artifacts and explicitly
+selected prebuilt profiles. Complete kit publication and offline topology
+qualification remain separate release gates. A local candidate does not prove
+publisher authentication or native Cisco signature acceptance.
 
 ## Assemble a local candidate
 
@@ -447,9 +447,30 @@ It checks the original source manifest rather than replacing it.
 
 These inputs remain unsigned until the authorized hosted workflow authenticates
 them. The helper checks the review's file bindings, not the reviewer's authority.
-The tag workflow still authenticates source-only builds; prebuilt upload and
-authentication require their separately approved integration. The manual
-publisher accepts an explicit profile and its matching qualification record.
+The hosted consumer requires the complete unsigned output in an immutable
+artifact of a completed, reviewed workflow in the public repository.
+The local-to-Actions uploader is still pending; this consumer alone is not a
+complete prebuilt release procedure. Source-only tag builds remain available.
+For an existing input artifact, independently record its run,
+attempt, artifact ID and raw ZIP SHA-256. The artifact API binds the run and
+ZIP digest; the selected attempt must also match the unsigned stage record.
+
+An authorized contributor can run `.github/workflows/release.yml` manually on
+the exact release tag. Select `prepared-host` or `ubuntu-dependencies`, supply
+those incoming identities, and independently select the candidate-evidence,
+source-review, Debian keyring and pip source hashes. The confirmation is
+`authenticate <tag> <candidate-evidence SHA256>`. The runner obtains its Debian
+keyring from the operating system, rather than the incoming artifact, and must
+match the selected keyring hash.
+
+`tools/hosted-prebuilt-stage.py` invokes the complete candidate/source validator
+before attestation. It preserves payloads, source companions and the review;
+only the preparation and inventory context advances to the current hosted run.
+`prebuilt-incoming.json` retains the incoming artifact selection and validation
+pins. The workflow attests and exports the resulting stage without publishing.
+Tag pushes retain the source-only route. Qualification and the manual publisher
+still require the explicit profile and matching review record. See the
+[release checklist](release-checklist.md) for acquisition and publication.
 
 ## Bootstrap the installer offline
 

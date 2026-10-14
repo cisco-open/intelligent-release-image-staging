@@ -24,9 +24,9 @@ also binds the files to that workflow run and attempt.
 
 The tag workflow exports `iris-authenticated-<run-id>-<attempt>` and stops.
 It does not publish a release. Its permissions are repository `contents: read`,
-`attestations: write` and GitHub OIDC `id-token: write`. This workflow currently
-authenticates source-only builds. Prebuilt authentication still needs its
-approved candidate-input integration.
+`actions: read`, `attestations: write` and GitHub OIDC `id-token: write`.
+Tag pushes authenticate source-only builds. A manual run on the exact tag can
+authenticate an explicitly selected prebuilt profile as described below.
 
 Download and verify the exact stage for qualification using the reviewed local
 `tools/release-stage.py acquire` helper. Supply the tag, full commit, run ID,
@@ -41,12 +41,32 @@ The `iris-release-qualification-v1` JSON record binds each passed check's eviden
 hash to the stage, every asset and the reviewer. It is a reviewer's statement,
 not a claim that the publication helper ran those tests.
 
-For the separately prepared prebuilt route, the local helper accepts an explicit
-`--profile prepared-host` or `--profile ubuntu-dependencies`. Publication requires a
+For prebuilt inputs, first complete the source companions and independently
+approved review, then [prepare the unsigned output](installer.md#prepare-prebuilt-authentication-inputs).
+The hosted consumer requires an immutable artifact from a completed
+same-repository workflow. The local-to-Actions uploader is still pending;
+prebuilt intake is an implementation gate, while source-only tag builds remain
+available. For an existing input artifact, record the following selections.
+Independently record its run, attempt, artifact ID and raw ZIP SHA-256, plus the
+candidate-evidence, review, Debian keyring and pip source hashes. Artifact API
+metadata binds the run and digest; its unsigned stage record binds the selected
+attempt. Neither source-review authority nor validation roots come from the ZIP.
+
+Run `release.yml` manually on the exact release tag, select `prepared-host` or
+`ubuntu-dependencies`, and supply those identities and hashes. Confirm
+`authenticate <tag> <candidate-evidence SHA256>`. The hosted helper rechecks the
+complete candidate, shipped Git source, source companions and independently
+supplied validation pins before attestation. It preserves the approved payloads
+and review and records both incoming and current hosted context. This step
+authenticates the output; it does not qualify or publish it.
+
+Acquire the new authenticated run using `tools/release-stage.py acquire` and an
+explicit `--profile prepared-host` or `--profile ubuntu-dependencies`.
+Publication requires a
 `iris-release-qualification-v2` record that also binds the kit, image identities,
 source review and preparation evidence. The source-review check must name the
-exact staged review file's hash. Selecting a prebuilt profile does not upload
-or authenticate its inputs; those steps must already be complete.
+exact staged review file's hash. Selecting a profile during acquisition or
+publication does not authenticate previously unsigned inputs.
 
 An authorized repository contributor can then manually run
 `.github/workflows/publish-release.yml` from `main`. Select the matching profile;

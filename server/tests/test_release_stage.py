@@ -142,6 +142,10 @@ def rebind_prebuilt(stage, files):
     files["source-review.json"] = STAGE._canonical(review)
     prep["source_review_sha256"] = sha(files["source-review.json"])
     files["prebuilt-preparation.json"] = STAGE._canonical(prep)
+    incoming = json.loads(files['prebuilt-incoming.json'])
+    incoming.update(candidate_evidence_sha256=sha(files['candidate-evidence.json']),
+                    source_review_sha256=sha(files['source-review.json']), external_pins=evidence['external_pins'])
+    files['prebuilt-incoming.json'] = STAGE._canonical(incoming)
     seal_prebuilt(stage, files)
 
 
@@ -264,9 +268,20 @@ def prebuilt(stage, request, tmp_path, monkeypatch):
         source_review=review_path, expected_review_sha256=sha(review_raw),
         stage_record=record_path, expected_stage_sha256=sha(record_raw))
     files = {path.name: path.read_bytes() for path in output.parent.iterdir()}
+    files['prebuilt-incoming.json'] = STAGE._canonical({
+        'schema': 'iris-hosted-prebuilt-input-v1', 'repository': STAGE.REPOSITORY,
+        'tag': TAG, 'commit': COMMIT, 'profile': profile,
+        'hosted_run': {'run_id': 31, 'run_attempt': 2},
+        'candidate_evidence_sha256': checked.evidence_sha256,
+        'source_review_sha256': sha(review_raw), 'external_pins': evidence['external_pins'],
+        'incoming': {'run_id': 19, 'run_attempt': 1, 'workflow': '.github/workflows/preparation.yml',
+                     'event': 'workflow_dispatch', 'repository_id': 91, 'artifact_id': 23,
+                     'artifact_name': 'unsigned-fixture', 'artifact_sha256': 'a' * 64, 'artifact_size': 123},
+        'review_authority_verified': False, 'payloads_rebuilt': False})
     files["attestations.jsonl"] = b"Fixture signatures mocked; not hosted authentication\n"
-    replace_files(stage, files)
+    seal_prebuilt(stage, files)
     stage["profile"] = profile
+    stage['run'].update(event='workflow_dispatch', head_branch=TAG)
     stage["package"] = package
     # Acquisition must never invoke these expensive source-validation seams.
     def forbidden(*args, **kwargs):
@@ -308,6 +323,30 @@ def test_actual_prebuilt_gate_writer_acquires_both_profiles(prebuilt):
     signatures = [value for value in prebuilt["calls"] if isinstance(value, str)]
     assert signatures[0] == "release.json"
     assert set(signatures) == set(prebuilt["files"]) - {"attestations.jsonl"}
+
+
+@pytest.mark.parametrize('change', [
+    {'event': 'push'}, {'event': 'pull_request'}, {'head_branch': 'main'},
+    {'head_branch': None}, {'path': '.github/workflows/release.yml@refs/heads/v2026.10.09'}])
+def test_prebuilt_requires_exact_tag_dispatch_not_source_push_or_branch(prebuilt, change):
+    prebuilt['run'].update(change)
+    with pytest.raises(STAGE.InstallError):
+        STAGE.acquire_stage(prebuilt['selected'], prebuilt['output'], profile=prebuilt['profile'])
+    assert not prebuilt['output'].exists()
+
+
+@pytest.mark.parametrize('field,value', [
+    ('profile', 'source-only'), ('review_authority_verified', True), ('payloads_rebuilt', True),
+    ('hosted_run', {'run_id': 31, 'run_attempt': 3}),
+    ('source_review_sha256', '0' * 64), ('candidate_evidence_sha256', '0' * 64)])
+def test_prebuilt_incoming_binding_refuses_changed_authority_or_context(prebuilt, field, value):
+    files = dict(prebuilt['files'])
+    incoming = json.loads(files['prebuilt-incoming.json']); incoming[field] = value
+    files['prebuilt-incoming.json'] = STAGE._canonical(incoming)
+    seal_prebuilt(prebuilt, files)
+    with pytest.raises(STAGE.InstallError, match='hosted prebuilt input binding'):
+        STAGE.acquire_stage(prebuilt['selected'], prebuilt['output'], profile=prebuilt['profile'])
+    assert not prebuilt['output'].exists()
 
 
 def test_prebuilt_qualification_binds_exact_writer_output_without_publishing(prebuilt):
