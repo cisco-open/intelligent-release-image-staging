@@ -25,6 +25,9 @@ The worker checks the original job and restarts its recorded services. It marks
 the backup captured only when both completed archives pass authentication;
 otherwise it marks the attempt failed and keeps incomplete files for inspection.
 Start a new backup after recovery if needed.
+If capture stopped before it could change services, recovery closes that failed
+attempt without restarting anything. Missing or changed recovery records require
+inspection; keep the original records and files in place.
 If the worker restarts during verification or isolated extraction, that attempt
 is marked failed. Start a new request after reviewing the result. Partial
 extraction files remain private on the host; they are not verified recovery data.

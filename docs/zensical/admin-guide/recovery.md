@@ -29,6 +29,9 @@ the saved operation record. An accepted request is not proof of completion.
 For an interrupted backup, recovery restarts the original services and checks
 whether both archives completed. It keeps incomplete output and never starts
 another capture. Review the result before requesting a new backup.
+If the attempt stopped before service changes began, recovery closes it as
+failed without restarting services. Missing or changed recovery records require
+inspection; keep the original records and files in place.
 
 The installer manages the worker as a host service outside the containers or pods.
 If it is unavailable, check `irisctl worker-status` and use
@@ -266,7 +269,7 @@ for Force. Both are described in [Console API](../reference/console-api.md).
 | Renewed certificate must extend the existing expiry | Check the file returned by the key holder; an older approval cannot replace a newer certificate. |
 | Lifecycle worker unavailable | Check the worker on the installer host and its dedicated control mount. See [Back up and restore](backups.md#console-backup-controls). |
 | Backup refused for storage sharing, space or an unclean stop | Correct the reported host condition before retrying. Check that the original services recovered. |
-| `recovery-required` | Preserve `backup-operation.json` and `lifecycle-jobs.json` in the installer's private state directory. Review service state and unfinished files with the deployment maintainer; clearing the record does not repair an interrupted capture. |
+| `recovery-required` | Use the recovery action beside the original operation in the Console, or the [host recovery command](#recover-a-deployment-rotation-while-the-console-is-stopped) if it is offline. If recovery refuses changed or missing records, keep the private state and unfinished files for inspection. |
 | Backup signature rejected | Compare the signer with the independently recorded public key. Do not replace trusted signer material with a key supplied beside an unverified archive. |
 | `verified-isolated-files` | File extraction passed. Keep the target isolated until former-primary fencing, instruction history and revocations have been reconciled. |
 
