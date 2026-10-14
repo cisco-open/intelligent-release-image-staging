@@ -137,6 +137,15 @@ with the original job and backup IDs. Only a persisted false
 `restore_authority_started` marker permits recovery before the restore record
 was created; missing or damaged started authority remains fenced. That early
 recovery repeats archive authentication before it can stop services or replace data.
+Archive authentication passes two anonymous, mode-0600 public metadata files to
+OpenSSH through inherited descriptors and `/proc/self/fd`. Its POSIX temporary-file
+fallback unlinks the files before use and never uses saved-backup storage.
+Verification and restore preflight stream decryption without creating a directory.
+An interrupted worker therefore leaves no authentication or verification workspace
+in archive inventory. Actual extraction retains its private sibling stage and
+publishes only after signature, ciphertext and file-inventory checks pass.
+Unknown files left by older attempts remain unadopted and block archive mutations;
+read-only history and the appropriate recovery controls remain available.
 The managed worker keeps its Python runtime separate from the deployment source.
 Restore loads distribution-access validation from the verified live source, not
 from the backup. Test this layout in an isolated Python process so checkout

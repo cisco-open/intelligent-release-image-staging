@@ -31,6 +31,9 @@ inspection; keep the original records and files in place.
 If the worker restarts during verification or isolated extraction, that attempt
 is marked failed. Start a new request after reviewing the result. Partial
 extraction files remain private on the host; they are not verified recovery data.
+Verification and initial restore checks leave no temporary output in saved-backup
+storage. A worker restart during those checks does not require temporary-file
+cleanup before another maintenance request.
 If retained files prevent a complete saved-backup inventory, history remains
 available, including controls for jobs marked `recovery-required`. Saved-backup counts are unavailable;
 new captures, new restores and archive cleanup stay blocked. Verification and

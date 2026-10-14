@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Leave no temporary archive output during backup verification or initial restore
+  checks, so a worker restart does not block later maintenance. Keep real
+  extraction staging private and preserve older unrecognized files.
 - Keep backup history and recovery controls visible when saved backup storage
   cannot be fully listed. Show unavailable counts and block archive changes.
 - Name the interrupted maintenance action in its recovery message and explain
