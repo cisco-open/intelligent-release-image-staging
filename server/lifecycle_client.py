@@ -67,6 +67,7 @@ def call(request):
               'rotate': {'action', 'request_id', 'family', 'allow_downtime'},
               'recover-rotation': {'action', 'request_id', 'family', 'allow_downtime'},
               'backup': {'action', 'request_id', 'allow_downtime'},
+              'recover-backup': {'action', 'request_id', 'backup_id', 'allow_downtime'},
               'restore': {'action', 'request_id', 'backup_id', 'allow_downtime', 'confirm_restore'},
               'recover-restore': {'action', 'request_id', 'backup_id', 'allow_downtime', 'confirm_restore'},
               'verify': {'action', 'request_id', 'backup_id'}, 'extract': {'action', 'request_id', 'backup_id'}}
@@ -75,14 +76,14 @@ def call(request):
     if action not in ('status', 'rotation-status', 'deployment-info') and (not isinstance(request['request_id'], str)
             or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['request_id'])):
         raise ValueError('Provide a bounded maintenance request ID')
-    if action in ('backup', 'rotate', 'recover-rotation') and request['allow_downtime'] is not True:
+    if action in ('backup', 'recover-backup', 'rotate', 'recover-rotation') and request['allow_downtime'] is not True:
         raise ValueError('Confirm IRIS downtime before capture')
     if action in ('restore', 'recover-restore') and (request['allow_downtime'] is not True
             or request['confirm_restore'] is not True):
         raise ValueError('Confirm deployment replacement and IRIS downtime before restoring')
     if action in ('rotate', 'recover-rotation') and request['family'] not in ROTATION_FAMILIES:
         raise ValueError('Choose a supported credential family')
-    if action in ('verify', 'extract', 'restore', 'recover-restore') and (not isinstance(request['backup_id'], str)
+    if action in ('verify', 'extract', 'restore', 'recover-restore', 'recover-backup') and (not isinstance(request['backup_id'], str)
             or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['backup_id'])):
         raise ValueError('Choose a captured backup')
     if action in ('retire-history', 'delete-backup', 'resume-delete'):

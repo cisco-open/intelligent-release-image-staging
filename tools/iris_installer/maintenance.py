@@ -154,6 +154,14 @@ def prepare_recovery_candidate(client, path, approved_recipient, *, independent_
 
 
 def recovery_request(job):
+    if isinstance(job, dict) and job.get("action") == "backup":
+        pattern = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+        if (job.get("state") != "recovery-required"
+                or any(not isinstance(job.get(name), str) or not re.fullmatch(pattern, job[name])
+                       for name in ("id", "backup_id"))):
+            raise InstallError("Select an interrupted backup from this deployment")
+        return {"action": "recover-backup", "request_id": job["id"],
+                "backup_id": job["backup_id"], "allow_downtime": True}
     if isinstance(job, dict) and job.get("action") == "restore":
         if job.get("state") != "recovery-required":
             raise InstallError("Select an interrupted deployment restore")
@@ -217,6 +225,13 @@ class MaintenanceClient:
                     or not isinstance(request["request_id"], str)
                     or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", request["request_id"])):
                 raise InstallError("Unsupported connection certificate maintenance request")
+        elif isinstance(request, dict) and request.get("action") == "recover-backup":
+            if (set(request) != {"action", "request_id", "backup_id", "allow_downtime"}
+                    or request["allow_downtime"] is not True
+                    or any(not isinstance(request[name], str) or not re.fullmatch(
+                        r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", request[name])
+                        for name in ("request_id", "backup_id"))):
+                raise InstallError("Unsupported interrupted backup recovery request")
         elif isinstance(request, dict) and request.get("action") in ("restore", "recover-restore"):
             if (set(request) != {"action", "request_id", "backup_id", "allow_downtime", "confirm_restore"}
                     or request["allow_downtime"] is not True or request["confirm_restore"] is not True

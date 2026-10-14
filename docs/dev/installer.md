@@ -138,6 +138,13 @@ from the backup. Test this layout in an isolated Python process so checkout
 imports cannot hide a missing runtime dependency.
 Backup capture releases its temporary topology snapshots after success or
 failure. Operation history and encrypted archives remain available for review.
+Managed captures save per-job intent before exports or downtime, including
+the exact worker, services, storage and signing authority. Explicit
+`recover-backup` requests reuse the original job and backup IDs. Recovery
+requires proof that previous writers have stopped, restores recorded service
+state, and accepts only completed authenticated archive pairs. Interrupted
+encryption stages remain private and unverified. The Console and host
+`maintenance recover` command expose the same operation; neither recaptures.
 The worker limits recent history to 100 records and saved backups to 20 pairs
 of deployment and recovery archives. Failed captures without saved files consume
 history, not a saved-backup slot. The Console exposes separate history clearing and archive

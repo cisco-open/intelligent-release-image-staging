@@ -51,7 +51,7 @@ try {
           retention.operation = operation; retention.busy = operation.state !== 'completed';
           return route.fulfill({json: {retention_operation: operation}});
         }
-        if (mode === 'success') fixtures[kind].jobs = [{...job(body.action === 'recover-restore' ? 'restore' : body.action), id: body.request_id, backup_id: body.backup_id || body.request_id}];
+        if (mode === 'success') fixtures[kind].jobs = [{...job({'recover-restore': 'restore', 'recover-backup': 'backup'}[body.action] || body.action), id: body.request_id, backup_id: body.backup_id || body.request_id}];
         return route.fulfill({json: {job_id: mode === 'wrong-id' ? other : body.request_id}});
       }
       if (kind) return route.fulfill({json: fixtures[kind]});
@@ -123,6 +123,21 @@ try {
   assert.equal(writes.at(-1).action, 'recover-restore'); assert.equal(writes.at(-1).request_id, restore.request_id); assert.equal(writes.at(-1).backup_id, accepted);
   fixtures.backups.jobs[0].state = 'restored';
   assert.equal(await page.locator('#backup-history-retention').count(), 0, 'Older worker has no unsupported cleanup controls');
+  const beforeRecovery = structuredClone(fixtures.backups);
+  fixtures.backups.can_recover_backup = true;
+  fixtures.backups.jobs = [{...job('backup', 'recovery-required'), id: accepted, backup_id: other}];
+  fixtures.backups.retention = {schema: 1, revision: hash, busy: true, recoverable_job_id: accepted,
+    capacity: {history_used: 1, history_limit: 100, backup_used: 0, backup_limit: 20},
+    jobs: [{id: accepted, action: 'backup', state: 'recovery-required', backup_id: other, family: null,
+      finished_at: now, retire_allowed: false, retire_reason: 'Needs recovery.'}], backups: [], operation: null};
+  await page.locator('#backup-refresh').click(); await idle();
+  const recoverBackup = page.getByRole('button', {name: 'Recover services after this backup', exact: true});
+  assert.equal(await recoverBackup.isEnabled(), true);
+  assert.equal(await page.locator('#backup-create').isDisabled(), true);
+  assert.equal(await page.locator('#backup-delete').isDisabled(), true);
+  await recoverBackup.click(); await idle();
+  assert.deepEqual(writes.at(-1), {action: 'recover-backup', request_id: accepted, backup_id: other, allow_downtime: true});
+  fixtures.backups = beforeRecovery;
   fixtures.backups.jobs.push({...job('backup', 'captured'), id: accepted, backup_id: accepted});
   fixtures.backups.retention = {schema: 1, revision: hash, busy: false,
     capacity: {history_used: 1, history_limit: 100, backup_used: 1, backup_limit: 20, protected_upgrade_used: 2},

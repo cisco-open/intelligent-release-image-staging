@@ -35865,6 +35865,14 @@
                         "busy": {
                           "type": "boolean"
                         },
+                        "recoverable_job_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uuid",
+                          "description": "The sole interrupted operation that can be explicitly recovered; null while another maintenance action blocks it."
+                        },
                         "capacity": {
                           "type": "object",
                           "properties": {
@@ -36091,6 +36099,10 @@
                         "operation"
                       ],
                       "additionalProperties": false
+                    },
+                    "can_recover_backup": {
+                      "type": "boolean",
+                      "description": "Whether this managed worker supports recovery of its recorded interrupted backups."
                     },
                     "restore_scope": {
                       "type": "string",
@@ -36695,6 +36707,32 @@
                         "pattern": "^[0-9a-f-]{36}$"
                       }
                     }
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "recover-backup"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "backup_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "allow_downtime": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "backup_id",
+                      "allow_downtime"
+                    ],
+                    "additionalProperties": false
                   },
                   {
                     "type": "object",
@@ -77991,6 +78029,14 @@
                         "busy": {
                           "type": "boolean"
                         },
+                        "recoverable_job_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "uuid",
+                          "description": "The sole interrupted operation that can be explicitly recovered; null while another maintenance action blocks it."
+                        },
                         "capacity": {
                           "type": "object",
                           "properties": {
@@ -78217,6 +78263,10 @@
                         "operation"
                       ],
                       "additionalProperties": false
+                    },
+                    "can_recover_backup": {
+                      "type": "boolean",
+                      "description": "Whether this managed worker supports recovery of its recorded interrupted backups."
                     },
                     "restore_scope": {
                       "type": "string",
@@ -78720,6 +78770,32 @@
                         "pattern": "^[0-9a-f-]{36}$"
                       }
                     }
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "recover-backup"
+                      },
+                      "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "backup_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "allow_downtime": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "request_id",
+                      "backup_id",
+                      "allow_downtime"
+                    ],
+                    "additionalProperties": false
                   },
                   {
                     "type": "object",

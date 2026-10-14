@@ -56,14 +56,16 @@ export function workerStatus(data, kind) {
   if (!['can_verify', 'can_extract', 'can_restore'].every(key => typeof data[key] === 'boolean') || !boundedText(data.storage, 256)) return null;
   if (!data.available && (jobs.length || data.can_verify || data.can_extract || data.can_restore)) return null;
   if (data.available && data.restore_scope !== 'same-deployment-same-security-generation') return null;
+  if (data.can_recover_backup !== undefined && typeof data.can_recover_backup !== 'boolean') return null;
+  if (!data.available && data.can_recover_backup === true) return null;
   const retention = data.retention === undefined ? null : retentionStatus(data.retention);
   if (data.retention !== undefined && !retention) return null;
-  return {...result, ...pick(data, ['can_verify', 'can_extract', 'can_restore', 'storage']), restore_scope: data.restore_scope ?? null, retention};
+  return {...result, ...pick(data, ['can_verify', 'can_extract', 'can_restore', 'storage']), can_recover_backup: data.can_recover_backup === true, restore_scope: data.restore_scope ?? null, retention};
 }
 export const activeJobs = state => [...(state.rotation?.jobs || []), ...(state.backups?.jobs || [])].filter(row => ['running', 'recovery-required'].includes(row.state));
 export function acceptedJob(data, payload) {return !!data && data.job_id === payload.request_id && requestId(data.job_id);}
 export function matchingJob(row, payload) {
-  return !!row && row.id === payload.request_id && row.action === ({'recover-rotation': 'rotate', 'recover-restore': 'restore'}[payload.action] || payload.action) &&
+  return !!row && row.id === payload.request_id && row.action === ({'recover-rotation': 'rotate', 'recover-restore': 'restore', 'recover-backup': 'backup'}[payload.action] || payload.action) &&
     (payload.family ? row.family === payload.family : payload.action === 'backup' || row.backup_id === payload.backup_id);
 }
 export function workerBody(payload, kind) {

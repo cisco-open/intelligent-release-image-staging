@@ -16,7 +16,7 @@ maintenance worker:
 sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris status
 ```
 
-Find the rotation or restore marked `recovery-required`. Check its operation ID,
+Find the backup, rotation or restore marked `recovery-required`. Check its operation ID,
 backup or key type, and recorded results. Resume that operation:
 
 ```bash
@@ -26,6 +26,9 @@ sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris recover \
 
 Confirm when asked, then run `status` again to check completion. The worker uses
 the saved operation record. An accepted request is not proof of completion.
+For an interrupted backup, recovery restarts the original services and checks
+whether both archives completed. It keeps incomplete output and never starts
+another capture. Review the result before requesting a new backup.
 
 The installer manages the worker as a host service outside the containers or pods.
 If it is unavailable, check `irisctl worker-status` and use

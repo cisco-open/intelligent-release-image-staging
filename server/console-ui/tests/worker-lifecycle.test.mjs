@@ -141,6 +141,49 @@ test('explicit recovery targets the original operation, not the currently select
   await c.backup('recover-restore', id); assert.deepEqual(f.writes[0].payload, {action: 'recover-restore', request_id: id, backup_id: id, allow_downtime: true, confirm_restore: true});
   assert.match(c.state.messages.backups.text, /Accepted operation/);
 });
+function recoveryRetention(action, identifier = id) {
+  return {schema: 1, revision: hash, busy: true, recoverable_job_id: identifier,
+    capacity: {history_used: 1, history_limit: 100, backup_used: 0, backup_limit: 20},
+    jobs: [{id: identifier, action, state: 'recovery-required', backup_id: id, family: action === 'rotate' ? 'management-tls' : null,
+      finished_at: now, retire_allowed: false, retire_reason: 'This operation needs recovery.'}], backups: [], operation: null};
+}
+for (const action of ['backup', 'restore', 'rotate']) test('actual busy retention permits only the original interrupted ' + action, async () => {
+  const {c, f} = setup(action === 'rotate' ? 'certificates' : 'backups');
+  f.backups.can_recover_backup = true;
+  f[action === 'rotate' ? 'rotation' : 'backups'].jobs = [job(action, 'recovery-required')];
+  f.backups.retention = recoveryRetention(action);
+  await c.refreshAll();
+  assert.equal(c.workerIdle(), false);
+  assert.equal(action === 'rotate' ? c.canRotate(id) : c.canBackup('recover-' + action, id), true);
+  f.backups.retention.recoverable_job_id = null; await c.refresh('backups');
+  assert.equal(action === 'rotate' ? c.canRotate(id) : c.canBackup('recover-' + action, id), false);
+});
+test('backup recovery uses original IDs without requiring decryption or restoring files', async () => {
+  const {c, f} = setup('backups');
+  f.backups = {...f.backups, can_recover_backup: true, can_verify: false, can_restore: false,
+    jobs: [job('backup', 'recovery-required')], retention: recoveryRetention('backup')};
+  await c.refreshAll(); c.field('backupSelected', other);
+  assert.equal(c.canBackup('backup'), false); assert.equal(c.canBackup('recover-backup', other), false);
+  f.accept = false; await c.backup('recover-backup', id); assert.equal(f.writes.length, 0);
+  f.accept = true; await c.backup('recover-backup', id);
+  assert.deepEqual(f.writes[0].payload, {action: 'recover-backup', request_id: id, backup_id: id, allow_downtime: true});
+  assert.equal(matchingJob(job('backup'), f.writes[0].payload), true);
+  assert.equal(matchingJob({...job('backup'), backup_id: other}, f.writes[0].payload), false);
+});
+test('unsupported workers cannot advertise backup recovery through a history row alone', async () => {
+  const {c, f} = setup('backups'); f.backups.jobs = [job('backup', 'recovery-required')];
+  f.backups.retention = recoveryRetention('backup'); await c.refreshAll();
+  assert.equal(c.canBackup('recover-backup', id), false);
+  for (const invalid of ['true', 1, {}]) assert.equal(workerStatus({...f.backups, can_recover_backup: invalid}, 'backups'), null);
+});
+test('lost backup recovery response is reviewed without replay on navigation', async () => {
+  const {c, f} = setup('backups'); f.backups.can_recover_backup = true;
+  f.backups.jobs = [job('backup', 'recovery-required')]; f.backups.retention = recoveryRetention('backup');
+  await c.refreshAll(); f.post = () => {throw Error('response lost');};
+  await c.backup('recover-backup', id); assert.equal(c.state.unknown.backups, true);
+  await c.select('certificates'); await c.select('backups'); assert.equal(f.writes.length, 1);
+  await c.review('backups'); assert.equal(c.state.unknown.backups, false); assert.equal(f.writes.length, 1);
+});
 test('pre-dispatch file read locks actions and leaving the pane cancels unsent work', async () => {
   const {c, f} = setup(); f.trust.items[0] = prepared('device-tls', 'awaiting-approval'); await c.refreshAll(); c.field('family', 'device-tls');
   const pending = deferred(); c.file('certificate', {size: certificate.length, text: () => pending.promise});

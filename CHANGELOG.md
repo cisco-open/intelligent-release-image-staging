@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Recover services after an interrupted managed backup from its original
+  history entry or host command. Keep incomplete output, authenticate completed
+  archives, and allow a new backup only after the original job is resolved.
+- Enable same-job recovery controls while that operation needs recovery,
+  without enabling conflicting maintenance or backup deletion.
 - Let operators retry interrupted backup verification or isolated extraction
   without blocking deployment maintenance; retain unverified private output.
 - Validate the host-prepared recovery key before backup or downtime, then

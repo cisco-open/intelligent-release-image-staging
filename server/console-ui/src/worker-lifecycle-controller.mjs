@@ -35,7 +35,11 @@ export class WorkerLifecycleController {
   ready(...keys) {return keys.every(key => this.state.valid[key] && !this.state.loading[key]);}
   item() {return this.state.trust?.items.find(row => row.family === this.state.family);}
   workerReady() {return this.ready('rotation', 'backups') && !this.state.unknown.deployment && !this.state.unknown.backups;}
-  workerIdle(except = null) {return this.workerReady() && !this.state.backups?.retention?.busy && !activeJobs(this.state).some(row => row.id !== except);}
+  workerIdle(except = null) {
+    const retention = this.state.backups?.retention;
+    return this.workerReady() && (!retention?.busy || except !== null && retention.recoverable_job_id === except) &&
+      !activeJobs(this.state).some(row => row.id !== except);
+  }
   backupSpace() {const capacity = this.state.backups?.retention?.capacity; return !capacity || capacity.backup_used < capacity.backup_limit;}
   historySpace() {const capacity = this.state.backups?.retention?.capacity; return !capacity || capacity.history_used < capacity.history_limit;}
   retirableJobs() {return this.state.backups?.retention?.jobs.filter(row => row.retire_allowed).slice(0, 25) || [];}
@@ -65,6 +69,10 @@ export class WorkerLifecycleController {
     if (action === 'recover-restore') {
       const row = this.state.backups.jobs.find(row => row.id === recovery);
       return this.state.backups.can_restore && row?.action === 'restore' && row.state === 'recovery-required' && this.workerIdle(row.id);
+    }
+    if (action === 'recover-backup') {
+      const row = this.state.backups.jobs.find(row => row.id === recovery);
+      return this.state.backups.can_recover_backup && row?.action === 'backup' && row.state === 'recovery-required' && this.workerIdle(row.id);
     }
     if (!['backup', 'verify', 'extract', 'restore'].includes(action) || !this.workerIdle() || !this.historySpace()) return false;
     if (action === 'backup') return this.backupSpace();
@@ -234,12 +242,13 @@ export class WorkerLifecycleController {
     const row = recovery && this.state.backups.jobs.find(row => row.id === recovery), selected = row?.backup_id || this.state.backupSelected;
     await this.write('backups', 'backups', async () => {
       const question = action === 'backup' ? 'Stop IRIS and the Console briefly to capture a consistent encrypted backup? Active transfers and management requests will be interrupted.'
+        : action === 'recover-backup' ? 'Recover services after this interrupted backup? The worker checks the original operation and restarts its services. It keeps incomplete files and does not take another backup.'
         : action === 'extract' ? 'Extract both sets into a new protected recovery directory? It includes secret recovery material and starts no services.'
           : ['restore', 'recover-restore'].includes(action) ? 'Restore this deployment from the selected backup? The worker stops IRIS, checks current security and replay authority, and retains previous files for recovery.' : null;
       if (question && !this.services.confirm(question)) return;
       const payload = {action, request_id: row?.id || this.pendingId('backup:' + action, action === 'backup' ? action : action + ':' + selected, 'backups', 'backups')};
       if (action !== 'backup') payload.backup_id = selected;
-      if (['backup', 'restore', 'recover-restore'].includes(action)) payload.allow_downtime = true;
+      if (['backup', 'recover-backup', 'restore', 'recover-restore'].includes(action)) payload.allow_downtime = true;
       if (['restore', 'recover-restore'].includes(action)) payload.confirm_restore = true;
       return payload;
     }, (payload, data) => acceptedJob(data, payload) ? {accepted: payload.request_id} : null);

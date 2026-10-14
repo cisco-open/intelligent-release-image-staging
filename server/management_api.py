@@ -6742,7 +6742,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 data = self._json_body(raw)
                 if data is None:
                     return
-                if data.get('action') not in ('backup', 'verify', 'extract', 'restore', 'recover-restore',
+                if data.get('action') not in ('backup', 'recover-backup', 'verify', 'extract', 'restore', 'recover-restore',
                                              'retire-history', 'delete-backup', 'resume-delete'):
                     self._json(400, {"error": "Choose backup, verify, extraction or deployment restore"}); return
                 try:

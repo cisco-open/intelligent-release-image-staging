@@ -18,6 +18,13 @@ An accepted request shows an operation ID, not a completed backup.
 After reconnecting, select **Refresh backup history** and check that operation.
 If its outcome is uncertain, review the history before starting another request.
 Returning to this page does not repeat a backup or restore.
+For an interrupted backup, select **Recover services after this backup** beside
+its history entry. If the Console is offline, use the
+[host recovery command](recovery.md#recover-a-deployment-rotation-while-the-console-is-stopped).
+The worker checks the original job and restarts its recorded services. It marks
+the backup captured only when both completed archives pass authentication;
+otherwise it marks the attempt failed and keeps incomplete files for inspection.
+Start a new backup after recovery if needed.
 If the worker restarts during verification or isolated extraction, that attempt
 is marked failed. Start a new request after reviewing the result. Partial
 extraction files remain private on the host; they are not verified recovery data.
@@ -117,8 +124,9 @@ To free backup storage, choose a **Saved backup to delete**, then select
 **Delete selected backup**. Review the backup ID before confirming. This permanently
 removes its encrypted deployment and recovery archives from this host. Independently stored
 copies are unchanged. A backup still needed for recovery cannot be deleted.
-Files left by a failed capture can also be deleted once services have recovered;
-the worker checks every remaining archive before removing it.
+Published archives left by a failed capture can also be deleted once services
+have recovered; the worker checks each remaining archive before removing it.
+Unpublished partial files stay in protected host storage for inspection.
 
 After either action, select **Refresh backup history** to check the result.
 If the response was lost, the Console checks that same request before allowing

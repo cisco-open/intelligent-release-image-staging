@@ -52,6 +52,16 @@ test('retention status validates limits, exact fields, unique IDs and protected 
     assert.equal(workerStatus({...backups(), retention: value}, 'backups'), null);
   }
 });
+test('same-job recovery hint requires one exact interrupted row and a busy worker', () => {
+  const value = retained(); value.busy = true; value.recoverable_job_id = other;
+  value.jobs[0] = {...value.jobs[0], state: 'recovery-required', retire_allowed: false};
+  assert.ok(retentionStatus(value));
+  for (const patch of [{recoverable_job_id: id}, {recoverable_job_id: 'bad'}, {busy: false}]) {
+    assert.equal(retentionStatus({...value, ...patch}), null);
+  }
+  value.jobs[0].state = 'running'; assert.equal(retentionStatus(value), null);
+  value.recoverable_job_id = null; assert.ok(retentionStatus(value));
+});
 test('operation acknowledgements bind exact request, action, count and backup', () => {
   const payload = {action: 'retire-history', request_id: third, job_ids: [other]};
   assert.ok(matchingRetention(operation(), payload));

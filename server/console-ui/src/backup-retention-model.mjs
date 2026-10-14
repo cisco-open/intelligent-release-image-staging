@@ -38,7 +38,8 @@ export function retentionOperation(value) {
 
 export function retentionStatus(value) {
   const upgraded = object(value) && Object.hasOwn(value, 'protected_upgrade_backups');
-  if (!exact(value, 'schema revision busy capacity jobs backups operation' + (upgraded ? ' protected_upgrade_backups' : '')) || value.schema !== 1 ||
+  const recoverable = object(value) && Object.hasOwn(value, 'recoverable_job_id');
+  if (!exact(value, 'schema revision busy capacity jobs backups operation' + (upgraded ? ' protected_upgrade_backups' : '') + (recoverable ? ' recoverable_job_id' : '')) || value.schema !== 1 ||
       typeof value.revision !== 'string' || !/^[a-f0-9]{64}$/.test(value.revision) || typeof value.busy !== 'boolean' ||
       !exact(value.capacity, 'history_used history_limit backup_used backup_limit' + (upgraded ? ' protected_upgrade_used' : '')) ||
       (upgraded && (!protectedUpgradeBackups(value.protected_upgrade_backups) ||
@@ -56,6 +57,11 @@ export function retentionStatus(value) {
       !value.backups.every(row => exact(row, 'backup_id created_at delete_allowed delete_reason') && requestId(row.backup_id) &&
         (row.created_at === null || stamp(row.created_at)) && typeof row.delete_allowed === 'boolean' && text(row.delete_reason)) ||
       (value.operation !== null && !retentionOperation(value.operation))) return null;
+  if (recoverable && value.recoverable_job_id !== null) {
+    const active = value.jobs.filter(row => ['running', 'recovery-required'].includes(row.state));
+    if (!requestId(value.recoverable_job_id) || !value.busy || active.length !== 1 ||
+        active[0].id !== value.recoverable_job_id || active[0].state !== 'recovery-required') return null;
+  }
   return structuredClone(value);
 }
 

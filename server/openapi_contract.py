@@ -2122,6 +2122,10 @@ def _request_body(route):
              'required': ['action', 'allow_downtime', 'request_id'],
              'properties': {'action': {'const': 'backup'}, 'allow_downtime': {'const': True},
                             'request_id': {'type': 'string', 'pattern': '^[0-9a-f-]{36}$'}}},
+            _schedule_object({'action': {'const': 'recover-backup'},
+                'request_id': {'type': 'string', 'format': 'uuid'},
+                'backup_id': {'type': 'string', 'format': 'uuid'},
+                'allow_downtime': {'const': True}}),
             {'type': 'object', 'additionalProperties': False,
              'required': ['action', 'backup_id', 'request_id'],
              'properties': {'action': {'enum': ['verify', 'extract']},
@@ -2294,7 +2298,10 @@ def _retention_operation_schema():
 
 def _retention_schema():
     return _schedule_object({'schema': {'const': 1}, 'revision': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
-        'busy': {'type': 'boolean'}, 'capacity': _schedule_object({
+        'busy': {'type': 'boolean'},
+        'recoverable_job_id': {'type': ['string', 'null'], 'format': 'uuid',
+            'description': 'The sole interrupted operation that can be explicitly recovered; null while another maintenance action blocks it.'},
+        'capacity': _schedule_object({
             'history_used': {'type': 'integer', 'minimum': 0, 'maximum': 100}, 'history_limit': {'const': 100},
             'backup_used': {'type': 'integer', 'minimum': 0}, 'backup_limit': {'const': 20},
             'protected_upgrade_used': {'type': 'integer', 'minimum': 0}},
@@ -3212,6 +3219,8 @@ def _success(route):
                         'keylist_seq': {'type': 'integer'}}}}}}})
     elif suffix == "/settings/backups" and route.method == "GET":
         schema['properties']['retention'] = _retention_schema()
+        schema['properties']['can_recover_backup'] = {'type': 'boolean',
+            'description': 'Whether this managed worker supports recovery of its recorded interrupted backups.'}
         schema['properties']['restore_scope'] = {'type': 'string', 'enum': ['same-deployment-same-security-generation']}
         schema["properties"]["jobs"]["items"] = {
             "type": "object", "additionalProperties": False,
