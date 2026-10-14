@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Replace or recover signing keys
 
-Use this page for root replacement, key recovery, Guest Shell bundle updates
+Use this page for root replacement, key recovery, Guest Shell agent replacement
 and manual delivery of a first instruction file. See the glossary for
 [signing roots](../reference/glossary.md#root-key-signing-root) and [instructions](../reference/glossary.md#instruction).
 
@@ -230,30 +230,24 @@ sends its heartbeat but skips staging for that tick, one pass of the agent's
 check-in loop. Every failure state is listed in [Data formats and
 states](../reference/state-and-data.md).
 
-## Publish a new Guest Shell agent bundle
+## Replace a Guest Shell agent { #publish-a-new-guest-shell-agent-bundle }
 
-On Catalyst 9000 series switches the agent runs in Guest Shell; switches with
-app-hosting storage can run the IOx app instead. Treat a bundle update as a
-fleet operation.
+Replace the agent through removal and re-onboarding. For a new IRIS release,
+follow [Deploy a new release](upgrade.md), including deployment replacement.
+For an agent replacement within the same deployment:
 
-1. For standalone bundles, run `tools/build-ssh-verifiers.sh` on a Docker
-   builder that supports both amd64 and arm64.
-2. Upgrade each device's `bootstrap.sh` through onboarding. Older bootstraps
-   reject the new archive members.
-3. Build each architecture with the approved binary and exactly two approved
-   public roots, using the [build
-   options](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/device-packages.md).
-   Record the archive and sidecar hashes and the source provenance.
-4. Publish the bundle and its 64-hex SHA-256 sidecar on the artifact server,
-   with installer and bootstrap evidence for both public-root files. Deliver
-   sidecar before archive: missing, malformed or mismatched evidence, unsafe
-   members or incomplete writes refuse the new bundle and keep the prior
-   runnable bundle.
-5. Check the next tick's `instr_protocol` value, the accepted identity and the
-   instruction state, including the fallback to tracker-only when the bundled
-   verifier is unavailable.
+1. Open **Inventory**, select the devices and choose **Undeploy**. Wait for
+   confirmed removal before continuing. See
+   [Undeploy, retire and clean up devices](../user-guide/undeploy.md).
+2. Check that **Settings → Device packages** reports `ok` for **Guest Shell**.
+   The server prepares its Guest Shell bundles automatically.
+3. Choose **Onboard**. The installer delivers the bootstrap and the matching
+   agent bundle, including both approved public roots.
+4. Check each device's fresh heartbeat and accepted signed instruction.
 
-Roll back by restoring the reviewed prior bundle and its evidence as one set.
+The package tools publish the bundle and its SHA-256 file. Missing or
+mismatched evidence stops bundle installation.
+
 On IOx, signature verification is a device-wide setting, not a per-app one. See
 [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000
 devices for the IOx app](../install/iox.md#device-global-package-verification).

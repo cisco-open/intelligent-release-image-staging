@@ -19,7 +19,7 @@ it is never built and never published.
 
 **Who each guide is for.** Installation Guide: a network engineer with a fresh
 host who has never seen IRIS; they follow it top to bottom once. Administration
-Guide: the person maintaining server state, upgrades, credentials, and recovery.
+Guide: the person maintaining server state, releases, credentials, and recovery.
 User Guide: the
 person who runs IRIS every day; they arrive with a task and leave when it is
 done. Architecture Guide: an architect or reviewer who needs to know how it
@@ -214,6 +214,7 @@ The table below records the retained aliases for the reorganization.
 | Alias id | Page and new heading text | Who depends on the id |
 | --- | --- | --- |
 | `managed-single-host-docker` | `admin-guide/upgrade.md` → Managed deployment replacement | Retained historical heading link |
+| `publish-a-new-guest-shell-agent-bundle` | `admin-guide/instruction-keys.md` → Replace a Guest Shell agent | Retained link to the former bundle-publication procedure |
 | `build-and-publish-the-arm64-iox-package` | `install/device-packages.md` "Build the packages" | `test_aiagent_arm_package_docs.py`, in-docs links from two install pages. |
 | `embedded-agent-packages` | `install/device-packages.md` "When to rebuild the packages" | `help-server.html:118` (shipped in images). |
 | `initialise-instruction-custody` | `install/activate-signing.md` "Start signing instructions" | `test_aiagent_arm_package_docs.py`; in-docs links. The id keeps the old spelling; the text is American. |

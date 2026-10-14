@@ -1715,7 +1715,7 @@ def test_docs_phase1_iox_verification_transaction():
              ("IOx verification", "signed wrapper",
               "verification-state change")),
             ("admin-guide/instruction-keys.md",
-             "Publish a new Guest Shell agent bundle",
+             "Replace a Guest Shell agent",
              ("IOx", "signature verification is a device-wide setting")),
             ("install/iox.md", "Check that the IOx app came up",
              ("IOx verification", "uninstall recovery",
@@ -1821,10 +1821,18 @@ def test_docs_phase1_operations_root_and_offline_runbooks():
     _assert_unit(operations, ("ciphertext bootstrap envelope",
                               "not a secret key"),
                  "offline payload must be identified as ciphertext, not a key")
-    bundle_drop = _section(operations, "Publish a new Guest Shell agent bundle")
-    _assert_unit(bundle_drop, ("sidecar before archive", "mismatched evidence",
-                               "prior runnable bundle"),
-                 "Guest Shell rollout must order evidence and retain rollback")
+    bundle_drop = _section(operations, "Replace a Guest Shell agent")
+    _assert_ordered(bundle_drop, ("Inventory", "Undeploy", "confirmed removal",
+                                  "Device packages",
+                                  "Onboard", "fresh heartbeat"),
+                    "Guest Shell replacement must remove the old agent before onboarding", 2500)
+    _assert_unit(bundle_drop, ("bootstrap", "agent bundle", "both approved public roots"),
+                 "Guest Shell onboarding must deliver matching bootstrap and public trust")
+    _assert_unit(bundle_drop, ("SHA-256", "mismatched evidence", "stops bundle installation"),
+                 "Guest Shell onboarding must retain bundle verification")
+    assert "#publish-a-new-guest-shell-agent-bundle" in operations.replace(" ", "")
+    assert "Roll back by restoring the reviewed prior bundle" not in bundle_drop
+    assert "**Devices**" not in bundle_drop + _page("admin-guide/upgrade.md")
     _assert_unit(operations, ("Authenticated refresh", "self-heal",
                               "key availability"),
                  "offline bootstrap must converge through authenticated refresh")

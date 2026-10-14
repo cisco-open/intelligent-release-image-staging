@@ -22,7 +22,7 @@ device agents and onboard them to the replacement after its checks pass.
    Keep the encrypted data and identity sets and their independent recovery keys.
    Complete first-time [backup signer trust](backups.md#trust-the-backup-signer)
    before verifying an archive.
-2. Open **Devices**, select each onboarded device and choose **Undeploy**.
+2. Open **Inventory**, select each onboarded device and choose **Undeploy**.
 3. Wait for every device to confirm that its agent was removed. Keep the
    inventory export for the replacement. See
    [Undeploy, retire and clean up devices](../user-guide/undeploy.md).

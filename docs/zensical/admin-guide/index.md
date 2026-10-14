@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Keep IRIS running
 
-This guide is for the person who looks after the IRIS server: upgrades,
+This guide is for the person who looks after the IRIS server: new releases,
 backups, credentials, certificates, signing keys, and recovery when something
 breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 
