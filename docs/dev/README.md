@@ -36,7 +36,7 @@ tracked `docs/` tree, so a recipient unpacking a release gets this folder too.
 | [server-internals.md](server-internals.md) | Server services and persistent state. |
 | [telemetry-internals.md](telemetry-internals.md) | Sampling, reports, and peer accounting. |
 | [instruction-crypto.md](instruction-crypto.md) | Instruction encryption and signature implementation. |
-| [upgrade-notes.md](upgrade-notes.md) | Migration constraints and compatibility. |
+| [upgrade-notes.md](upgrade-notes.md) | Release compatibility and security-state checks. |
 | [api-exercise.md](api-exercise.md) | API exercise harness and its evidence. |
 | [api-soak.md](api-soak.md) | Isolated sustained API workload, resource limits and recovery checks. |
 | [console-ui.md](console-ui.md) | Console implementation and UI conventions. |

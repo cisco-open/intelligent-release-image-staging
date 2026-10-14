@@ -119,6 +119,13 @@ def test_replacement_docs_preserve_historical_link_and_no_adoption_boundary():
     assert 'There is no public in-place application upgrade command' in developer
 
 
+def test_contributor_rollout_notes_match_catalog_and_report_identifiers():
+    page = ' '.join((ROOT / 'docs/dev/upgrade-notes.md').read_text().split())
+    assert "`plans` map is keyed by image ID" in page
+    assert 'stores the `plan_id` locally and reports the `transfer_id`' in page
+    assert 'A report carrying a different transfer ID must not advance the plan' in page
+
+
 def test_backup_signer_setup_names_the_producer_and_independent_trust_step():
     page = " ".join(_document("admin-guide/backups.md").split())
     upgrade = _document("admin-guide/upgrade.md")

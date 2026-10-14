@@ -1064,7 +1064,7 @@ def test_devices_csv_example_header_matches_the_console_template():
     assert header == served_header
 
 
-def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
+def test_workstream_a_docs_define_tracker_cadence_and_safe_replacement():
     """Acceptance 26 keeps the persisted tracker contract executable in prose."""
     reference = _page("reference/peer-policy-api.md")
     operations = (_page("architecture/security-model.md") + "\n"
@@ -1110,23 +1110,18 @@ def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
                      r"jitter.{0,40}(?:once|one)", cadence)
     assert ("left == 0" in reference or "left == 0" in operations)
 
-    downgrade = operations.lower()
-    assert re.search(r"remove.{0,100}every.{0,100}(?:global|role).{0,100}state",
-                     downgrade, re.DOTALL)
-    assert re.search(r"(?:one|an) additional.{0,100}scalar-only.{0,100}"
-                     r"commit", downgrade, re.DOTALL)
+    replacement = operations.lower()
     for filename in ("peer-policy.json", "peer-policy.lkg.json"):
-        assert filename in downgrade
-    assert re.search(r"state-free.{0,80}schema[- ]1|schema[- ]1.{0,80}state-free",
-                     downgrade, re.DOTALL)
-    assert re.search(r"(?:do not|never).{0,80}retained.{0,80}"
-                     r"state-bearing.{0,80}ring snapshot", downgrade,
-                     re.DOTALL)
-    assert "restricted-role" in downgrade and "quarantine" in downgrade
+        assert filename in replacement
+    assert 'deployment removal, a fresh install' in replacement
+    assert 'device re-onboarding' in replacement
+    assert 'restricted-role' in replacement and 'quarantine' in replacement
     assert re.search(r"(?:older|predating).{0,160}independent quarantine",
-                     downgrade, re.DOTALL)
+                     replacement, re.DOTALL)
     assert re.search(r"not.{0,80}sufficient.{0,120}(?:quarantine|downgrad)",
-                     downgrade, re.DOTALL)
+                     replacement, re.DOTALL)
+    assert 'one additional, scalar-only policy commit' not in replacement
+    assert 'before you start the older binary' not in replacement
 
 
 def test_workstream_a_docs_separate_tracker_observability_and_state_controls():
