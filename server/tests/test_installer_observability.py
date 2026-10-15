@@ -68,12 +68,14 @@ def test_legacy_and_explicit_journals_validate_without_rewriting(monkeypatch, va
 
 @pytest.mark.parametrize('value', ['legacy', False, True])
 @pytest.mark.parametrize('split', [False, True])
-def test_actual_docker_and_split_prepare_pass_only_recorded_opt_in(tmp_path, monkeypatch, value, split):
+@pytest.mark.parametrize('egress', [[], ['192.0.2.86', '192.0.2.87']])
+def test_actual_docker_and_split_prepare_pass_only_recorded_opt_in(tmp_path, monkeypatch, value, split, egress):
     # Docker Compose itself is a process boundary; its actual input env and
     # argv are asserted, and its public JSON output models that interpolation.
     record = config()
     if value != 'legacy': record['observability'] = value
     if split: record.update(split_config())
+    if egress: record['origin_egress_ips'] = egress
     doc = {'id': 'owned', 'config': record, 'completed': {}}
     journal = SimpleNamespace(directory=tmp_path, document=doc,
         checkpoint=lambda key, item: doc['completed'].update({key: item}))
@@ -85,10 +87,12 @@ def test_actual_docker_and_split_prepare_pass_only_recorded_opt_in(tmp_path, mon
             captured.append(kwargs['env'])
             assert argv[argv.index('--env-file') + 1] == str(tmp_path / 'compose.env')
             return json.dumps({'services': {'iris': {'volumes': [], 'environment': {
-                'IRIS_OBSERVABILITY': kwargs['env']['IRIS_OBSERVABILITY']}}, 'console': {}},
+                'IRIS_OBSERVABILITY': kwargs['env']['IRIS_OBSERVABILITY'],
+                'IRIS_ORIGIN_EGRESS_IPS': kwargs['env']['IRIS_ORIGIN_EGRESS_IPS']}}, 'console': {}},
                 'networks': {}, 'volumes': {}}).encode()
         return b''
     monkeypatch.setenv('IRIS_OBSERVABILITY', 'untrusted-ambient-value')
+    monkeypatch.setenv('IRIS_ORIGIN_EGRESS_IPS', '203.0.113.99')
     monkeypatch.setattr(os, 'chown', lambda *_: None)
     with monkeypatch.context() as scope:
         scope.setattr(deploy, 'validate_config', lambda _: None)  # Transport files have separate custody tests.
@@ -103,6 +107,8 @@ def test_actual_docker_and_split_prepare_pass_only_recorded_opt_in(tmp_path, mon
     assert captured[0]['IRIS_OBSERVABILITY'] == expected
     generated = json.loads(obj.compose_file.read_text())
     assert generated['services']['iris']['environment']['IRIS_OBSERVABILITY'] == expected
+    assert captured[0]['IRIS_ORIGIN_EGRESS_IPS'] == ','.join(egress)
+    assert generated['services']['iris']['environment']['IRIS_ORIGIN_EGRESS_IPS'] == ','.join(egress)
     assert record == original
     before = obj.compose_file.read_bytes()
     obj.prepare()
@@ -110,9 +116,12 @@ def test_actual_docker_and_split_prepare_pass_only_recorded_opt_in(tmp_path, mon
 
 
 @pytest.mark.parametrize('value', ['legacy', False, True])
-def test_actual_kubernetes_manifest_records_server_only_opt_in(tmp_path, monkeypatch, value):
+@pytest.mark.parametrize('egress', [[], ['192.0.2.86', '192.0.2.87']])
+def test_actual_kubernetes_manifest_records_server_only_opt_in(tmp_path, monkeypatch, value, egress):
     obj = kube_install(tmp_path)
     if value != 'legacy': obj.config['observability'] = value
+    if egress: obj.config['origin_egress_ips'] = egress
+    monkeypatch.setenv('IRIS_ORIGIN_EGRESS_IPS', '203.0.113.99')
     (tmp_path / 'roots').mkdir()
     for name, key in [('a', 'AAAA'), ('b', 'BBBB')]:
         (tmp_path / 'roots' / (name + '.pub')).write_text('ssh-ed25519 ' + key + '\n')
@@ -129,8 +138,10 @@ def test_actual_kubernetes_manifest_records_server_only_opt_in(tmp_path, monkeyp
     rows = obj.manifests()
     server = next(row for row in rows if row['kind'] == 'ConfigMap' and row['metadata']['name'] == 'iris-seed-server')
     assert server['data']['IRIS_OBSERVABILITY'] == ('1' if value is True else '')
+    assert server['data']['IRIS_ORIGIN_EGRESS_IPS'] == ','.join(egress)
     console = next(row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == 'iris-console')
     assert all(row['name'] != 'IRIS_OBSERVABILITY' for row in console['spec']['template']['spec']['containers'][0]['env'])
+    assert all(row['name'] != 'IRIS_ORIGIN_EGRESS_IPS' for row in console['spec']['template']['spec']['containers'][0]['env'])
     assert obj.manifests() == rows and obj.config == original
 
 

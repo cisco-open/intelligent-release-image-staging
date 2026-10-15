@@ -143,6 +143,10 @@ def install_arguments(args):
         if name == "command":
             continue
         value = getattr(args, name)
+        if name == "origin_egress_ip":
+            for address in value:
+                result.extend(["--origin-egress-ip", address])
+            continue
         if value is None or value is False:
             continue
         result.append("--" + name.replace("_", "-"))

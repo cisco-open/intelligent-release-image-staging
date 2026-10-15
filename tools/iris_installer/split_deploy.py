@@ -33,6 +33,10 @@ SPLIT_FIELDS = {
 
 def validate_split_config(config):
     """Validate the transport separately from the common deployment fields."""
+    if isinstance(config, dict) and 'origin_egress_ips' in config:
+        from .deploy import origin_egress_ips
+        origin_egress_ips(config)
+        config = {key: value for key, value in config.items() if key != 'origin_egress_ips'}
     if isinstance(config, dict) and 'observability' in config:
         observability_enabled(config)
         config = {key: value for key, value in config.items() if key != 'observability'}

@@ -249,7 +249,28 @@ def observability_enabled(config):
     return value
 
 
+def origin_egress_ips(config):
+    """Retain the explicit outbound addresses across maintenance and resume."""
+    values = config.get('origin_egress_ips', [])
+    if (not isinstance(values, list) or len(values) > 8
+            or any(not isinstance(value, str) for value in values)
+            or len(set(values)) != len(values)):
+        raise InstallError('Origin egress needs up to eight distinct IPv4 addresses')
+    for value in values:
+        try:
+            address = ipaddress.IPv4Address(value)
+        except (ValueError, TypeError):
+            raise InstallError('Origin egress must be a concrete IPv4 address') from None
+        if (str(address) != value or address.is_unspecified or address.is_multicast
+                or address.is_loopback or address.is_link_local or address.is_reserved):
+            raise InstallError('Origin egress must be a routable unicast IPv4 address')
+    return list(values)
+
+
 def validate_config(config):
+    if isinstance(config, dict) and 'origin_egress_ips' in config:
+        origin_egress_ips(config)
+        config = {key: value for key, value in config.items() if key != 'origin_egress_ips'}
     if isinstance(config, dict) and 'observability' in config:
         observability_enabled(config)
         config = {key: value for key, value in config.items() if key != 'observability'}
@@ -441,6 +462,7 @@ class DockerInstall:
         os.chown(identity, 10001, 10001)
         settings = {
             "IRIS_HOST_IP": self.config["host"],
+            "IRIS_ORIGIN_EGRESS_IPS": ",".join(origin_egress_ips(self.config)),
             "IRIS_AGE_KEY_FILE_HOST": str(identity),
             "IRIS_AGE_RECIPIENTS": public + "," + self.config["recovery_recipient"],
             "IRIS_GUI_PUBLISH": str(self.config["console_port"]),
@@ -1005,6 +1027,8 @@ def start(args):
     config = {name: getattr(args, name) for name in (
         "target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls")}
     config['observability'] = getattr(args, 'observability', False)
+    if getattr(args, 'origin_egress_ip', []):
+        config['origin_egress_ips'] = list(args.origin_egress_ip)
     if getattr(args, 'image_root', None) is not None:
         config['image_root'] = str(args.image_root)
     if args.target == 'docker-split':

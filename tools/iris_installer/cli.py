@@ -66,6 +66,8 @@ def parser():
     install.add_argument("--state-dir", type=Path)
     install.add_argument("--instance", default="iris")
     install.add_argument("--host", help="device-facing IPv4 address on this host")
+    install.add_argument("--origin-egress-ip", action="append", default=[],
+                         help="fixed outbound origin IPv4 seen by devices; repeat for up to eight addresses")
     install.add_argument("--roots-dir", type=Path, help="exactly two approved PUBLIC roots")
     install.add_argument("--recovery-recipient", help="separately held age PUBLIC recovery recipient")
     install.add_argument("--console-bind", default="127.0.0.1", help="loopback by default; restrict remote access before exposing first claim")
