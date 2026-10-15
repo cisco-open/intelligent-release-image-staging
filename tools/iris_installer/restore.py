@@ -692,6 +692,9 @@ class Transaction:
                 raise InstallError('Approved restore backup bytes changed')
             if on_authority_started is not None:
                 on_authority_started()
+            prepare_runtime = getattr(install, 'prepare_restore_runtime', None)
+            if prepare_runtime:
+                prepare_runtime(self, data)
             install.credential_transaction = self
             install.credential_recovery = recovery
             self.save('stopping')

@@ -109,8 +109,11 @@ def inventory(request, run):
         row, = json.loads(run(['docker', 'container', 'inspect', identifier]))
         for mount in row.get('Mounts', []):
             source = Path(mount.get('Source', '/nonexistent-uninstall-mount'))
+            # A read-only host monitor may mount an ancestor such as /. Direct
+            # volume consumers and binds within the data remain removal blockers.
             require(mount.get('Name') not in volume_names and not (mount.get('Type') == 'bind' and any(
-                source == path or source in path.parents or path in source.parents for path in mountpoints)))
+                source == path or path in source.parents or
+                (source in path.parents and mount.get('RW') is not False) for path in mountpoints)))
     engine = json.loads(run(['docker', 'info', '--format', '{{json .ID}}']))
     require(isinstance(engine, str) and bool(engine))
     return {'engine': engine, 'resources': resources}

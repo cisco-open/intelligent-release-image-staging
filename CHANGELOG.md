@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Allow managed Docker removal alongside a read-only host filesystem monitor,
+  while retaining checks for writable mounts and direct volume consumers.
+- Keep local Kubernetes runtime images available while maintenance stops services,
+  and recover missing images from the authenticated backup before resuming.
 - Allow fixed origin egress IPv4 addresses in restricted peer policies when
   Kubernetes or another NAT topology uses a different catalog address.
 - Preserve per-device migration evidence without recommending older application

@@ -44,6 +44,10 @@ output lists exact removal targets and retained resources, an `operation_id`,
 and a `plan_sha256`. Review them before continuing. Planning leaves services
 running.
 
+Read-only host filesystem monitors can remain running. Other containers that
+mount the application's volumes directly must be removed from those volumes
+before uninstalling, including read-only consumers.
+
 To replace an unapplied plan, run `irisctl uninstall cancel` with the same
 `--state-dir`, `--operation-id`, and `--plan-sha256`. The cancelled plan remains
 in the installation history.

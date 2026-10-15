@@ -53,6 +53,11 @@ the worker preserves it when resuming. Use the same operation ID and retain its
 original data directories. For a new restore, follow
 [Restore a backup](backups.md#restore-a-backup).
 
+For local k3s installations, backup, credential rotation, and restore protect
+the recorded server and Console images from automatic image cleanup before
+stopping services. If an image is missing, restore recovers its exact bytes
+from the authenticated backup.
+
 ## Replace the independent recovery recipient
 
 Create the replacement with

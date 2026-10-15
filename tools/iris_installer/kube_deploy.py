@@ -839,6 +839,10 @@ print(json.dumps(proof))
         if set(images) != {"iris", "console"} or any(not re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", value) for value in images.values()):
             raise InstallError("Kubernetes lifecycle requires immutable image pins")
 
+    def prepare_restore_runtime(self, transaction, verified):
+        from .kube_restore_images import prepare
+        prepare(self, transaction, verified)
+
     def _recover_object_update(self):
         path = self.base / "kube-update.json"
         if not path.exists() and not path.is_symlink():
@@ -956,6 +960,8 @@ print(json.dumps(proof))
         if getattr(self, "credential_recovery", False):
             self._recover_object_update()
         self.pin_runtime()
+        from .kube_restore_images import protect_runtime
+        protect_runtime(self)
         proof = self.journal.document["completed"].get("kube-clean-stop")
         server = self.get("deployment", SERVICES["iris"])
         transaction = getattr(self, "credential_transaction", None)

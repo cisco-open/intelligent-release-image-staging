@@ -670,6 +670,29 @@ def test_handoff_failure_prevents_any_writer_fence(transaction):
     assert tx.run(recovery=True, pre_authority_recovery=True)['state'] == 'restored'
 
 
+def test_restore_runtime_preparation_follows_authentication_and_precedes_stop(transaction):
+    tx, sources, calls, install = transaction
+    def prepared(operation, verified):
+        assert operation is tx and verified['metadata']['scope'] == 'managed-deployment-files'
+        assert tx.record['data_sha256'] and calls == ['handoff']
+        calls.append('runtime-protected')
+    install.prepare_restore_runtime = prepared
+    assert tx.run(on_authority_started=lambda: calls.append('handoff'))['state'] == 'restored'
+    assert calls[:3] == ['handoff', 'runtime-protected', 'fenced']
+
+
+def test_restore_runtime_refusal_never_stops_services(transaction):
+    tx, sources, calls, install = transaction
+    def refused(*args):
+        raise InstallError('Runtime images unavailable')
+    install.prepare_restore_runtime = refused
+    with pytest.raises(InstallError, match='Runtime images unavailable'):tx.run()
+    assert calls == [] and tx.record['phase'] == 'verified'
+    install.prepare_restore_runtime = lambda *args: calls.append('runtime-protected')
+    assert tx.run(recovery=True)['state'] == 'restored'
+    assert calls[:2] == ['runtime-protected', 'fenced']
+
+
 @pytest.mark.parametrize('boundary', ['initial-write', 'directory-renamed'])
 def test_initial_authority_directory_is_published_whole_or_not_at_all(transaction, monkeypatch, boundary):
     tx, sources, calls, install = transaction

@@ -127,6 +127,30 @@ def test_docker_running_container_blocks_removal():
         docker.perform(dict(engine.request, action='remove', key='container/iris-server', expected=expected), engine.run)
 
 
+@pytest.mark.parametrize('source', ['/', '/var/lib/docker', '/var/lib/docker/volumes'])
+@pytest.mark.parametrize('writable', [False, True, None, 0])
+def test_docker_host_monitor_ancestor_mount_requires_explicit_read_only(source, writable):
+    engine = DockerEngine()
+    monitor = copy.deepcopy(engine.rows['container']['a' * 64])
+    monitor.update(Id='c' * 64, Name='/node-exporter')
+    monitor['Config']['Labels'] = {}
+    monitor['Mounts'] = [{'Type': 'bind', 'Source': source, 'RW': writable}]
+    engine.rows['container']['c' * 64] = monitor
+    if writable is not False:
+        with pytest.raises(ValueError):
+            docker.perform(engine.request, engine.run)
+        assert not any(row[2:3] == ['rm'] for row in engine.calls)
+        return
+    snapshot = docker.perform(engine.request, engine.run)
+    stopped = docker.perform(dict(engine.request, action='stop', key='container/iris-server',
+        expected=docker.stable(snapshot)), engine.run)
+    for key in ('container/iris-server', 'network/iris-net', 'volume/iris-data'):
+        stopped = docker.perform(dict(engine.request, action='remove', key=key,
+            expected=docker.stable(stopped)), engine.run)
+    assert stopped['resources'] == {}
+    assert engine.rows['container'] == {'c' * 64: monitor}
+
+
 def test_docker_network_runtime_status_changes_on_owned_clean_stop():
     # This is the real Docker inspect shape observed at the live refusal. Only
     # the transport is modeled; the shipped inventory/stop engine is exercised.
