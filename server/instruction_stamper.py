@@ -1636,7 +1636,8 @@ class InstructionStamper:
                                   if k != "allowed_expires_at"}
                 renewal = max(1, min(120, peer_endpoints.endpoint_ttl() // 3))
                 if membership_old == membership_new \
-                        and old_peers["allowed_expires_at"] - now > renewal:
+                        and old_peers["allowed_expires_at"] - now > renewal \
+                        and old_peers["allowed_expires_at"] <= body["expires_at"]:
                     part["peers"] = copy.deepcopy(old_peers)
 
             desired = {
