@@ -417,6 +417,7 @@ try {
   const reloadCertDraft = async () => {
     page.once('dialog', dialog => dialog.accept());
     await page.locator('#settings-review-cert').click();
+    await page.locator('#cert-msg').getByText('Current settings loaded. Review before submitting again.', {exact: true}).waitFor();
     await page.locator('#cert-pem').fill(certPEM);
     await page.locator('#cert-key').fill(keyPEM);
     await page.locator('#cert-passphrase').fill('fixture-passphrase');
