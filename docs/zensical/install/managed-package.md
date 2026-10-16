@@ -39,7 +39,6 @@ gh attestation verify iris-download/release-auth.py --repo "$repo" \
   --bundle iris-download/attestations.jsonl \
   --cert-oidc-issuer https://token.actions.githubusercontent.com \
   --cert-identity "https://github.com/$repo/.github/workflows/release.yml@refs/tags/$tag" \
-  --signer-workflow "$repo/.github/workflows/release.yml" \
   --source-ref "refs/tags/$tag" --source-digest "$commit" \
   --signer-digest "$commit" --deny-self-hosted-runners
 ```

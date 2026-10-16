@@ -90,7 +90,7 @@ def verify_command(artifact, tag, commit, bundle=None, *, trusted_root=None):
     command = ["gh", "attestation", "verify", str(artifact), "--repo", REPOSITORY,
                "--cert-oidc-issuer", "https://token.actions.githubusercontent.com",
                "--cert-identity", "https://github.com/" + WORKFLOW + "@refs/tags/" + tag,
-               "--signer-workflow", WORKFLOW, "--source-ref", "refs/tags/" + tag,
+               "--source-ref", "refs/tags/" + tag,
                "--source-digest", commit, "--signer-digest", commit,
                "--deny-self-hosted-runners"]
     if bundle is not None:

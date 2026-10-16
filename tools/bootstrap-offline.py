@@ -92,7 +92,7 @@ def verify_command(verifier, artifact, tag, commit, bundle, root):
     return [str(verifier), 'attestation', 'verify', str(artifact), '--repo', REPOSITORY,
         '--cert-oidc-issuer', 'https://token.actions.githubusercontent.com',
         '--cert-identity', 'https://github.com/' + WORKFLOW + '@refs/tags/' + tag,
-        '--signer-workflow', WORKFLOW, '--source-ref', 'refs/tags/' + tag,
+        '--source-ref', 'refs/tags/' + tag,
         '--source-digest', commit, '--signer-digest', commit, '--deny-self-hosted-runners',
         '--bundle', str(bundle), '--custom-trusted-root', str(root)]
 

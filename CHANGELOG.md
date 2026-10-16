@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.10.16.1]
+
+- Verify release attestations with compatible GitHub CLI options while retaining
+  the exact workflow identity, release tag, source commit and hosted-runner checks.
+
 ## [2026.10.16]
 
 - Make the Ubuntu .deb installer and automatic setup the main installation guide;
