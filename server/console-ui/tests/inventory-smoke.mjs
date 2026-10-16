@@ -134,6 +134,24 @@ try {
   await page.locator('#csv-menu-btn').click(); await page.keyboard.press('Escape');
   assert.equal(await page.locator('#csv-menu').isVisible(), false);
   assert.equal(await page.locator('#csv-menu-btn').evaluate(el => el === document.activeElement), true);
+  // Force Escape before the native details toggle event updates React state.
+  const filterEscape = await page.evaluate(async () => {
+    const details = document.querySelector('#more-filters'), summary = document.querySelector('#more-filters-summary');
+    const toggled = new Promise(resolve => details.addEventListener('toggle', resolve, {once: true}));
+    const snapshot = () => ({open: details.open, state: window.irisInventory.snapshot().filtersOpen,
+      summaryFocused: document.activeElement === summary});
+    summary.click();
+    const opened = {open: details.open, state: window.irisInventory.snapshot().filtersOpen};
+    const role = document.querySelector('#dev-filter-role'); role.focus();
+    role.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    const immediate = snapshot();
+    await toggled;
+    return {opened, immediate, settled: snapshot()};
+  });
+  assert.deepEqual(filterEscape.opened, {open: true, state: false}, 'Native toggle delivery is still pending');
+  const closedFilters = {open: false, state: false, summaryFocused: true};
+  assert.deepEqual(filterEscape.immediate, closedFilters, 'Escape closes the native panel before toggle delivery');
+  assert.deepEqual(filterEscape.settled, closedFilters, 'The queued toggle cannot reopen the panel');
   await page.locator('#more-filters-summary').click(); await page.locator('#dev-filter-role').focus(); await page.keyboard.press('Escape');
   await page.locator('#more-filters:not([open])').waitFor({state: 'attached'});
   assert.equal(await page.locator('#more-filters').getAttribute('open'), null);

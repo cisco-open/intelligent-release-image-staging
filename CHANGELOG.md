@@ -17,6 +17,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Close Inventory filters reliably when Escape follows immediately after opening.
+
 ## [2026.10.16]
 
 - Keep peer permissions within the selected instruction's expiry when a device

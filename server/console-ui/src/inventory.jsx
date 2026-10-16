@@ -148,7 +148,10 @@ function Inventory({controller, selectionRoot, tableRoot, capabilityRoot, status
       value={state.filters.q} onChange={event => controller.setFilter('q', event.target.value)} />
     <details id="more-filters" open={state.filtersOpen} onToggle={event => {
       if (event.currentTarget.open !== controller.snapshot().filtersOpen) controller.update({filtersOpen: event.currentTarget.open});
-    }} onKeyDown={event => { if (event.key === 'Escape') { controller.update({filtersOpen: false}); summary.current?.focus(); } }}>
+    }} onKeyDown={event => { if (event.key === 'Escape') {
+      // Native opening can precede its toggle event and the matching React state.
+      event.currentTarget.open = false; controller.update({filtersOpen: false}); summary.current?.focus();
+    } }}>
       <summary id="more-filters-summary" ref={summary}><svg className="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M4.5 8h7M6.5 12h3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
         <span id="more-filters-label">Filters{chips.filter(chip => chip.key !== 'q').length ? ` (${chips.filter(chip => chip.key !== 'q').length})` : ''}</span></summary>
       <div className="more-filters-body">{filterSpecs.map(spec => <label className="device-filter-field" key={spec[0]}>
