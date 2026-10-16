@@ -29,6 +29,22 @@ _xr() {
   _base IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_TEST_SKIP_MOUNT_CHECK=1 "$@"
 }
 
+_production() {
+  # Supply the image's working directory without requiring /opt/iris on the
+  # test host. Keep production mode and every entrypoint validation enabled.
+  env -i PATH="$PATH" "$@" bash -c '
+    _test_runtime=$1
+    cd() {
+      if [ "$#" -eq 1 ] && [ "$1" = /opt/iris ]; then
+        builtin cd "$_test_runtime"
+      else
+        builtin cd "$@"
+      fi
+    }
+    . "$0"
+  ' "$ENTRYPOINT" "$BATS_TEST_TMPDIR"
+}
+
 _placement_from_conf() {
   env -i PATH="$PATH" PYTHONPATH="$DEVICE/agent:$DEVICE" \
     python3 - "$CONF" "$1" <<'PY'
@@ -397,17 +413,15 @@ _device_builder() {
 }
 
 @test "production IOx requires CAF app-data and refuses a catalog path override" {
-  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=iox \
+  run _production IRIS_DEVICE_PLATFORM=iox \
     IRIS_CATALOG_URL=https://192.0.2.1:8443 IRIS_CATALOG_TOKEN=test-token \
     IRIS_DEVICE_ID=device-1 IRIS_DEVICE_SSH_HOST=192.0.2.2 \
-    IRIS_DEVICE_SSH_USER=test IRIS_DEVICE_SSH_PASS=test \
-    bash "$ENTRYPOINT"
+    IRIS_DEVICE_SSH_USER=test IRIS_DEVICE_SSH_PASS=test
   [ "$status" -ne 0 ]
   [[ "$output" == *"CAF_APP_APPDATA_DIR is required"* ]]
 
-  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=iox \
-    CAF_APP_APPDATA_DIR=/data/appdata IRIS_CATALOG_CA=/tmp/redirected.pem \
-    bash "$ENTRYPOINT"
+  run _production IRIS_DEVICE_PLATFORM=iox \
+    CAF_APP_APPDATA_DIR=/data/appdata IRIS_CATALOG_CA=/tmp/redirected.pem
   [ "$status" -ne 0 ]
   [[ "$output" == *"IRIS_CATALOG_CA is test-only"* ]]
 }
@@ -552,9 +566,9 @@ EOF
 }
 
 @test "XR test-only mount bypass cannot be enabled in production" {
-  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=xr-appmgr \
+  run _production IRIS_DEVICE_PLATFORM=xr-appmgr \
     IRIS_TEST_SKIP_MOUNT_CHECK=1 IRIS_CATALOG_URL=https://192.0.2.1:8443 \
-    IRIS_CATALOG_TOKEN=t IRIS_DEVICE_ID=d bash "$ENTRYPOINT"
+    IRIS_CATALOG_TOKEN=t IRIS_DEVICE_ID=d
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a mounted filesystem"* ]]
 }

@@ -17,6 +17,21 @@ setup() {
   mkdir -p "$REPO/tools" "$REPO/server" "$REPO/artifacts" "$REPO/bin" "$STUB"
 
   cp "$BATS_TEST_DIRNAME/../../tools/start-compose-server.sh" "$REPO/tools/"
+  # Keep the real emulation prerequisite, but read an owned status fixture
+  # rather than depending on the test host's binfmt registration.
+  QEMU_STATUS="$BATS_TEST_TMPDIR/qemu-aarch64"
+  printf 'enabled\n' > "$QEMU_STATUS"
+  python3 - "$REPO/tools/start-compose-server.sh" "$QEMU_STATUS" <<'PY'
+from pathlib import Path
+import shlex
+import sys
+
+script = Path(sys.argv[1])
+source = script.read_text()
+status_path = "/proc/sys/fs/binfmt_misc/qemu-aarch64"
+assert source.count(status_path) == 2
+script.write_text(source.replace(status_path, shlex.quote(sys.argv[2])))
+PY
   cp "$BATS_TEST_DIRNAME/../../tools/check-host-time.sh" "$REPO/tools/"
   printf '#!/usr/bin/env bash\necho yes\n' > "$STUB/timedatectl"
   printf '#!/usr/bin/env bash\necho "Leap status : Normal"\necho "Stratum : 5"\necho "Reference ID : C000027B"\n' > "$STUB/chronyc"
@@ -83,6 +98,22 @@ STUB
 
 run_bringup() {
   PATH="$STUB:$PATH" run bash "$REPO/tools/start-compose-server.sh"
+}
+
+@test "missing ARM64 emulation is refused before Docker runs" {
+  rm "$QEMU_STATUS"
+  run_bringup
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ARM64 emulation is not enabled"* ]]
+  [ ! -s "$DOCKER_LOG" ]
+}
+
+@test "disabled ARM64 emulation is refused before Docker runs" {
+  printf 'disabled\n' > "$QEMU_STATUS"
+  run_bringup
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ARM64 emulation is not enabled"* ]]
+  [ ! -s "$DOCKER_LOG" ]
 }
 
 @test "health poll targets the compose-resolved container, not the literal 'iris'" {
