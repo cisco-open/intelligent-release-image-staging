@@ -66,7 +66,7 @@ def test_lost_creation_response_does_not_claim_the_schedule_was_not_created():
     if not node:
         pytest.skip("Node is required for Console schedule tests")
     test = Path(__file__).resolve().parents[1] / "console-ui/tests/schedules.test.mjs"
-    result = subprocess.run([node, "--test", "--test-name-pattern", "creation lost", str(test)],
+    result = subprocess.run([node, "--test", "--test-reporter=tap", "--test-name-pattern", "creation lost", str(test)],
                             text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "# pass 1" in result.stdout

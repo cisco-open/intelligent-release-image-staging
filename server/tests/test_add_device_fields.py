@@ -20,7 +20,7 @@ def test_device_and_credential_form_regressions():
     if not node:
         pytest.skip("Node is required for device form regressions")
     tests = Path(__file__).resolve().parents[1] / "console-ui/tests/device-forms.test.mjs"
-    result = subprocess.run([node, "--test", str(tests)], text=True,
+    result = subprocess.run([node, "--test", "--test-reporter=tap", str(tests)], text=True,
                             capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "# fail 0" in result.stdout

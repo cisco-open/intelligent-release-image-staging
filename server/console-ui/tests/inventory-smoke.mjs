@@ -135,6 +135,7 @@ try {
   assert.equal(await page.locator('#csv-menu').isVisible(), false);
   assert.equal(await page.locator('#csv-menu-btn').evaluate(el => el === document.activeElement), true);
   await page.locator('#more-filters-summary').click(); await page.locator('#dev-filter-role').focus(); await page.keyboard.press('Escape');
+  await page.locator('#more-filters:not([open])').waitFor({state: 'attached'});
   assert.equal(await page.locator('#more-filters').getAttribute('open'), null);
   assert.equal(await page.locator('#more-filters-summary').evaluate(el => el === document.activeElement), true);
   for (const width of [1440, 390, 320]) {

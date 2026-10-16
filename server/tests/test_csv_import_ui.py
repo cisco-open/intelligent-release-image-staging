@@ -16,7 +16,7 @@ def test_csv_and_inventory_action_controller_regressions():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required for the shipped browser controller")
-    result = subprocess.run([node, "--test", str(ROOT / "console-ui/tests/inventory-actions.test.mjs")],
+    result = subprocess.run([node, "--test", "--test-reporter=tap", str(ROOT / "console-ui/tests/inventory-actions.test.mjs")],
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "# fail 0" in result.stdout

@@ -14,7 +14,7 @@ CONTROLLER = (SOURCE / "settings-controller.mjs").read_text()
 
 def _runtime(pattern):
     tests = SOURCE.parent / "tests/settings.test.mjs"
-    result = subprocess.run(["node", "--test", "--test-name-pattern", pattern, str(tests)],
+    result = subprocess.run(["node", "--test", "--test-reporter=tap", "--test-name-pattern", pattern, str(tests)],
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert re.search(r"# pass [1-9][0-9]*", result.stdout)

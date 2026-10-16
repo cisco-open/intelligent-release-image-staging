@@ -147,7 +147,7 @@ def _run_policies_node(pattern):
     import subprocess
     tests = Path(gui_server.WEBROOT).parent / "console-ui/tests/policies.test.mjs"
     result = subprocess.run(
-        ["node", "--test", "--test-name-pattern", pattern, str(tests)],
+        ["node", "--test", "--test-reporter=tap", "--test-name-pattern", pattern, str(tests)],
         text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert re.search(r"# pass [1-9][0-9]*", result.stdout), result.stdout
@@ -9317,7 +9317,7 @@ def test_assignment_models_and_controller_behavior():
     if not node:
         pytest.skip("Node is required for assignment client regressions")
     tests = Path(gui_server.WEBROOT).parent / "console-ui/tests/assignments.test.mjs"
-    result = subprocess.run([node, "--test", str(tests)], text=True,
+    result = subprocess.run([node, "--test", "--test-reporter=tap", str(tests)], text=True,
                             capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "# fail 0" in result.stdout

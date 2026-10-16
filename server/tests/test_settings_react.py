@@ -83,7 +83,7 @@ console.log('Authenticated Settings controller round-trip passed');
 
 def test_shipped_settings_controller_regressions():
     tests = Path(__file__).parents[1] / "console-ui/tests/settings.test.mjs"
-    result = subprocess.run(["node", "--test", str(tests)], text=True,
+    result = subprocess.run(["node", "--test", "--test-reporter=tap", str(tests)], text=True,
                             capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert re.search(r"# pass [1-9][0-9]*", result.stdout)
