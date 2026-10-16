@@ -95,7 +95,7 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     <p>For separate hosts, use <code>server/docker-compose.server.yml</code>
     on the server and <code>server/docker-compose.console.yml</code> on the
     Console host, together with each host's <code>--env-file</code>. The
-    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/separate-docker-hosts/" target="_blank" rel="noopener">separate-host setup guide</a>
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/managed-package/#docker-on-separate-hosts" target="_blank" rel="noopener">automated separate-host setup guide</a>
     covers certificates, credentials, and commands.</p>
     <ol>
       <li>If the Console cannot load, check the <code>console</code> logs,
@@ -279,7 +279,7 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     <h2>More detail</h2>
     <ul>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/managed-package/" target="_blank" rel="noopener">Install the Ubuntu .deb package</a> — automated setup for Docker and Kubernetes</li>
-      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/separate-docker-hosts/" target="_blank" rel="noopener">Docker on separate hosts</a> — deployment, private management connection, credential rotation</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/managed-package/#docker-on-separate-hosts" target="_blank" rel="noopener">Docker on separate hosts</a> — automated deployment and the private management connection</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/" target="_blank" rel="noopener">User Guide: everyday tasks, maintenance, troubleshooting</a></li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/architecture/network-ports/" target="_blank" rel="noopener">Network ports and flows</a> — every port and what rides it</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/monitoring/" target="_blank" rel="noopener">Monitor transfers and device reports</a> — progress, swarm membership, transfer speed</li>
