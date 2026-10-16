@@ -206,7 +206,7 @@ def test_prebuilt_intake_docs_require_separate_upload_authority_and_same_intent_
 def test_manual_server_build_requires_emulation_before_iox_registration():
     start = (ROOT / "tools/start-compose-server.sh").read_text()
     stage = (ROOT / "tools/stage-iox-package.sh").read_text()
-    operator = " ".join(_document("install/build-tools.md").split())
+    operator = " ".join(_document("reference/manual-installation/build-tools.md").split())
     contributor = " ".join((ROOT / "docs/dev/device-packages.md").read_text().split())
     assert "ARM64 emulation is not enabled on the Docker build host" in start
     assert '"tonistiigi/binfmt@$BINFMT_IMAGE_DIGEST" --install arm64' in stage
@@ -216,7 +216,7 @@ def test_manual_server_build_requires_emulation_before_iox_registration():
 
 
 def test_kubernetes_token_rotation_reuses_protected_installation_files():
-    install = _document("install/kubernetes.md")
+    install = _document("reference/manual-installation/kubernetes.md")
     rotations = _document("admin-guide/rotations.md")
     token_section = rotations.split("## Rotate the certificate that devices trust", 1)[0]
     kube = token_section.split("### On Kubernetes", 1)[1]

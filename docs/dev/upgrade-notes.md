@@ -60,7 +60,7 @@ appmgr, so a change to what the agent reports rolls out with the agent that
 reads it, not ahead of it. Any change under `device/agent/` needs a fresh
 Guest Shell bundle, both IOx tars, and `iris-xr.rpm` before you roll it out;
 see
-[Build and publish the device packages](../zensical/install/device-packages.md#embedded-agent-packages)
+[Build and publish the device packages](../zensical/reference/manual-installation/device-packages.md#embedded-agent-packages)
 for when to rebuild each one.
 
 The catalog's `plans` map is keyed by image ID. Each entry carries a
@@ -101,7 +101,7 @@ to import a certificate.
   the trust model and what the agent checks before it applies an instruction.
 - [KDF, PAE layout, iris-aead adapter and the OpenSSL pin](instruction-crypto.md):
   how the v2 envelope is actually built.
-- [Build and publish the device packages](../zensical/install/device-packages.md#embedded-agent-packages):
+- [Build and publish the device packages](../zensical/reference/manual-installation/device-packages.md#embedded-agent-packages):
   when a change under `device/agent/` needs a package rebuild.
 - [Deploy a new release](../zensical/admin-guide/upgrade.md): undeploy, remove,
   install the replacement and onboard its agents.

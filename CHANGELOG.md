@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Make the Ubuntu .deb installer and automatic setup the main installation guide;
+  keep manual provisioning under Reference with redirects for existing links.
+
 - Close Inventory filters reliably when Escape follows immediately after opening.
 
 ## [2026.10.16]

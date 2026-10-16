@@ -64,7 +64,7 @@ docker compose -f server/docker-compose.yml exec iris \
 
 1. On the server host, run `iris_server exec iris iris-management-token rotate`.
    The new value lands in `current.json` in `IRIS_TIER_AUTH_DIR`, whose path is
-   set in [Install on separate Docker hosts](../install/separate-docker-hosts.md).
+   set in [Install on separate Docker hosts](../reference/manual-installation/separate-docker-hosts.md).
 2. Copy that file to the Console host over verified SSH, under a temporary name
    in its `IRIS_TIER_AUTH_DIR`. Set owner `10001:10001` and mode 600, then
    rename it to `current.json` there.
@@ -75,7 +75,7 @@ docker compose -f server/docker-compose.yml exec iris \
 
 ### On Kubernetes
 
-1. Use the protected files from [installation](../install/kubernetes.md#3-create-the-namespace-keys-and-certificates).
+1. Use the protected files from [installation](../reference/manual-installation/kubernetes.md#3-create-the-namespace-keys-and-certificates).
    Save the old token, then generate its replacement:
 
 ```bash

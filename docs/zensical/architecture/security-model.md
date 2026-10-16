@@ -20,7 +20,7 @@ This page says what IRIS refuses to do on a device, where each trust boundary si
 | Private swarm | Torrents use private metadata and authenticated announces. |
 | Unprivileged runtime | Every server process runs as a fixed non-root uid with `cap_drop: [ALL]`: no listener uses a privileged port, no service needs a raw socket, and nothing chowns anything at runtime. |
 
-`docker compose run` inherits `cap_drop: [ALL]`, even with `--user 0`. Repair host-volume ownership with the separate maintenance container described in [Install on one Docker host](../install/one-docker-host.md).
+`docker compose run` inherits `cap_drop: [ALL]`, even with `--user 0`. Repair host-volume ownership with the separate maintenance container described in [Install on one Docker host](../reference/manual-installation/one-docker-host.md).
 
 Teardown follows the deployment record and removes only what IRIS created. See [Data formats and states](../reference/state-and-data.md).
 

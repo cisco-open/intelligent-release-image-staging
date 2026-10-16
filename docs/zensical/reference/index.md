@@ -42,6 +42,7 @@ serve the device agent, not your integrations: see
 | [APIs the device agent uses](device-apis.md) | The catalog, tracker, telemetry and artifact listeners, and what each answers. |
 | [Data formats and states](state-and-data.md) | Catalog fields, policy fields, CSV columns, device state names. |
 | [Telemetry signals](telemetry-signals.md) | Metric families, one attribute table per log event, example records. |
+| [Manual installation reference](manual-installation/index.md) | Individual build, key and deployment procedures. |
 | [Helper commands](tools.md) | Each helper script: what it does, where it runs, which task uses it. |
 | [Glossary](glossary.md) | The words IRIS uses, each with its plain meaning. |
 | [Cisco references and third-party components](external-references.md) | The Cisco documentation the guides cite, and the third-party parts IRIS ships. |

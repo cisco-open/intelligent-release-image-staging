@@ -115,7 +115,7 @@ before it ships. Build the Guest Shell bundle, both IOx tars, and the IOS-XR
 rpm from the same reviewed source, using the matching checksum-pinned aria2c
 client for each architecture. For the full
 build and publish steps, including the ARM64 IOx package, see
-[Build and publish the device packages](../zensical/install/device-packages.md#build-and-publish-the-arm64-iox-package).
+[Build and publish the device packages](../zensical/reference/manual-installation/device-packages.md#build-and-publish-the-arm64-iox-package).
 
 Compare the agent source bytes and the two public instruction root files
 across every built package, and record the wrapper and OCI provenance. Then
@@ -170,7 +170,7 @@ root or the wrong namespace.
 This release covers the single-replica Kubernetes layout, the same as
 single-host and split-host Compose. Before you sign off a Kubernetes
 release, confirm the deployment still matches
-[Kubernetes topology](../zensical/install/kubernetes.md#topology).
+[Kubernetes topology](../zensical/reference/manual-installation/kubernetes.md#topology).
 A multi-replica server is out of scope; see
 [Limitations](../zensical/architecture/limitations.md).
 
@@ -180,7 +180,7 @@ A multi-replica server is out of scope; see
   the build details behind the rebuild rule above.
 - [Where server state lives](../zensical/reference/state-and-data.md#where-server-state-lives):
   the persistent state files and per-device stores.
-- [Kubernetes topology](../zensical/install/kubernetes.md#topology): the
+- [Kubernetes topology](../zensical/reference/manual-installation/kubernetes.md#topology): the
   server-only PVC and single-server replica limit.
 - [Limitations](../zensical/architecture/limitations.md): what multi-replica
   Kubernetes and an absent verifier tool do not cover.

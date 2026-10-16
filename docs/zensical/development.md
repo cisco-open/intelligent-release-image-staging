@@ -3,5 +3,5 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 template: redirect.html
-location: ../install/device-packages/
+location: ../reference/manual-installation/device-packages/
 ---

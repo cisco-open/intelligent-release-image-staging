@@ -47,14 +47,14 @@ make a test or a demo easier to run.
 
 ## Run a checkout for local development
 
-Follow [Install on one Docker host](docs/zensical/install/one-docker-host.md)
+Follow [Install on one Docker host](docs/zensical/reference/manual-installation/one-docker-host.md)
 to bring up the server and Console from your checkout; the same steps work
 for a development instance.
 
 Give a second checkout its own compose project name, container names, and
 artifacts directory so it doesn't collide with a deployment that's already
 running. See
-[Running a second stack on the same host](docs/zensical/install/one-docker-host.md#running-a-second-stack-on-the-same-host).
+[Running a second stack on the same host](docs/zensical/reference/manual-installation/one-docker-host.md#running-a-second-stack-on-the-same-host).
 
 The Console frontend builds separately from the server. See
 [The React build, mount roots and CSP](docs/dev/console-ui.md) for how to
@@ -76,7 +76,7 @@ tools/check-package-freshness.sh
 The first command rebuilds the image the server container starts from. The
 other three build the prebuilt IOx and IOS-XR packages and check that they
 match that rebuilt image. See
-[When to rebuild the packages](docs/zensical/install/device-packages.md#embedded-agent-packages)
+[When to rebuild the packages](docs/zensical/reference/manual-installation/device-packages.md#embedded-agent-packages)
 for the operator-facing rule on when a rebuild is required.
 
 If the image archive already holds source at the same version, the build

@@ -242,15 +242,16 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     <p>The IOx tars and XR RPM contain no deployment certificate.
     Onboarding supplies it separately. After certificate rotation,
     re-onboard affected devices; the packages can be reused.</p>
-    <p>After shared-agent changes, rebuild the server to refresh the Guest
-    Shell bundle, then rebuild both IOx packages and the XR RPM on the
-    Docker host. See the
-    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/device-packages/#embedded-agent-packages" target="_blank" rel="noopener">package rebuild instructions</a>.
+    <p>The Ubuntu .deb installer runs <code>irisctl setup</code> to prepare
+    signing and all device packages automatically. For a new release, follow
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/admin-guide/upgrade/" target="_blank" rel="noopener">Deploy a new release</a>.
+    Manual builds are covered by the
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/reference/manual-installation/device-packages/#embedded-agent-packages" target="_blank" rel="noopener">package rebuild reference</a>.
     Settings → Device packages checks wrapper bytes against their build
     manifests. A ready result does not authenticate those manifests, prove the
     packages contain the latest source, or validate a native signature.
-    Artifact updated is the file's modification time. Build only the platforms
-    you use, then select Re-check packages.</p>
+    Artifact updated is the file's modification time. Select Re-check packages
+    to refresh the prepared packages' status.</p>
     <p>Settings → Image verification shows completed Bulk Hash checks separately
     from a configured schedule. If a reply is lost, use Review current status
     before retrying. Review discards unsaved schedule edits and loads the latest
@@ -277,7 +278,7 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
 
     <h2>More detail</h2>
     <ul>
-      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/one-docker-host/" target="_blank" rel="noopener">Install on one Docker host</a> — server and Console bring-up, signing roots, first administrator</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/managed-package/" target="_blank" rel="noopener">Install the Ubuntu .deb package</a> — automated setup for Docker and Kubernetes</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/separate-docker-hosts/" target="_blank" rel="noopener">Docker on separate hosts</a> — deployment, private management connection, credential rotation</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/" target="_blank" rel="noopener">User Guide: everyday tasks, maintenance, troubleshooting</a></li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/architecture/network-ports/" target="_blank" rel="noopener">Network ports and flows</a> — every port and what rides it</li>

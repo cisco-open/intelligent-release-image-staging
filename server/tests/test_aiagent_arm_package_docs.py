@@ -13,7 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DOCS = ROOT / "docs" / "zensical"
 INSTALL = DOCS / "install"
-GUIDE = (INSTALL / "device-packages.md").read_text()
+MANUAL = DOCS / "reference/manual-installation"
+GUIDE = (MANUAL / "device-packages.md").read_text()
 ANCHOR = "#build-and-publish-the-arm64-iox-package"
 # The recipe kept its id when the heading text changed: the H2 now reads
 # "Build the packages { #build-and-publish-the-arm64-iox-package }". Split on
@@ -70,7 +71,7 @@ def test_all_layouts_link_the_shared_arm_recipe():
         section = GUIDE.split(f"### {layout}\n", 1)[1].split("\n### ", 1)[0]
         assert ANCHOR in section, layout
     for page in ("separate-docker-hosts.md", "kubernetes.md"):
-        assert f"device-packages.md{ANCHOR}" in (INSTALL / page).read_text()
+        assert f"device-packages.md{ANCHOR}" in (MANUAL / page).read_text()
 
 
 def test_arm_recipe_shell_examples_parse_without_executing():
@@ -84,7 +85,7 @@ def test_arm_recipe_shell_examples_parse_without_executing():
 
 
 def test_split_docker_initializes_public_roots_before_starting_fresh_server():
-    guide = (INSTALL / "separate-docker-hosts.md").read_text()
+    guide = (MANUAL / "separate-docker-hosts.md").read_text()
     section = guide.split("## Start the server host\n", 1)[1].split(
         "\n## Start the Console host", 1)[0]
     root_install = 'install -m 0644 /pub/*.pub "$IRIS_CONFIG/instr/roots.d/"'

@@ -10,14 +10,11 @@ Check that your server works before the first device reaches it.
 
 ## Before you start
 
-- Finish the deployment page for your layout:
-  [Install on one Docker host](one-docker-host.md),
-  [Install on separate Docker hosts](separate-docker-hosts.md), or
-  [Install on Kubernetes](kubernetes.md).
+- Finish [Install IRIS with the Ubuntu .deb package](managed-package.md).
+  Setup checks the services, signing and device packages before it finishes.
 - Create the Console administrator and sign in once:
   [Sign in for the first time](first-sign-in.md).
-- Publish the device packages if you onboard IOx or IOS-XR devices:
-  [Build and publish the device packages](device-packages.md).
+- Open **Settings > Device packages** and check that the prepared packages are ready.
 
 !!! warning
 
@@ -27,8 +24,8 @@ Check that your server works before the first device reaches it.
 ## Check the deployment for your layout
 
 Read the column for the layout you deployed and confirm every row. The
-"Devices and signing" row checks the state
-[Turn on instruction signing](activate-signing.md) sets up.
+"Devices and signing" row describes the signing state that `irisctl setup`
+configures automatically.
 
 | Check | Docker on one host | Docker on separate hosts | Kubernetes |
 | --- | --- | --- | --- |

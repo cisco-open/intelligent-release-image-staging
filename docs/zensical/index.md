@@ -26,7 +26,8 @@ platforms are validated.
 
 | If you want to | Read |
 | --- | --- |
-| Set up IRIS on a host that has never run it | [Install IRIS](install/index.md) |
+| Plan hosts and device onboarding | [Install IRIS](install/index.md) |
+| Set up IRIS with automatic signing and package preparation | [Install the Ubuntu .deb package](install/managed-package.md) |
 | Run IRIS every day | [Run IRIS day to day](user-guide/index.md) |
 | Maintain deployments, backups, credentials and signing keys | [Keep IRIS running](admin-guide/index.md) |
 | See how IRIS works | [How IRIS works](architecture/index.md) |
@@ -36,7 +37,7 @@ platforms are validated.
 
 | Task | Page |
 | --- | --- |
-| Deploy the server | [Install on one Docker host](install/one-docker-host.md) |
+| Deploy on one Docker host, separate hosts or Kubernetes | [Install the Ubuntu .deb package](install/managed-package.md) |
 | Onboard a device | [Add and onboard devices](user-guide/onboarding.md) |
 | Stage your first image | [Stage your first image](user-guide/first-image.md) |
 | Check staging status | [Assign images and check staging status](user-guide/assignments.md) |

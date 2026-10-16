@@ -29,23 +29,10 @@ nav = [
       { "Supported devices" = "install/supported-devices.md" },
       { "Open the ports" = "install/open-ports.md" },
     ] },
-    { "Get the tools and keys" = [
-      { "Download the build tools" = "install/build-tools.md" },
-      { "Build the images" = "install/build-images.md" },
-      { "Create the signing keys" = "install/signing-roots.md" },
-      { "Approve signing requests offline" = "install/offline-approval.md" },
-    ] },
-    { "Deploy the server" = [
-      { "One Docker host" = "install/one-docker-host.md" },
-      { "Managed installer candidate" = "install/managed-package.md" },
-      { "Separate Docker hosts" = "install/separate-docker-hosts.md" },
-      { "Kubernetes" = "install/kubernetes.md" },
-    ] },
+    { "Install with the managed package" = "install/managed-package.md" },
     { "Finish the server setup" = [
       { "Sign in for the first time" = "install/first-sign-in.md" },
-      { "Turn on instruction signing" = "install/activate-signing.md" },
       { "Certificates and tokens" = "install/certificates-and-tokens.md" },
-      { "Device packages" = "install/device-packages.md" },
       { "Verify the installation" = "install/verify.md" },
     ] },
     { "Prepare devices" = [
@@ -109,6 +96,20 @@ nav = [
     { "Data and telemetry" = [
       { "Data formats and states" = "reference/state-and-data.md" },
       { "Telemetry signals" = "reference/telemetry-signals.md" },
+    ] },
+    { "Manual installation" = [
+      { "Manual installation reference" = "reference/manual-installation/index.md" },
+      { "Prepare the host" = "reference/manual-installation/check-the-host.md" },
+      { "Download the build tools" = "reference/manual-installation/build-tools.md" },
+      { "Build the images" = "reference/manual-installation/build-images.md" },
+      { "Create the signing keys" = "reference/manual-installation/signing-roots.md" },
+      { "Approve signing requests" = "reference/manual-installation/offline-approval.md" },
+      { "One Docker host" = "reference/manual-installation/one-docker-host.md" },
+      { "Separate Docker hosts" = "reference/manual-installation/separate-docker-hosts.md" },
+      { "Kubernetes" = "reference/manual-installation/kubernetes.md" },
+      { "Turn on instruction signing" = "reference/manual-installation/activate-signing.md" },
+      { "Build and publish device packages" = "reference/manual-installation/device-packages.md" },
+      { "Certificates and tokens" = "reference/manual-installation/certificates-and-tokens.md" },
     ] },
     { "Lookup" = [
       { "Helper commands" = "reference/tools.md" },

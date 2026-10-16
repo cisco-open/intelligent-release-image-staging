@@ -10,11 +10,11 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-# The old single AI guide split when the manual was reorganized: the operator
-# steps went to the Installation Guide, the package-build recipe to the
-# developer notes. Each block below is executed from the page that owns it.
-GUIDE_INSTALL = (ROOT / "docs/zensical/install/check-the-host.md").read_text()
-GUIDE_SIGNING = (ROOT / "docs/zensical/install/activate-signing.md").read_text()
+# The manual host and signing commands live in Reference; package builds
+# live in the developer notes. Execute each block from the page that owns it.
+MANUAL = ROOT / "docs/zensical/reference/manual-installation"
+GUIDE_INSTALL = (MANUAL / "check-the-host.md").read_text()
+GUIDE_SIGNING = (MANUAL / "activate-signing.md").read_text()
 GUIDE_BUILD = (ROOT / "docs/dev/device-packages.md").read_text()
 
 

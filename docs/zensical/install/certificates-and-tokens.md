@@ -4,43 +4,40 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Set up certificates and tokens
+# Trust the Console certificate and configure credentials
 
-Trust the initial browser certificate before signing in. Use the remaining
-sections when you replace a certificate or configure monitoring.
+Setup creates the initial certificates and service credentials. Trust the
+Console's public certificate before signing in, then use Settings for optional
+certificate changes and monitoring.
 
 ## Before you start
 
-- For Settings changes, sign in as the administrator. See [Sign in for the first time](first-sign-in.md).
-- The certificate and key for the browser address, or a private authority's root certificate.
+- Finish [Install IRIS with the Ubuntu .deb package](managed-package.md).
+- Know the installation's state directory and Console address.
+- For Settings changes, [sign in as the administrator](first-sign-in.md).
 
 ## Default browser identity
 
-The default browser identity is generated and stored encrypted in `tls/console-fallback.pem.age`, and reused on restart. Separate Docker hosts and Kubernetes mount their own.
+The default browser identity is generated and stored encrypted in
+`tls/console-fallback.pem.age`, and reused on restart. Separate Docker hosts and
+Kubernetes mount their own browser identity.
 
-A browser warns about it the first time. Add it to each client's trust store
-after you check it through a channel you already trust, or install your own
-certificate. The certificate must cover every DNS name or IP address operators
-use. If an address changes, replace the certificate unless it already covers
-the new address.
-
-On one Docker host, export only the public certificate through an authenticated
-host connection. Run from the repository root:
+Setup exports the public Console certificate to `requests/console-cert.pem`
+inside the installation's state directory. Obtain it through your authenticated
+host connection. For an installation using `/var/lib/iris-installer/my-iris`:
 
 ```bash
-docker compose -f server/docker-compose.yml exec -T iris \
-  openssl x509 -in /run/iris/tls/console-fallback.pem -outform PEM \
-  > console-ca.pem
+sudo cat /var/lib/iris-installer/my-iris/requests/console-cert.pem > console-ca.pem
 openssl x509 -in console-ca.pem -noout -sha256 -fingerprint
 ```
 
-Use `console-ca.pem` in the operator trust store or as `--cafile` for
-`tools/api-exercise.py`. For separate hosts or Kubernetes, obtain the public
-certificate from the Console TLS bundle or its issuing authority instead.
-Never copy the combined runtime PEM: it also contains the private key.
+Compare that fingerprint with the certificate your browser receives, then add
+`console-ca.pem` to your client's trust store. The certificate must cover every DNS name or IP address operators use. If that address changes, replace the certificate unless
+it already covers the new address.
 
 !!! warning
-    Never disable TLS verification.
+    Never disable TLS verification or copy the combined runtime PEM: it also
+    contains the private key.
 
 ## Install your own Console certificate
 
@@ -67,45 +64,27 @@ is using the replacement.
 3. Turn on automatic download. The server checks every 24 hours.
 4. Start a download and watch the job finish. Accepted: PEM, base64, a PKCS#7 bundle, and signed wrappers.
 
-## Create the scrape token
+## Configure monitoring credentials
 
-Do this only if a Prometheus server or collector scrapes the metrics listener. Create the token on the server host and give the scraper the same value as its `credentials_file`:
+Choose `--observability` during setup to enable the authenticated metrics
+listener. Set its scraper token through
+[Rotate telemetry credentials](../admin-guide/console-credentials.md#replace-the-metrics-scraping-token).
+Give the scraper the same token in its protected credentials file.
 
-```bash
-umask 077
-mkdir -p ~/.config/iris
-openssl rand -hex 32 > ~/.config/iris/observability-token
-export IRIS_OBSERVABILITY_TOKEN_FILE_HOST=$HOME/.config/iris/observability-token
-sudo chown 10001 "$IRIS_OBSERVABILITY_TOKEN_FILE_HOST"
-printf 'IRIS_OBSERVABILITY_TOKEN_FILE_HOST=%s\n' \
-  "$IRIS_OBSERVABILITY_TOKEN_FILE_HOST" >> server/.env
-```
-
-Both containers run as user and group `10001`; the `chown` lets them read the file. Recreate the server container to pick up the mount; see [Send telemetry to Splunk](../user-guide/splunk.md). For rotation, see [Rotate credentials and certificates](../admin-guide/rotations.md).
-
-## How the management credential is handled
-
-The Console's management credential is compared against the current and previous values in constant time before route lookup or body buffering. It never appears in an environment value, URL, process argument, exception, or audit entry.
-
-## Credential files on Kubernetes
-
-The same material arrives as Secrets, created before you apply the manifests. [Install on Kubernetes](kubernetes.md) has the commands. Create both `current` files, and the two `previous` files empty.
-
-| File | Secret | Format |
-| --- | --- | --- |
-| `current` and `previous` | `iris-tier-auth` | Raw token or scoped JSON management record |
-| `current` and `previous` | `iris-observability-auth` | The raw token value |
-| `headers` | `iris-otlp-headers` | Comma-separated `Name=Value` headers |
-| `tls.crt` and `tls.key` | `iris-console-tls` | The browser certificate |
-| `tls.crt` and `tls.key` | `iris-management-tls` | The management certificate, with service names as subject alternative names |
+Setup provisions the Console-to-server credential and, on Kubernetes, the
+required Secrets. Manage later changes through
+[Rotate credentials and certificates](../admin-guide/rotations.md).
+Manual credential-file layouts are in the
+[certificate and token reference](../reference/manual-installation/certificates-and-tokens.md).
 
 ## Verify
 
-- The Console settings view lists the certificate, the trust entries, and the download settings.
-- The Console loads with no warning from a client that trusts your authority, and keeps that certificate after a restart. A scrape with the token succeeds; one without it is refused.
+- The Console lists the intended certificate and trust entries.
+- A client that trusts the certificate opens the Console without a warning.
+- A configured metrics scraper succeeds with its token; a request without one is refused.
 
 ## Next steps
 
-- [Build and publish the device packages](device-packages.md)
+- [Sign in for the first time](first-sign-in.md)
 - [Verify the installation](verify.md)
 - [Export telemetry](../user-guide/telemetry-export.md)

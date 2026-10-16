@@ -94,7 +94,7 @@ all native packages.
 ## Replace the root signing keys { #replace-the-offline-signing-roots }
 
 1. Each root holder uses `iris-key-setup` to create a replacement. For keys on
-   the deployment host, use `iris-key-setup --local`. Use [separate key holders](../install/offline-approval.md)
+   the deployment host, use `iris-key-setup --local`. Use [separate key holders](../reference/manual-installation/offline-approval.md)
    or your chosen [local setup](../install/managed-package.md#guided-local-setup).
    Return only public keys and approvals to the Console.
 2. Select **Root signing keys** in the Console. Keep the
@@ -130,7 +130,7 @@ Complete or cancel any pending trust replacement first.
 2. Its holder runs `iris-key-setup`, or `iris-key-setup --local` for host-held keys,
    chooses **Approve server request**, and approves the retirement-list request with the matching
    private root. Follow the fingerprint checks in
-   [offline approval](../install/offline-approval.md).
+   [offline approval](../reference/manual-installation/offline-approval.md).
 3. Return only the signed public file. Choose it under **Approved public
    revocation list** and select **Validate root confirmation**.
 4. Select the other root, download a new request and repeat with its holder.

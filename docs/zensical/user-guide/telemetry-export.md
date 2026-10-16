@@ -102,7 +102,7 @@ kubectl -n iris create secret generic iris-otlp-headers \
 Its `headers` key holds the same `Name=Value` header specification, separated
 by commas, and only the server mounts it. To replace the value, re-apply the
 Secret and restart the server Deployment. See
-[Install on Kubernetes](../install/kubernetes.md).
+[Install on Kubernetes](../reference/manual-installation/kubernetes.md).
 
 !!! warning
 
