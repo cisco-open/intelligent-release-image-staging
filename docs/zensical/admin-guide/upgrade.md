@@ -4,90 +4,82 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Upgrade to a new release
+# Deploy a new release
 
-An upgrade is three steps: back up the server, undeploy the devices, and
-deploy the new release with fresh device agents. Your inventory, images, roles
-and schedules stay in place.
+Replace a deployment through removal and a new installation. Remove the old
+device agents and onboard them to the replacement after its checks pass.
 
 ## Before you start
 
-- Read the entry for the new version in `CHANGELOG.md`.
-- Let running device jobs finish. Open **Devices** and check that no onboard,
-  undeploy or staging job is in progress.
+- Read the new release's entry in `CHANGELOG.md`.
+- Let device jobs and server maintenance finish.
+- Keep an independent encrypted backup and the separate recovery keys.
+- Record the deployment's addresses, inventory, roles, assignments and schedules.
 
-## 1. Back up the server
+## 1. Back up and undeploy
 
-Follow [Back up and restore](backups.md). Keep the Compose project, the
-volumes, the age identity file, the environment files and the artifact
-directory you use today. The upgrade reuses all of them.
-
-## 2. Undeploy the devices
-
-1. Open **Devices**, select every onboarded device and choose **Undeploy**.
-2. Wait until each record shows the agent removed. See
+1. Follow [Back up and restore](backups.md) and verify the encrypted backup.
+   Keep the encrypted data and identity sets and their independent recovery keys.
+   Complete first-time [backup signer trust](backups.md#trust-the-backup-signer)
+   before verifying an archive.
+2. Open **Inventory**, select each onboarded device and choose **Undeploy**.
+3. Wait for every device to confirm that its agent was removed. Keep the
+   inventory export for the replacement. See
    [Undeploy, retire and clean up devices](../user-guide/undeploy.md).
 
-## 3. Deploy the new release
+Do not remove the server while a device's agent removal remains unconfirmed.
 
-On the host that runs the server, check out the release:
+## 2. Remove the old deployment
 
-```bash
-git fetch --tags
-git checkout v<version>
-```
+### Managed deployment replacement { #managed-single-host-docker }
 
-Then deploy it the same way you installed it.
+Use [Remove a managed deployment](uninstall.md) to review the exact resources,
+choose whether to retain data and confirm removal. Run it from the original
+controller and keep the same state directory and recorded topology.
 
-### On one Docker host
+A retained volume or backup is not automatically adopted by the next install.
+Keep the old private files and encrypted sets until the replacement is verified.
+Restoring a managed backup targets its original deployment; it is not a
+cross-deployment migration procedure.
 
-Load `server/.env` as on the install page, then run the start script again:
+### Source-checkout deployments
 
-```bash
-IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
-```
+Remove only the selected server and Console resources using the same Compose
+project or Kubernetes namespace and manifests that created them. On separate
+Docker hosts, remove the Console and server from their respective hosts.
+Preserve unrelated applications, images, networks and storage. Keep the original
+environment files and private keys with the recovery material.
 
-It rebuilds both images, keeps every volume and secret, restarts the two
-containers and rebuilds the device packages. See
-[Install on one Docker host](../install/one-docker-host.md).
+## 3. Install and onboard
 
-### On separate Docker hosts
+Download and authenticate the selected release. Follow the matching installation
+guide:
 
-Check out the release on both hosts. Rebuild and restart the server host
-first, then the Console host, with the commands in
-[Install on separate Docker hosts](../install/separate-docker-hosts.md). Then
-rebuild and publish the device packages as in
-[Build and publish the device packages](../install/device-packages.md).
+- [Install with the managed package](../install/managed-package.md)
+- [Install on one Docker host](../install/one-docker-host.md)
+- [Install on separate Docker hosts](../install/separate-docker-hosts.md)
+- [Install on Kubernetes](../install/kubernetes.md)
 
-### On Kubernetes
+A managed replacement is a new installation. Choose a new state directory and
+instance name, or a fresh dedicated Kubernetes namespace. Complete its normal
+signing approval, certificate checks and Console account setup. Do not point it
+at retained storage or edit ownership records to make it adopt the old deployment.
 
-Build and push both images, replace both digests in `kustomization.yaml`,
-apply, and wait for both rollouts, as in
-[Install on Kubernetes](../install/kubernetes.md). Then copy the rebuilt
-device packages to the server pod as in
-[Build and publish the device packages](../install/device-packages.md).
-
-### Onboard the devices again
-
-Open **Devices**, select the devices and choose **Onboard**. Each device gets
-the new agent package. Re-provision a device when replacing its bootstrap
-configuration or enrollment material: the cutover replaces only the staging
-agent's credentials and never touches the device's software.
+Import your inventory and re-create the required roles, assignments and
+schedules. Check the server and device packages before selecting the
+devices and choosing **Onboard**. Each device receives the replacement agent and
+its deployment-specific credentials.
 
 ## Verify
 
-- The Console Help popover names the new release.
+- The Console Help popover names the selected release.
 - **Settings → Device packages** shows `ok` for every package.
-- Each onboarded device reports a heartbeat on the new agent.
-
-| Symptom | Likely cause | What to do |
-| --- | --- | --- |
-| The Help popover shows an older version than the `VERSION` file | `IRIS_VERSION` is a build argument that overrides the image's `VERSION` file | Remove it from `server/.env` and the build shell, then rebuild both images. |
-| A device still reports the old agent | It was not undeployed before the upgrade | Undeploy it, then onboard it again. |
+- Each onboarded device reports a heartbeat to the replacement.
+- The intended image assignments and schedules are correct.
 
 ## Related
 
 - [Back up and restore](backups.md)
+- [Remove a managed deployment](uninstall.md)
 - [Undeploy, retire and clean up devices](../user-guide/undeploy.md)
 - [Add and onboard devices](../user-guide/onboarding.md)
-- [Build and publish the device packages](../install/device-packages.md)

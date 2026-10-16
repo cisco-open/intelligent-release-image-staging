@@ -6,311 +6,163 @@ SPDX-License-Identifier: Apache-2.0
 
 # The assistant-facing deployment runbook
 
-Many IRIS deployments start with an AI assistant driving the checkout, the
-build, and the first device onboarding, working from your answers instead of
-a fixed script. This page documents the runbook that assistant follows: what
-it asks before it changes anything, what it must never guess, and what it
-reports back when the work is done. Read it if you maintain that runbook, or
-if you want to know what an assistant did to your host.
+Use this runbook when helping someone install or validate IRIS. Confirm the
+requested layout, use the supported tools, preserve existing deployments and
+record what was actually verified.
 
 ## Before you start
 
-Prepare a local, git-ignored credential file if the assistant will connect to
-the server or to devices:
+Read the repository contributor instructions and the current
+[Installation Guide](../zensical/install/index.md). On Ubuntu, start with the
+[managed package procedure](../zensical/install/managed-package.md). The manual
+Docker and Kubernetes guides describe deployments not owned by that installer.
+Do not mix their commands or state directories with a managed installation.
 
-```bash
-cp creds/deploy.env.example creds/deploy.env
-chmod 600 creds/deploy.env
-```
-
-Keep credentials in that file, or enter them directly in the Console. Do not
-paste passwords, tokens, or private keys into a chat.
+Keep SSH and device credentials in a protected, git-ignored file such as
+`creds/deploy.env`, using `creds/deploy.env.example` as the template. Preserve an
+existing file. Keep passwords, tokens, private keys and passphrases out of chat,
+command output, logs and source control.
 
 ## The four decisions the assistant confirms
 
-Before it touches a host, the assistant confirms four things. It reuses any
-answer you already gave, asks only for what is missing, and asks in one
-message rather than one question at a time:
+Reuse answers already given and verified settings. Ask for missing decisions
+together before making changes:
 
-1. **Where the deployment lives.** It offers
-   `/opt/iris/intelligent-release-image-staging` as the default, then creates
-   that directory and clones into it. See [Install IRIS](../zensical/install/index.md).
-2. **Which layout:** Docker on one host, Docker on separate hosts, or
-   Kubernetes. For separate hosts it also asks for the Console host; for
-   Kubernetes it asks for the cluster context and a registry the nodes can
-   reach.
-3. **Which device types to onboard:** Guest Shell, IOx on amd64, IOx on
-   arm64, IOS-XR appmgr, or none yet. This choice decides which device
-   packages it needs to build. For API or infrastructure-only validation, it
-   skips device-package builds and onboarding entirely, and reports those
-   checks as not performed rather than building packages nobody asked for.
-4. **The server's device-reachable IPv4 address**, and the Console URL if it
-   differs from that address on port 8080.
+1. **Which host and instance:** for a managed install, record the instance name
+   and state directory. For a manual install, confirm the checkout directory.
+2. **Which layout:** Docker on one host, Docker on separate hosts, or Kubernetes.
+   For split Docker, identify the Console host. For Kubernetes, identify the
+   context, namespace, storage and image distribution method.
+3. **Which devices are in scope:** Guest Shell, amd64 or ARM64 IOx, IOS-XR appmgr,
+   or infrastructure checks only. Record which onboarding tests are requested.
+4. **Which addresses:** the device-facing server address and full browser
+   Console URL, including its HTTPS port.
 
-It repeats the answers back, checks the host, and states what is missing
-before installing anything. It stays within the layout you chose, and it
-reuses an existing deployment's compose project, volumes, age identity,
-approved instruction roots, and administrator account rather than asking you
-to settle them again.
+Repeat the selected configuration before changing it. For an existing managed
+install, use its recorded instance and state directory. Resume checks existing
+inputs; it does not adopt an unrelated deployment. Keep the same Compose
+projects, environment files, volumes or Kubernetes namespace during maintenance.
 
 ## What it checks and reads first
 
-Before cloning anything, the assistant runs the host checks in
-[Check the host before you install](../zensical/install/check-the-host.md)
-and reports, in one message, what is present and what is missing. It asks
-before installing a package, adding a user to the docker group, or
-registering an emulation handler, because those change your machine, and it
-continues only once you approve.
+Use [Check the host before you install](../zensical/install/check-the-host.md)
+and report missing prerequisites. Explain dependency installation, engine access,
+emulation and network exposure before applying changes within the approved task.
+An authorized installer run handles its dependencies; do not repeat those steps
+by hand. The current source-build installer needs network access and is not an
+offline kit.
 
-It reads this repository's own contributor guide and the current deployment
-guide for the layout you chose: [Install on one Docker host](../zensical/install/one-docker-host.md),
-[Install on separate Docker hosts](../zensical/install/separate-docker-hosts.md),
-or [Install on Kubernetes](../zensical/install/kubernetes.md). It keeps the
-same layout, compose project, environment files, and container names in
-every command, and it leaves your existing server state and device
-assignments in place.
+Verify a published package through the managed guide's attestation procedure.
+A locally built candidate has a different evidence boundary: record its exact
+source and hashes, without describing it as an authenticated public release.
 
-When it validates an existing installation, it reuses that deployment's
-administrator account instead of asking you to set one up again. An old
-Kubernetes PVC can carry a different administrator from a Docker
-installation, so it reads that deployment's own protected credential record
-rather than guessing or retrying passwords.
-
-It keeps credentials out of chat, command output, logs, and source control,
-and reads local credentials only when a step needs them. It never copies
-server state, the age identity, or the management private key to the Console
-host.
+Preserve existing accounts and assignments. A new installation leaves first
+account creation to its owner; do not claim the account or sign in unless asked.
+For authorized checks of an existing deployment, use its own protected credential
+record. Do not guess credentials or substitute those from another deployment.
+Never copy server state, the age identity or the management private key to a
+separate Console host.
 
 ## Building the device packages
 
-By default the assistant builds the Guest Shell bundle, the amd64 IOx
-package, and the IOS-XR RPM, whatever the device types you chose in the
-third decision. It adds the arm64 IOx package only when you explicitly ask
-for an ARM device or package, following
-[Build and publish the device packages](../zensical/install/device-packages.md#build-and-publish-the-arm64-iox-package).
-It skips a package only when you explicitly exclude it, and a package you
-excluded stays listed as not built. That is a correct end state, not a
-failure, and the assistant reports it that way.
+The managed installer builds Guest Shell bundles, both IOx architectures and the
+IOS-XR RPM as part of its current workflow. Selecting devices for a test does not
+change that installer contract. For a manual or isolated validation workflow,
+build only what the agreed test scope needs. Infrastructure-only checks can
+reuse qualified images without building device packages or onboarding devices.
 
-It fetches the verified `aria2c` release for each architecture in scope,
-rather than using a binary from anywhere else. It also builds the IOx and
-IOS-XR appmgr packages with the project's own helper scripts; see
-[Helper commands](../zensical/reference/tools.md) for what each one does.
-When a package's source changes after publishing, the rebuild rule is in
-[Build and publish the device packages](../zensical/install/device-packages.md#embedded-agent-packages).
+The tested aria2c clients are committed: `bin/aria2c` for amd64 and
+`deliverables/aria2c-aarch64` for ARM64. Builders verify their pinned checksums.
+Normal installation does not fetch or compile replacement clients. See
+[Build and publish the device packages](../zensical/install/device-packages.md)
+for manual package assembly and the shared-agent rebuild rule.
+
+The two approved public instruction roots are build inputs. Keep private keys
+outside build contexts, deployment volumes and containers. Native IOx package
+signing is a separate Cisco approval process; a SHA512 manifest is not a native
+signature. Keep device signature verification enabled and report missing native
+signing or admission evidence as a deployment gate.
 
 ## The arm64 aria2c build
 
-Building the arm64 `aria2c` client from source is the fallback for a host
-that cannot reach the published release. It is slow: it runs under CPU
-emulation, can take tens of minutes, and stays silent for long stretches.
-
-Before starting it, the assistant asks once whether an arm64 machine is
-reachable over SSH, since that removes the need for emulation. It states the
-cost up front, so you do not read the silence as a hang.
-
-It starts the build detached, so the build keeps running if the session that
-launched it drops, and it reports the elapsed time and the log's last line
-every few minutes. See
-[Building the device image, IOx wrappers, IOS-XR rpm and aria2c](device-packages.md)
-for the build command and its flags.
+Rebuilding aria2c is contributor maintenance, not an installation fallback. Use
+the committed ARM64 client for normal installs. When a source rebuild is
+explicitly requested, follow the pinned source and verification process in
+[Device package development](device-packages.md). Explain emulation costs before
+starting, retain the build log and report progress. Do not silently substitute
+a different binary when a download or package build fails.
 
 ## Who holds the private signing keys
 
-Two signing roots, the offline keys that sign every instruction key, must
-exist before any device package can be built, and only you create them. The
-assistant never generates them, and it refuses a private key if one is
-offered. It waits for the two public halves in `$HOME/iris-roots`, and on
-Kubernetes it copies only that public pair to the server's storage once the
-pod is running. See
-[Create the two offline signing keys](../zensical/install/signing-roots.md).
+`irisctl setup` defaults to automatic local keys and passes only public inputs
+to the privileged installer. It creates random root passphrases in protected
+files and approves its recorded server request without asking the owner to type
+key passphrases. `--key-mode manual` retains manual key creation and approval;
+existing manual keys require their original passphrases and are never replaced.
+Keep a secure independent copy of the entire key folder, including passphrase
+files and the recovery identity; deployment backups exclude these setup keys.
 
-One person holding both private keys works for a proof of concept only. It is
-not production custody and not signing evidence: say so explicitly when you
-report on a deployment set up this way.
+For later approvals on the deployment host, the owner runs
+`iris-key-setup --local` and confirms **LOCAL KEY HOLDER**. The normal
+`iris-key-setup` command retains separate-holder checks. Managed keys use their
+saved passphrases; the owner still reviews and confirms the request SHA256.
+Private-key operations
+are refused inside containers in both modes. A host compromise can expose both
+locally stored keys and their passphrases. Explain that tradeoff before setup.
+See [Create keys and approve signing requests](../zensical/install/offline-approval.md).
 
 ## Start signing instructions
 
-Once the stack is up and before you onboard any device, the assistant sets
-up the online signing key. This lets the server start signing instructions:
-each instruction is the signed message the server sends a device saying
-which images to stage and how.
+The managed installer generates the online key, exports its public request,
+waits for approval, imports the returned certificate and activates the producer.
+Use its guided approval or resume workflow rather than recreating keys manually.
+Only public requests and approvals move between the deployment and key holder.
 
-It never hands you a command before the file it reads exists. It generates
-the online key first, confirms `~/iris-online.pub` holds an `ssh-ed25519`
-line, and only then gives you the command that signs it. Certifying that key
-is yours to do, like creating the two signing roots. Without a signed
-instruction key, every onboarding fails on every platform with the same
-fixed, unhelpful message.
-
-See [Turn on instruction signing](../zensical/install/activate-signing.md#initialise-instruction-custody)
-for the exact commands. Read the same page's status guidance at
-[Turn on instruction signing](../zensical/install/activate-signing.md#reading-the-status)
-before you trust a quick two-field check.
+For a manual deployment, use
+[Turn on instruction signing](../zensical/install/activate-signing.md).
+Check that every input file exists before giving the owner its approval command.
+Read the complete signing status and producer health before onboarding; two
+status booleans alone do not establish readiness. Root confirmations, renewal
+and backup arrangements remain explicit owner actions.
 
 ## Assistant operating rules
 
-The paragraphs above describe the runbook in prose. The block below carries
-the same rules with the duplicate restatements removed, in a form you can
-paste into an assistant's system prompt as-is:
-
-```text
-Operate IRIS as a stage-only system. Never install, activate, reload, change
-boot variables, or replace the running software on a device.
-
-Confirm these four decisions using any answers already given and any
-verified settings. Ask only what is still unanswered, together in one
-message, and wait when a question blocks safe progress. Do not guess a
-layout, and do not start a Docker deployment only because it is the default:
-
-1. Where should the deployment live? Offer
-   /opt/iris/intelligent-release-image-staging as the default. Create the
-   directory and clone into it yourself.
-2. Which layout: Docker on one host, Docker on separate hosts, or
-   Kubernetes? For separate hosts, also ask for the Console host. For
-   Kubernetes, ask for the cluster context and a registry the nodes can pull
-   from.
-3. Which device types will be onboarded: Guest Shell, IOx on amd64, IOx on
-   arm64, IOS-XR appmgr, or none yet? Ask before building packages: asking
-   later wastes a build. For API or infrastructure-only validation, skip
-   device-package builds and onboarding entirely, and report those checks as
-   not performed.
-4. The server's device-reachable IPv4 address, and the Console URL if it is
-   not that address on port 8080.
-
-Repeat the answers back before acting on them, and work only within the
-layout you were given.
-
-Read this repository's own contributor guide and the current install guide
-for the chosen layout. Keep the same layout, compose project, environment
-files, and container names in every command. Preserve existing server state
-and device assignments.
-
-Keep credentials and secrets out of chat, command output, logs, and source
-control. Read local credentials only when a step needs them. Never copy
-server state, the age identity, or the management private key to the
-Console host.
-
-Check the host before anything else, and report what is present and what is
-missing in one message, naming which host each result came from. Ask before
-installing a package, adding a user to the docker group, or registering an
-emulation handler, because those change the operator's machine. Install
-what is approved, then continue.
-
-A fresh checkout is missing inputs on purpose. Build what the device types
-in scope need instead of reporting the deployment as blocked. Build the
-Guest Shell bundle, the amd64 IOx package, and the XR RPM regardless of
-which device types were chosen, and add the arm64 IOx package only when an
-ARM device or package was explicitly requested. Skip a package only on an
-explicit exclusion, and report a skipped package as a correct end state,
-not a failure.
-
-Fetch the verified aria2c release for each architecture in scope with the
-project's own helper scripts; never substitute a binary from anywhere else.
-Building the arm64 client from source is the slow fallback: it runs under
-emulation, can take tens of minutes, and stays silent for long stretches.
-Ask once whether an arm64 machine is reachable over SSH, since that removes
-the need for emulation. Start the build detached so it survives a dropped
-session, and report the elapsed time and the log's last line every few
-minutes.
-
-The two instruction trust roots are the operator's alone. Never generate
-them, and refuse a private key if one is offered. Wait for the two public
-halves before building any device package, and on Kubernetes copy only that
-public pair to the server's storage once the pod is running.
-
-Set up the online signing key once the stack is up and before onboarding
-any device. Never hand over a command before the file it reads exists:
-generate the online key, confirm the public key file holds an ssh-ed25519
-line, and only then give the command that signs it. Certifying that key is
-the operator's to do, like creating the two roots.
-
-Report each step as it starts and as it finishes, with the evidence behind
-it:
-
-- the two signing roots found, and their fingerprints
-- the public roots installed in the server's configuration volume
-- the signing key set up
-- each aria2c architecture built or fetched
-- ioxclient fetched, with its version
-- the Guest Shell bundle staged
-- each IOx package and the IOS-XR RPM built
-- what Device packages in Settings still reports as needing a build
-
-On Docker on one host, report the environment file written, the images
-built, the encrypted state store set up, and both containers healthy. On
-Docker on separate hosts, report each host separately, and never treat a
-loading Console page as proof the server is reachable: only an
-authenticated Console request that reaches the server counts. On
-Kubernetes, report the images built and pushed, the namespace and secrets
-created, the bound storage claim, and the deployments that reached ready,
-and treat pod readiness and an authenticated Console request as two
-separate facts.
-
-If a step is still running when there is nothing new to report, say so
-instead of going quiet. If a step fails, report which one, show the error,
-and say what else kept working.
-
-Record the deployment layout, each host's role and address, the Console
-URL, the management endpoint, and the checks actually performed, not the
-ones assumed. For device work, record the image ID, the model and agent
-choice, the staging target, the job result, and the final state of each
-image, and list anything not verified. Keep credentials and tokens out of
-the record.
-```
+Use the selected workflow throughout. Do not reset state to bypass a failed
+resume, replace roots to bypass an approval, or weaken native verification to
+complete a device test. For device tests, preserve the running software, boot
+variables and unrelated files. Publishing a release or creating a PR requires
+separate authorization from installing or testing a local candidate.
 
 ## Reporting as it goes
 
-Rather than describing the whole sequence up front and going quiet until it
-ends, the assistant announces each step as it starts. It reports each one as
-it finishes, with the evidence behind it:
+Report each meaningful result with its scope: source revision, image or package
+hash, public-key fingerprint, runtime access check or device outcome. Keep these
+facts separate:
 
-- the two signing roots it found, and their fingerprints
-- the public roots it installed in the server's configuration volume
-- the signing key it set up
-- each `aria2c` architecture it built or fetched
-- the Guest Shell bundle it staged
-- each IOx package and the IOS-XR RPM it built
-- what [Build and publish the device packages](../zensical/install/device-packages.md)
-  still reports as needing a build
+- A package build, runtime readability and native signed admission.
+- Container or pod readiness and an authenticated Console-to-server request.
+- A published certificate and confirmed adoption by each consumer.
+- Configuration tests, local container tests and live device qualification.
 
-On Docker on one host, it reports the environment file it wrote, the images
-it built, the encrypted state store it set up, and both containers healthy.
-On Docker on separate hosts, it reports each host separately and never
-treats a loading Console page as proof the server is reachable: only an
-authenticated Console request that reaches the server counts.
-
-On Kubernetes, it reports the images it built and pushed, the namespace and
-secrets it created, the bound storage claim, and the deployments that
-reached ready. It also reports the roots it installed, and it treats pod
-readiness and an authenticated Console request as two separate facts.
-
-If a step is still running when there is nothing new to report, it says so
-instead of going silent. If a step fails, it reports which one, shows the
-error, and says what else kept working: a package build that fails after the
-stack starts does not take the stack down with it.
+If a step is still running, report progress and its last safe milestone. If it
+fails, report a sanitized error and what remains available. Do not paste raw
+command output that may contain credentials. Avoid repeating completed suites
+when a focused follow-up covers the changed files.
 
 ## The completion record
 
-When the work is done, the assistant records the deployment layout, each
-host's role and address, the Console URL, the management endpoint, and the
-compose projects or Kubernetes namespace involved. It records the checks it
-actually performed, not the ones it assumed. For device work, it records the
-image ID, the model and agent choice, the staging target, the job result,
-and the final state of each image, and it lists anything it did not verify.
-Credentials and tokens never go in the record.
+Record the layout, host roles, addresses, Console URL, management endpoint and
+Compose projects or Kubernetes namespace. Include exact tested source and image
+identities, commands, outcomes, exclusions and unresolved gates. Agent notes and
+logs belong under `agentinfo/`; publish selected dated measurements in
+[Dated lab evidence](validation-records.md), not in the user guides.
 
-Repeated tests of the same layout get their own fresh job IDs and reports
-each time; an earlier successful check-in does not stand in for a new one. A
-test image should be a distinct file, so cleanup removes only what the
-assistant added. After a test, it clears the image's assignments, undeploys
-with the job IDs it recorded, and removes only the files and catalog entries
-it created. Undeploying a device does not remove images already staged for
-real use.
-
-The assistant keeps this record separate from dated evidence with real
-numbers; that lives in [Dated lab evidence](validation-records.md), not on
-this page or in a chat transcript.
+Use separate test job IDs and distinct test images. Clear only test assignments
+and undeploy using the recorded jobs. Remove only files, catalog entries and
+resources the test created. Unassigning an IOS-XR image removes files IRIS
+downloaded in place; adopted files and files of unknown origin stay. Undeploy
+itself leaves any remaining root image files. Preserve real-use assignments and unrelated
+services, and verify cleanup by exact resource identity.
 
 ## Related
 

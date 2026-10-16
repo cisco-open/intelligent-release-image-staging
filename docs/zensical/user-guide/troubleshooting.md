@@ -29,6 +29,25 @@ symptom in the table for that area.
     Do not repair state by editing databases, deployment JSON, occurrences or
     receipts by hand. Undeploy a running agent before you onboard it again.
 
+## Installer command failures
+
+For a failed managed Docker, separate-host or Kubernetes build, open the private
+diagnostics file named in the terminal error as root. Keep the original state
+directory and installer version when you resume after correcting the cause.
+See [Install with the managed package](../install/managed-package.md#approve-and-resume).
+
+The installer retains at most eight files under `command-failures/` in its state
+directory. Each contains the last 128 KiB from each output stream and indicates
+whether earlier output was omitted. Only root can read the saved files.
+If no file was saved, check free disk space, the eight-file limit, and ownership
+of the state directory. Its path must be owned by root and contain no symbolic
+links. Keep existing logs in protected storage if you move them to make room.
+The installer never overwrites earlier logs.
+
+!!! warning
+    These files can contain credentials and private build output. Inspect them
+    locally as root. Do not paste them into tickets, chat or public support logs.
+
 ## Time synchronization
 
 A wrong clock reads as a certificate problem.
@@ -83,8 +102,22 @@ series routers. On switches with app-hosting storage, use the IOx app instead.
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| Guest Shell reports `bundle rejected (trust-unreadable)` | The guest user could not read a trust file | IRIS rolls back to the previous bundle. Check guest share ownership and mount permissions, then retry onboarding. |
-| Guest Shell stages files but instructions report `verifier_missing` | The agent package is outdated or damaged: its bundled signature verifier did not install or pass its runtime probe | The Guest Shell agent bundle carries its own signature verifier, so every device checks instruction signatures once the current package is deployed. Redeploy the current bootstrap and an architecture-matched bundle. See [Upgrade to a new release](../admin-guide/upgrade.md). |
+| Guest Shell reports `bundle rejected (trust-unreadable)` | The guest user could not read a trust file | IRIS rolls back to the previous bundle. Remove the IRIS app through **Devices**, then onboard it with the current bundle. Check file access from Guest Shell. |
+| Guest Shell stages files but instructions report `verifier_missing` | The agent package is outdated or damaged: its bundled signature verifier did not install or pass its runtime probe | The Guest Shell agent bundle carries its own signature verifier, so every device checks instruction signatures once the current package is deployed. Redeploy the current bootstrap and an architecture-matched bundle. See [Deploy a new release](../admin-guide/upgrade.md). |
+| Onboarding reports incomplete upload or unconfirmed publication | A copy or its confirmation failed | Preserve the job log and temporary `.iris-upload-*` files. Use the logged category to distinguish a busy bootstrap, a Guest Shell error or an unconfirmed result. Inspect the published files and bundle outcome before retrying; an unknown confirmation may follow a completed publication. |
+
+Inside Guest Shell, `bundle-outcome.json` in the working directory records the
+latest bundle decision: `accepted` or `rejected`, a fixed reason, the expected
+archive hash when available, and the time. A rejected bundle retains the prior
+runnable bundle when one exists. Acceptance confirms the bundle transaction;
+check the fresh heartbeat and `aria2c-launch-failed` marker separately for
+runtime health. Keep this outcome with the original job log when reporting a
+failure.
+
+Inspect Guest Shell files from Guest Shell. Native IOS `more`, `verify` and
+`copy` can change their mapped owner. Current bundles give only the two public
+`allowed_signers` files read access at mode `0644`; private files stay private.
+Do not change permissions on keys, tokens or state files to work around an error.
 
 ### IOx
 
@@ -108,7 +141,7 @@ series routers, and Catalyst 9000 series switches with app-hosting storage.
 | Onboarding fails at `XR HTTPS staging failed` | The router could not fetch or verify the package | Check the router's bash and curl support, the route to the artifact server, the certificate validity and hostname, the enrollment authentication, and free space on `harddisk:`. The installer refuses an incomplete or hash-mismatched download and never falls back to SCP. |
 | Onboarding fails while opening repeated SSH sessions | The router is rate limiting SSH sessions | Check `show logging` for `Incoming SSH session rate limit exceeded`. The timing variables are in [Device agent configuration](../reference/device-configuration.md). |
 | A private `.iris-https.*` directory is left on `harddisk:` | A severed HTTPS installer session did not finish cleanup | Confirm no onboarding job is active for that device, inspect the directory, then remove it. |
-| A root image stays on the router after undeploy or after an image is parked | This is intended | Parking keeps an unassigned image on the device in case it is assigned again. See [Assign images and check staging status](assignments.md#unassigned-image-park). |
+| A root image stays on the router after undeploy or after an image is parked | Undeploy leaves root images; parking protects adopted files and files of unknown origin | Check the ownership rules in [What happens to an image you unassign](assignments.md#unassigned-image-park) before deleting it. |
 
 !!! warning
     Do not delete a device's instruction state or key files to make it accept

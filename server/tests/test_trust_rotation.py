@@ -236,6 +236,8 @@ def test_independent_second_root_attestation_is_real_and_fresh(environment, monk
                     root_id='root-b', keylist=artifact.decode())
     result = rotation.operate(approval)
     assert result['attested_root_ids'] == ['root-a', 'root-b']
+    assert result['attestation_applied'] is True
+    assert 'attestation_applied' not in rotation.status('instruction-roots')
     assert rotation.operate(approval)['attested_root_ids'] == ['root-a', 'root-b']
     assert keys.read_keylist_snapshot(paths)['keylist_seq'] == 2
     # Freshness comes from actual signed issue times, never the UI request or a
@@ -256,6 +258,7 @@ def test_second_root_attestation_rejects_wrong_signer_and_preserves_krl(environm
         rotation.operate(dict(family='instruction-roots', action='attestation-apply', request_id=record['request_id'],
                               root_id='root-b', keylist=artifact.decode()))
     assert rotation.status('instruction-roots')['attested_root_ids'] == ['root-a']
+    assert 'attestation_applied' not in rotation.status('instruction-roots')
     assert keys.read_keylist_snapshot(paths)['keylist_seq'] == 1
 
 
@@ -277,8 +280,11 @@ def test_second_root_attestation_repairs_metadata_interruption(environment, monk
     monkeypatch.setattr(keys, '_atomic_write', interrupted)
     with pytest.raises(OSError):
         rotation.operate(approval)
+    assert 'attestation_applied' not in rotation.status('instruction-roots')
     monkeypatch.setattr(keys, '_atomic_write', original)
-    assert rotation.operate(approval)['attested_root_ids'] == ['root-a', 'root-b']
+    result = rotation.operate(approval)
+    assert result['attested_root_ids'] == ['root-a', 'root-b']
+    assert result['attestation_applied'] is True
 
 
 def test_second_root_attestation_refuses_concurrent_keylist(environment):

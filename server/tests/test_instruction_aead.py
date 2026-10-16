@@ -100,24 +100,28 @@ def test_contributor_guide_matches_the_linked_openssl():
     assert re.findall(r'\bOpenSSL ([0-9]+\.[0-9]+\.[0-9]+)\b', guide) == [version]
 
 
-@pytest.mark.parametrize('dockerfile', [
-    'tools/build-instruction-crypto.Dockerfile',
-    'server/Dockerfile',
-    'device/container/Dockerfile',
+@pytest.mark.parametrize('dockerfile, expected_stages', [
+    ('tools/build-instruction-crypto.Dockerfile', ['build']),
+    ('server/Dockerfile', ['instruction-crypto', 'instruction-crypto-arm64']),
+    ('device/container/Dockerfile', ['crypto-build']),
 ])
-def test_all_crypto_build_notices_match_the_linked_openssl(dockerfile):
+def test_all_crypto_build_notices_match_the_linked_openssl(dockerfile, expected_stages):
     root = Path(__file__).resolve().parents[2]
     script = (root / 'tools/build-instruction-crypto-inner.sh').read_text()
     version = re.search(r'openssl-dev=([0-9.]+)-r\d+', script).group(1)
     recipe = (root / dockerfile).read_text()
-    notices = [line for line in recipe.splitlines() if line.startswith('ADD ') and
-               line.endswith(' /src/openssl-LICENSE')]
-    assert len(notices) == 1
-    assert re.fullmatch(
-        r'ADD --checksum=sha256:[0-9a-f]{64} '
-        r'https://raw\.githubusercontent\.com/openssl/openssl/openssl-'
-        + re.escape(version) + r'/LICENSE\.txt /src/openssl-LICENSE', notices[0])
-    assert 'build-instruction-crypto-inner.sh /src/build.sh' in recipe
+    stages = dict(re.findall(r'^FROM [^\n]* AS ([\w-]+)\n(.*?)(?=^FROM |\Z)',
+                             recipe, flags=re.MULTILINE | re.DOTALL))
+    notices = {name: [line for line in body.splitlines() if line.startswith('ADD ') and
+                     line.endswith(' /src/openssl-LICENSE')] for name, body in stages.items()}
+    assert {name for name, rows in notices.items() if rows} == set(expected_stages)
+    for name in expected_stages:
+        assert len(notices[name]) == 1, name
+        assert re.fullmatch(
+            r'ADD --checksum=sha256:[0-9a-f]{64} '
+            r'https://raw\.githubusercontent\.com/openssl/openssl/openssl-'
+            + re.escape(version) + r'/LICENSE\.txt /src/openssl-LICENSE', notices[name][0]), name
+        assert 'build-instruction-crypto-inner.sh /src/build.sh' in stages[name]
     notice = (root / 'NOTICE').read_text()
     assert 'with OpenSSL ' + version + ' libcrypto' in notice
     assert 'https://github.com/openssl/openssl/tree/openssl-' + version in notice

@@ -5,6 +5,9 @@
 // Run after npm run build. Supply PLAYWRIGHT_MODULE when Playwright is installed
 // outside this package. This test uses mocked APIs and never contacts a device.
 import assert from 'node:assert/strict';
+import {maintenance, maintenanceJob, trust, backups, prepared} from './worker-fixtures.mjs';
+import {maintenanceStatus} from '../src/key-maintenance-model.mjs';
+import {setupFixture, verificationFixture} from './setup-packages-fixtures.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,25 +33,25 @@ try {
   const settingsWrites = [];
   const defaultCA = 'https://www.cisco.com/security/pki/trs/ios.p7b';
   const settingsState = {gui_cert: {source: 'built-in', subject: 'CN=iris.example.test', not_after: 'Sep 18 12:00:00 2036 GMT', fingerprint_sha256: 'ab'.repeat(32)}, ca_trust: {url: defaultCA, auto: false}, trust: [],
-    telemetry_destination: {source: 'environment', effective_endpoint: '', effective_enabled: false}};
+    telemetry_destination: {source: 'env', effective_endpoint: '', effective_enabled: false},
+    audit_export: {host: '', port: 22, user: '', path: '', age_recipient: '', auto: false, password_set: false}};
   let peerTlsState = {mode: 'disabled', origin: {active_mode: 'disabled', state: 'running'}, active_devices: 0, active_jobs: 0, can_change: true};
   let settingsFailure = '';
+  let imageVerificationFixture = verificationFixture();
   let certificateAvailable = true, renewalAccepted = false;
-  let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b']};
-  let browserTlsFixture = {state: 'idle', request_id: null, names: [], mode: null, csr: null, certificate: null, fingerprint_sha256: null};
-  let serviceCredentialFixture = {items: ['metrics-token', 'collector-headers'].map(family => ({family, request_id: null, state: 'deployment-managed', observed_at: null}))};
-  let maintenanceFixture = {schema: 1, revision: 0, observed_at: null, worker: 'not-observed', policies: [], jobs: [], families: [
-    {id: 'online-signer', label: 'Online instruction signer', action: 'prepare', requirement: 'Offline approval'},
-    {id: 'device-instruction', label: 'Device instruction encryption key', action: 'rotate', requirement: 'Verify device acceptance'},
-    {id: 'browser-tls', label: 'Console browser TLS', action: 'review', requirement: 'Operator certificate approval'}]};
-  let backupFixture = {available: false, target: 'unavailable', can_verify: false, can_extract: false,
+  let rotationFixture = {state: 'idle', request_id: null, root_ids: ['root-a', 'root-b'], previous_public_key: null, public_key: null,
+    previous_sha256: null, replacement_sha256: null, created_at: null, activated_at: null, retired_keylist_seq: null};
+  const publicCsr = '-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----\n';
+  const publicCertificate = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n';
+  let browserTlsFixture = {state: 'idle', request_id: null, names: [], mode: null, csr: null, certificate: null, fingerprint_sha256: null, created_at: null};
+  let serviceCredentialFixture = {items: ['metrics-token', 'collector-headers'].map(family => ({family, request_id: null, state: 'deployment-managed', observed_at: null, started_at: null, endpoint: null, previous_retained: false}))};
+  let maintenanceFixture = maintenance();
+  let backupFixture = {...backups(), available: false, target: 'unavailable', can_verify: false, can_extract: false, can_restore: false,
     jobs: [], note: 'Configure the lifecycle worker on the installer host.'};
   let deploymentFixture = {available: false, target: 'unavailable', can_rotate: false, families: [], jobs: [], note: 'Configure independent recovery access.'};
-  let trustFixture = {items: ['device-tls', 'peer-ca', 'instruction-roots'].map(family => ({family, state: 'idle', request_id: null})),
-    drain: {ready: true, blocked_device_ids: [], removed_device_ids: []}};
+  let trustFixture = trust();
   const backupId = '11111111-1111-1111-1111-111111111111';
   await page.addInitScript(() => {
-    window.addEventListener('iris:policy-state', event => { window.testPolicyState = event.detail; });
     window.testStreams = [];
     window.EventSource = class {
       constructor(url) { this.url = url; this.listeners = {}; window.testStreams.push(this); }
@@ -66,6 +69,8 @@ try {
         return route.fulfill({status: deploymentUnavailable ? 503 : 200, json: deploymentSummary});
       }
       if (url.pathname === '/api/v1/settings') settingsReads++;
+      if (url.pathname === '/api/v1/settings/setup-status' && route.request().method() === 'GET') return route.fulfill({json: setupFixture()});
+      if (url.pathname === '/api/v1/settings/image-verification' && route.request().method() === 'GET') return route.fulfill({json: imageVerificationFixture});
       if (url.pathname === '/api/v1/settings/certificates/browser/rotation' && route.request().method() === 'GET') return route.fulfill({json: browserTlsFixture});
       if (url.pathname === '/api/v1/settings/service-credentials' && route.request().method() === 'GET') return route.fulfill({json: serviceCredentialFixture});
       if (url.pathname === '/api/v1/settings/deployment-rotation' && route.request().method() === 'GET') return route.fulfill({json: deploymentFixture});
@@ -74,7 +79,7 @@ try {
       if (url.pathname === '/api/v1/settings/certificates/instruction/rotation' && route.request().method() === 'GET') return route.fulfill({json: rotationFixture});
       if (url.pathname === '/api/v1/settings/certificates') return route.fulfill({
         status: certificateAvailable ? 200 : 503,
-        json: certificateAvailable ? {observed_at: 1790160000, custody: {state: 'renewal_due'}, items: [
+        json: certificateAvailable ? {scope: 'server-certificate-files', observed_at: 1790160000, custody: {state: 'renewal_due'}, items: [
           {id: 'instruction-signer', kind: 'certificate', label: 'Instruction signing certificate', state: 'renewal-due',
             fingerprint_sha256: 'ab'.repeat(32), renew_at: 1790060000, expires_at: 1791360000,
             refuse_at: 1790755200, impact: 'Renew with the existing key and offline root approval.'},
@@ -82,7 +87,7 @@ try {
             impact: 'Coordinate server identity and Console trust before restart.'},
           {id: 'root-a', kind: 'public-key', label: 'Offline root A', state: 'public-key-present',
             fingerprint_sha256: 'SHA256:fixturePublicOnly', impact: 'Confirm private custody with the holder.'},
-        ]} : {error: 'unavailable'}});
+        ].map(row => ({source: 'server-file', valid_from: null, expires_at: null, renew_at: null, refuse_at: null, fingerprint_sha256: null, ...row}))} : {error: 'unavailable'}});
       if (url.pathname === '/api/v1/settings/backups' && route.request().method() === 'GET') return route.fulfill({json: backupFixture});
       if (url.pathname === '/api/v1/settings/peer-tls' && route.request().method() === 'GET') return route.fulfill({json: peerTlsState});
       if (url.pathname === '/api/v1/logout') {
@@ -99,11 +104,15 @@ try {
         if (settingsFailure === 'network') return route.abort('failed');
         if (settingsFailure === 'html') return route.fulfill({status: 503, body: '<h1>Unavailable</h1>', contentType: 'text/html'});
         if (settingsFailure === 'invalid-success') return route.fulfill({status: 200, json: {}});
+        if (url.pathname === '/api/v1/settings/image-verification') {
+          imageVerificationFixture = {...imageVerificationFixture, mode: body.mode, hour_utc: body.hour_utc};
+          return route.fulfill({json: imageVerificationFixture});
+        }
         if (url.pathname === '/api/v1/settings/certificates/browser/rotation') {
           if (body.action === 'prepare') browserTlsFixture = {...browserTlsFixture, request_id: body.request_id,
-            names: body.names, mode: body.mode, state: 'awaiting-approval', csr: 'PUBLIC CSR FIXTURE'};
+            names: body.names, mode: body.mode, state: 'awaiting-approval', csr: publicCsr, created_at: 1790160000};
           if (body.action === 'approve') browserTlsFixture = {...browserTlsFixture, state: 'approved', certificate: body.certificate, fingerprint_sha256: 'ab'.repeat(32)};
-          if (body.action === 'apply') browserTlsFixture = {...browserTlsFixture, state: 'published', applied: true};
+          if (body.action === 'apply') browserTlsFixture = {...browserTlsFixture, state: 'published', applied: true, gui_cert: {source: 'custom', fingerprint_sha256: browserTlsFixture.fingerprint_sha256}};
           if (body.action === 'cancel') browserTlsFixture = {...browserTlsFixture, state: 'cancelled'};
           return route.fulfill({json: browserTlsFixture});
         }
@@ -112,19 +121,22 @@ try {
           const row = serviceCredentialFixture.items.find(item => item.family === body.family);
           row.request_id = body.request_id;
           row.state = body.action === 'replace' ? 'awaiting-verification' : body.action === 'revert' ? 'reverted' : 'completed';
+          if (body.action === 'replace') Object.assign(row, {started_at: 1790160000, endpoint: body.endpoint || null, previous_retained: body.family === 'metrics-token'});
+          else row.previous_retained = false;
+          if (body.action === 'revert') Object.assign(row, {observed_at: null, endpoint: null});
           return route.fulfill({json: serviceCredentialFixture});
         }
         if (url.pathname === '/api/v1/settings/trust-rotation') {
           assert.equal(body.family, 'peer-ca');
           assert.equal(body.action, 'prepare');
           const item = trustFixture.items.find(item => item.family === body.family);
-          Object.assign(item, {request_id: body.request_id, state: 'approved', certificate: 'PUBLIC CERTIFICATE', fingerprint_sha256: 'cd'.repeat(32)});
+          Object.assign(item, prepared('peer-ca'), {request_id: body.request_id});
           return route.fulfill({json: item});
         }
         if (url.pathname === '/api/v1/settings/deployment-rotation') {
           assert.equal(body.action, 'rotate');
           assert.equal(body.allow_downtime, true);
-          deploymentFixture.jobs.push({id: body.request_id, family: body.family, state: 'running', detail: 'Preparing verified backup', proof: null});
+          deploymentFixture.jobs.push({id: body.request_id, action: 'rotate', started_at: 1790160000, family: body.family, state: 'running', detail: 'Preparing verified backup', proof: null});
           return route.fulfill({json: {job_id: body.request_id}});
         }
         if (url.pathname === '/api/v1/settings/key-maintenance') {
@@ -137,24 +149,28 @@ try {
         if (url.pathname === '/api/v1/settings/certificates/instruction/rotation') {
           assert.match(body.request_id, /^[0-9a-f-]{36}$/);
           if (body.action === 'retirement-request') return route.fulfill({json: {
-            request_id: body.request_id, root_id: body.root_id, payload: Buffer.from('public fixture').toString('base64')}});
+            request_id: body.request_id, root_id: body.root_id, payload: Buffer.from('IRIS-KEYLIST/1\n' +
+              Buffer.from(JSON.stringify({v: 1, keylist_seq: 8, issued_at: 1790160000, signer_root_id: body.root_id, krl_sha256: 'ab'.repeat(32)})).toString('base64') + '\n' +
+              Buffer.from('SSHKRL\n\x00fixture').toString('base64') + '\n').toString('base64')}});
           if (body.action === 'activate' || body.action === 'retire') assert.equal(body.confirm, true);
           rotationFixture = {...rotationFixture, request_id: body.request_id,
             state: {prepare: 'awaiting-approval', activate: 'retirement-pending', retire: 'completed', cancel: 'cancelled'}[body.action],
             previous_sha256: 'aa'.repeat(32), replacement_sha256: 'bb'.repeat(32),
-            public_key: 'ssh-ed25519 fixture-public-only\n', retired_keylist_seq: body.action === 'retire' ? 8 : null};
+            public_key: 'ssh-ed25519 AAAA fixture-public-only\n', previous_public_key: 'ssh-ed25519 BBBB previous-public-only\n',
+            created_at: 1790160000, activated_at: ['activate', 'retire'].includes(body.action) ? 1790160001 : null,
+            retired_keylist_seq: body.action === 'retire' ? 8 : null};
           return route.fulfill({json: rotationFixture});
         }
         if (url.pathname === '/api/v1/settings/certificates/instruction/request') return route.fulfill({json: {
-          public_key: 'ssh-ed25519 fixture-public-only\n', public_key_sha256: 'ab'.repeat(32), certificate_sha256: 'cd'.repeat(32)}});
+          public_key: 'ssh-ed25519 AAAA fixture-public-only\n', public_key_sha256: 'ab'.repeat(32), certificate_sha256: 'cd'.repeat(32)}});
         if (url.pathname === '/api/v1/settings/certificates/instruction/renew') return route.fulfill({
           status: renewalAccepted ? 200 : 409,
           json: renewalAccepted ? {applied: true, expires_at: 1793360000, refuse_at: 1792755200, status_refreshed: true}
             : {error: 'online certificate changed; prepare renewal again'}});
         if (url.pathname === '/api/v1/settings/backups') {
-          backupFixture = {...backupFixture, jobs: [{id: 'job-fixture', action: body.action,
+          backupFixture = {...backupFixture, jobs: [{id: body.request_id, action: body.action === 'recover-restore' ? 'restore' : body.action,
             backup_id: backupId, started_at: 1790160000, state: 'running', detail: ''}]};
-          return route.fulfill({json: {job_id: 'job-fixture'}});
+          return route.fulfill({json: {job_id: body.request_id}});
         }
         if (url.pathname === '/api/v1/settings/peer-tls') {
           assert.equal(body.expected_mode, peerTlsState.mode);
@@ -167,7 +183,9 @@ try {
           : {source: 'override', effective_endpoint: body.endpoint, effective_enabled: body.enabled};
         if (url.pathname === '/api/v1/settings/trust') settingsState.trust = [{name: 'fixture.pem', source: 'manual', subject: 'Fixture CA', cert_count: 1}];
         if (url.pathname === '/api/v1/settings/trust/fixture.pem') settingsState.trust = [];
-        return route.fulfill({json: {applied: true, revoked: 2}});
+        if (url.pathname === '/api/v1/settings/gui-cert') settingsState.gui_cert = {...settingsState.gui_cert, source: method === 'DELETE' ? 'built-in' : 'custom'};
+        return route.fulfill({json: {ok: true, applied: true, deleted: true, revoked: 2, gui_cert: settingsState.gui_cert,
+          ca_trust: settingsState.ca_trust, entry: settingsState.trust[0], endpoint: body?.endpoint, enabled: body?.enabled}});
       }
       if (url.pathname === '/api/v1/devices') deviceQueries.push(url.searchParams.toString());
       if (route.request().method() !== 'GET') writes.push(route.request().method() + ' ' + url.pathname);
@@ -175,11 +193,12 @@ try {
         const body = route.request().postDataJSON();
         assert.equal(route.request().headers()['x-csrf-token'], 'test-only');
         assert.equal(route.request().headers()['if-match'], '"iris-peer-policy-1"');
-        assert.equal(body.qos.overall_up_bps, 4096);
+        assert.equal(body.qos.overall_up_bps, 16384);
         assert.equal(body.restricted, true);
         assert.equal(body.origin, false);
         assert.deepEqual(body.peers, ['branch', 'staging']);
-        if (url.searchParams.get('dry_run') === '1') return route.fulfill({json: {confirm_token: 'fixture-preview', revision: 1}});
+        if (url.searchParams.get('dry_run') === '1') return route.fulfill({json: {ok: true, dry_run: true, confirm_token: 'fixture-preview', revision: 1,
+          member_delta: 0, origin_access_lost: 0, empty_permitted_sets: 0, role_pairs_stopped: 0, qos_changed: true, requires_confirmation: true}});
         assert.equal(body.confirm_token, 'fixture-preview');
         return route.fulfill({status: 412, json: {code: 'revision_conflict'}});
       }
@@ -204,7 +223,7 @@ try {
           device_id: 'series-ui-test', device_ip: '192.0.2.99',
           model: 'XR8000', management_type: 'xr-host', platform: 'xr-appmgr', credential_profile_id: '',
         });
-        return route.fulfill({ status: 201, json: { device_id: 'series-ui-test' } });
+        return route.fulfill({ status: 200, json: { device: {device_id: 'series-ui-test'} } });
       }
       const fixtures = {
         '/api/v1/session': { username: 'UI test', csrf: 'test-only' },
@@ -212,7 +231,7 @@ try {
         '/api/v1/devices': { devices: [
           { device_id: 'edge-01', device_ip: '192.0.2.10', model: '8201', model_family: 'XR8000', management_type: 'xr-host', assigned_images: [] },
           { device_id: 'edge-02', device_ip: '192.0.2.11', model: 'NCS-540', model_family: 'NCS', management_type: 'xr-host', assigned_images: [] },
-        ], total: 2, offset: 0 },
+        ], total: 2, offset: 0, revision: 1, now: 2000000000 },
         '/api/v1/onboard/jobs': { jobs: [
           { id: 'job-1', device_id: 'edge-01', state: 'done', action: 'onboard', last_line: 'onboard complete' },
           { id: 'job-2', device_id: 'edge-02', state: 'done', action: 'onboard', last_line: 'onboard complete' },
@@ -223,7 +242,7 @@ try {
           ports: { tracker: 6969, catalog: 8443, artifacts: 8000, swarm: 8080, console: 8082 },
           sessions: { active: 1, idle_ttl_minutes: 30 }, ...settingsState },
         '/api/v1/help': { version: 'UI test build', deployment_id: 'fixture-deployment' },
-        '/api/v1/peer-policy': { revision: 1, roles_supported: true, roles: { defined: 3, restricted: 2, members: { staging: 2, branch: 5, isolated: 1 } },
+        '/api/v1/peer-policy': { revision: 1, quarantine_assignments: [], roles_supported: true, roles: { defined: 3, restricted: 2, members: { staging: 2, branch: 5, isolated: 1 } },
           enforcement: {state: 'enforced', stale: false, mutual_origin: {mode: 'preflight', newly_denied_device_count: 1}},
           role_drift: { count: 0 }, outbox: { unacknowledged: 0, capacity: 256 } },
         '/api/v1/peer-policy/roles': { revision: 1, roles: {
@@ -252,11 +271,19 @@ try {
   });
   await page.goto('http://iris.test/');
   await page.getByText('UI test', { exact: true }).waitFor();
+  const openDetails = async id => {
+    const section = page.locator('#' + id);
+    if (!await section.evaluate(node => node.open)) await section.locator(':scope > summary').click();
+    assert.equal(await section.evaluate(node => node.open), true);
+  };
+  assert.equal(await page.locator('#deployment-details').evaluate(node => node.open), false,
+    'Deployment components start collapsed while the summary remains visible');
   const showDeployment = async () => {
     await page.goto('http://iris.test/#overview');
     await page.locator('#deployment-layout').getByText(
       deploymentUnavailable ? 'Unavailable' : deploymentSummary.layout === 'kubernetes' ? 'Kubernetes' :
         deploymentSummary.layout === 'docker-split' ? 'Docker · separate hosts' : 'Docker · one host', {exact: true}).waitFor();
+    await openDetails('deployment-details');
   };
   await showDeployment();
   assert.equal(await page.locator('#deployment-rows tr').count(), 2);
@@ -321,7 +348,7 @@ try {
     await page.locator(`#settings-pane-${pane}`).waitFor({ state: 'visible' });
     assert.equal(await settings.getByRole('link', { name, exact: true }).getAttribute('aria-current'), 'page');
   }
-  assert.equal(await page.locator('#pw-new').inputValue(), 'example-passphrase', 'Navigation must not remount edited fields');
+  assert.equal(await page.locator('#pw-new').inputValue(), '', 'Navigation clears secret fields');
   await page.locator('#pw-new').fill('');
   // Settings controls exercise only intercepted requests, including failures.
   await page.locator('#pw-cur').fill('fixture-current');
@@ -384,12 +411,23 @@ try {
   await page.locator('#cert-passphrase').fill('fixture-passphrase');
   settingsFailure = 'html';
   await page.locator('#cert-form button[type="submit"]').click();
-  await page.locator('#cert-msg').getByText('Request failed (503).', {exact: true}).waitFor();
-  assert.equal(await page.locator('#cert-key').inputValue(), keyPEM, 'Failed upload preserves the draft for correction');
+  await page.locator('#cert-msg').getByText(/Settings may have changed or a job may have started/).waitFor();
+  assert.equal(await page.locator('#cert-key').inputValue(), '', 'Submitted private material is cleared even on an uncertain result');
+  assert.equal(await page.locator('#cert-form button[type="submit"]').isDisabled(), true);
+  const reloadCertDraft = async () => {
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('#settings-review-cert').click();
+    await page.locator('#cert-msg').getByText('Current settings loaded. Review before submitting again.', {exact: true}).waitFor();
+    await page.locator('#cert-pem').fill(certPEM);
+    await page.locator('#cert-key').fill(keyPEM);
+    await page.locator('#cert-passphrase').fill('fixture-passphrase');
+  };
+  await reloadCertDraft();
   settingsFailure = 'invalid-success';
   await page.locator('#cert-form button[type="submit"]').click();
-  await page.locator('#cert-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
-  assert.equal(await page.locator('#cert-key').inputValue(), keyPEM, 'Invalid success response cannot claim a certificate replacement');
+  await page.locator('#cert-msg').getByText(/Settings may have changed or a job may have started/).waitFor();
+  assert.equal(await page.locator('#cert-key').inputValue(), '', 'Invalid success clears private material without claiming replacement');
+  await reloadCertDraft();
   settingsFailure = '';
   await page.locator('#cert-form button[type="submit"]').click();
   await page.waitForFunction(() => document.getElementById('cert-key').value === '');
@@ -413,7 +451,12 @@ try {
   await page.locator('#td-enabled').check();
   settingsFailure = 'network';
   await page.locator('#td-form button[type="submit"]').click();
-  await page.locator('#td-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
+  await page.locator('#td-msg').getByText(/Settings may have changed or a job may have started/).waitFor();
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#settings-review-td').click();
+  await page.waitForFunction(() => !window.irisSettings.state.loading);
+  await page.locator('#td-endpoint').fill('https://collector.example:4318/');
+  await page.locator('#td-enabled').check();
   settingsFailure = '';
   await page.locator('#td-form button[type="submit"]').click();
   await page.locator('#td-revert').waitFor({state: 'visible'});
@@ -431,20 +474,28 @@ try {
   await page.locator('#ae-recipient').fill('age1fixture');
   settingsFailure = 'html';
   await page.locator('#ae-form button[type="submit"]').click();
-  await page.locator('#ae-msg').getByText('Request failed (503).', {exact: true}).waitFor();
+  await page.locator('#ae-msg').getByText(/Settings may have changed or a job may have started/).waitFor();
   assert.equal(settingsWrites.at(-1).body.port, 22);
   assert.equal(Object.hasOwn(settingsWrites.at(-1).body, 'password'), false, 'An empty password preserves the saved credential');
   await settingsTab('Image verification');
   settingsFailure = 'network';
   await page.locator('#iv-schedule-form button[type="submit"]').click();
-  await page.locator('#iv-schedule-msg').getByText('Response unavailable. Settings may have changed; reload to check before retrying.', {exact: true}).waitFor();
+  await page.locator('#iv-schedule-msg').getByText('Response unavailable. The schedule may have changed or the check may have started. Review current status before retrying.', {exact: true}).waitFor();
+  assert.equal(await page.locator('#iv-schedule-form button[type="submit"]').isDisabled(), true, 'A lost response requires review, not automatic write replay');
+  assert.deepEqual(settingsWrites.at(-1).body, {mode: 'off', hour_utc: 0});
   settingsFailure = '';
   await settingsTab('Certificates & keys');
-  await page.locator('#browser-tls-state').getByText('Browser certificate: idle.', {exact: true}).waitFor();
+  for (const id of ['certificate-file-details', 'certificate-renewal-controls', 'signer-rotation',
+    'browser-certificate-controls', 'telemetry-credential-controls', 'deployment-key-controls', 'scheduled-key-controls']) {
+    assert.equal(await page.locator('#' + id).evaluate(node => node.open), false,
+      id + ' starts collapsed until an operator chooses that task');
+  }
+  await openDetails('browser-certificate-controls');
+  await page.locator('#browser-tls-state').getByText('No replacement in progress.', {exact: true}).waitFor();
   await page.locator('#browser-tls-names').fill('console.example.com, 192.0.2.10');
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#browser-tls-prepare').click();
-  await page.locator('#browser-tls-state').getByText('Browser certificate: awaiting approval.', {exact: true}).waitFor();
+  await page.locator('#browser-tls-state').getByText('Waiting for your certificate authority.', {exact: true}).waitFor();
   const csrDownload = page.waitForEvent('download');
   await page.locator('#browser-tls-csr').click();
   assert.equal((await csrDownload).suggestedFilename(), 'iris-console.csr');
@@ -453,12 +504,13 @@ try {
   await page.locator('#browser-tls-approve').click();
   await page.locator('#browser-tls-result').getByText('Upload the public certificate chain, never a private key.', {exact: true}).waitFor();
   assert.equal(settingsWrites.length, beforeTlsPrivate);
-  await page.locator('#browser-tls-approved').setInputFiles({name: 'cert.pem', mimeType: 'text/plain', buffer: Buffer.from('-----BEGIN CERTIFICATE-----\npublic fixture')});
+  await page.locator('#browser-tls-approved').setInputFiles({name: 'cert.pem', mimeType: 'text/plain', buffer: Buffer.from(publicCertificate)});
   await page.locator('#browser-tls-approve').click();
-  await page.locator('#browser-tls-state').getByText('Browser certificate: approved.', {exact: true}).waitFor();
+  await page.locator('#browser-tls-state').getByText('Approved certificate ready to apply.', {exact: true}).waitFor();
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#browser-tls-apply').click();
   await page.locator('#browser-tls-result').getByText(/this Console listener reloaded/).waitFor();
+  await openDetails('telemetry-credential-controls');
   await page.locator('#service-credential-generate').click();
   const token = await page.locator('#service-credential-token').inputValue();
   assert.match(token, /^[0-9a-f]{64}$/);
@@ -467,7 +519,7 @@ try {
   assert.equal((await tokenDownload).suggestedFilename(), 'iris-metrics-token');
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#service-credential-replace').click();
-  await page.locator('#service-credential-state').getByText(/awaiting verification/).waitFor();
+  await page.locator('#service-credential-state').getByText(/Replacement saved; confirm all consumers have moved/).waitFor();
   assert.equal(await page.locator('#service-credential-token').inputValue(), '', 'Clear the browser secret after successful publication');
   assert.equal(await page.locator('#service-credential-retire').isDisabled(), true, 'No proof, no retirement');
   serviceCredentialFixture.items[0].observed_at = 1790230000;
@@ -484,12 +536,12 @@ try {
   await page.locator('#service-credential-headers [data-field=value]').last().fill('duplicate');
   const beforeDuplicate = settingsWrites.length;
   await page.locator('#service-credential-replace').click();
-  await page.locator('#service-credential-result').getByText('Provide distinct authentication header names.', {exact: true}).waitFor();
+  await page.locator('#service-credential-result').getByText('Provide distinct authentication header names and nonempty printable values.', {exact: true}).waitFor();
   assert.equal(settingsWrites.length, beforeDuplicate);
   await page.locator('#service-credential-headers button').last().click();
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#service-credential-replace').click();
-  await page.locator('#service-credential-state').getByText(/awaiting verification/).waitFor();
+  await page.locator('#service-credential-state').getByText(/Replacement saved; confirm all consumers have moved/).waitFor();
   assert.equal(settingsWrites.at(-1).body.endpoint, 'https://collector.example:4318');
   assert.equal(await page.locator('#service-credential-headers [data-field=value]').inputValue(), '');
   assert.equal(await page.locator('#service-credential-retire').isDisabled(), true);
@@ -507,6 +559,7 @@ try {
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#service-credential-revert').click();
   await page.locator('#service-credential-result').getByText(/Previous IRIS setting restored/).waitFor();
+  await openDetails('deployment-key-controls');
   assert.equal(await page.locator('#deployment-rotation-apply').isDisabled(), true);
   deploymentFixture = {...deploymentFixture, available: true, can_rotate: true, target: 'single-docker',
     families: ['management-tls', 'device-tls', 'peer-ca', 'instruction-roots', 'age-identity', 'seeder-announce'], note: 'Verified backup required; downtime expected.'};
@@ -526,7 +579,7 @@ try {
   const trustOperation = settingsWrites.at(-1).body.request_id;
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#deployment-rotation-apply').click();
-  await page.locator('#deployment-rotation-result').getByText(/acceptance is not completion/).waitFor();
+  await page.locator('#deployment-rotation-result').getByText(/Accepted operation.*Refresh history for the worker result/).waitFor();
   assert.equal(settingsWrites.at(-1).body.request_id, trustOperation);
   assert.equal(await page.locator('#deployment-rotation-apply').isDisabled(), true);
   if (process.env.IRIS_UI_SCREENSHOTS) {
@@ -537,9 +590,10 @@ try {
     }
     await page.setViewportSize({width: 1440, height: 1000});
   }
+  await openDetails('scheduled-key-controls');
   await page.locator('#maintenance-worker').getByText('Scheduler: not observed.', {exact: true}).waitFor();
   assert.equal(await page.locator('#maintenance-enabled').isChecked(), false);
-  await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).waitFor();
+  await page.locator('#maintenance-families').getByText('Review reminder', {exact: true}).first().waitFor();
   await page.locator('#maintenance-family').selectOption('device-instruction');
   assert.equal(await page.locator('#maintenance-target').isEnabled(), true);
   assert.equal(await page.locator('#maintenance-interval').getAttribute('min'), '8');
@@ -551,15 +605,15 @@ try {
   page.once('dialog', dialog => dialog.dismiss());
   await page.locator('#maintenance-save').click();
   assert.equal(settingsWrites.length, beforeSchedule, 'Cancelled enable leaves policy unchanged');
-  page.once('dialog', dialog => { assert.match(dialog.message(), /review reminders/); dialog.accept(); });
+  page.once('dialog', dialog => { assert.match(dialog.message(), /Operator certificate approval/); dialog.accept(); });
   await page.locator('#maintenance-save').click();
-  await page.locator('#maintenance-result').getByText('Schedule saved.', {exact: true}).waitFor();
+  await page.locator('#maintenance-result').getByText('Schedule saved at revision 1.', {exact: true}).waitFor();
   assert.equal(settingsWrites.at(-1).body.policy.next_at, Date.parse('2027-01-01T03:00Z') / 1000);
   assert.equal(settingsWrites.at(-1).body.policy.target, 'deployment');
   settingsFailure = 'invalid-success';
   await page.locator('#maintenance-enabled').uncheck();
   await page.locator('#maintenance-save').click();
-  await page.locator('#maintenance-result').getByText(/Refresh maintenance before continuing/).waitFor();
+  await page.locator('#maintenance-result').getByText(/Refresh and review the exact operation before continuing/).waitFor();
   assert.equal(await page.locator('#maintenance-save').isDisabled(), true);
   settingsFailure = '';
   await page.locator('#maintenance-refresh').click();
@@ -571,8 +625,12 @@ try {
     await page.setViewportSize({width: 1440, height: 1100});
     await page.locator('#key-maintenance').screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS, 'key-maintenance-desktop.png')});
   }
-  await page.locator('#certificate-rows').getByText('renewal due', {exact: true}).waitFor();
-  await page.locator('#certificate-rows').getByText('No expiry', {exact: true}).waitFor();
+  await openDetails('certificate-file-details');
+  await page.locator('#certificate-rows').getByText('Renewal due', {exact: true}).waitFor();
+  await page.locator('#certificate-rows').getByText('No expiry date', {exact: true}).waitFor();
+  await page.locator('#certificate-open-renewal').click();
+  assert.equal(await page.locator('#certificate-renewal-controls').evaluate(node => node.open), true);
+  assert.equal(await page.locator('#certificate-renewal-controls > summary').evaluate(node => node === document.activeElement), true);
   assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
   const download = page.waitForEvent('download');
   await page.locator('#certificate-request').click();
@@ -581,13 +639,34 @@ try {
   const beforePrivate = settingsWrites.length;
   await page.locator('#certificate-approved').setInputFiles({name: 'wrong.pub', mimeType: 'text/plain', buffer: Buffer.from('-----BEGIN OPENSSH PRIVATE KEY-----')});
   await page.locator('#certificate-renew').click();
-  await page.locator('#certificate-renew-result').getByText('Choose the public certificate returned by your custodian, not a private key.', {exact: true}).waitFor();
+  await page.locator('#certificate-renew-result').getByText('Choose the public certificate returned by the root key holder, not a private key.', {exact: true}).waitFor();
   assert.equal(settingsWrites.length, beforePrivate, 'Private key must not be uploaded');
   await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
   await page.locator('#certificate-renew').click();
-  await page.locator('#certificate-renew-result').getByText('online certificate changed; prepare renewal again', {exact: true}).waitFor();
+  await page.locator('#certificate-renew-result').getByText(/Request refused.*Prepare a fresh public renewal request/).waitFor();
   assert.equal(settingsWrites.at(-1).body.public_key_sha256, 'ab'.repeat(32));
   renewalAccepted = true;
+  assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
+  await page.locator('#certificate-request').click();
+  await page.waitForFunction(() => !document.getElementById('certificate-renew').disabled);
+  await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
+  settingsFailure = 'network';
+  const beforeUnknownRenewal = settingsWrites.length;
+  await page.locator('#certificate-renew').click();
+  await page.locator('#certificate-renew-result').getByText(/Outcome unknown/).waitFor();
+  await page.locator('#certificate-renewal-controls > summary').click();
+  assert.equal(await page.locator('#certificate-renewal-controls').evaluate(node => node.open), false);
+  await page.locator('#certificate-renewal-controls > summary').getByText(/Outcome unknown/).waitFor();
+  assert.equal(await page.locator('#certificate-renew').isDisabled(), true,
+    'Collapsing an uncertain renewal must not clear its action lock');
+  await page.evaluate(() => window.irisCertificates.perform('renew'));
+  assert.equal(settingsWrites.length, beforeUnknownRenewal + 1,
+    'An uncertain renewal is never replayed after collapsing the task');
+  settingsFailure = '';
+  await openDetails('certificate-renewal-controls');
+  await page.locator('#certificate-request').click();
+  await page.waitForFunction(() => !document.getElementById('certificate-renew').disabled);
+  await page.locator('#certificate-approved').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
   await page.locator('#certificate-renew').click();
   await page.locator('#certificate-renew-result').getByText(/Renewal applied/).waitFor();
   assert.equal(await page.locator('#certificate-renew').isDisabled(), true);
@@ -598,14 +677,28 @@ try {
   certificateAvailable = true;
   await page.locator('#certificate-refresh').click();
   await page.locator('#certificate-rows tr').first().waitFor();
-  await page.locator('#rotation-state').getByText('Rotation: idle.', {exact: true}).waitFor();
+  const signerJob = maintenanceJob('online-signer', 'approval-required');
+  maintenanceFixture.policies.push({...maintenanceFixture.policies[0], id: signerJob.policy_id,
+    family: 'online-signer', enabled: false});
+  maintenanceFixture.jobs = [signerJob];
+  assert.ok(maintenanceStatus(maintenanceFixture), 'The scheduled approval fixture must reference a valid saved policy');
+  await page.locator('#maintenance-refresh').click();
+  await page.getByRole('link', {name: 'Complete signer approval above', exact: true}).click();
+  assert.equal(await page.locator('#signer-rotation').evaluate(node => node.open), true,
+    'The scheduled approval link opens the signing task');
+  assert.equal(await page.locator('#signer-rotation > summary').evaluate(node => node === document.activeElement), true,
+    'The scheduled approval link moves keyboard focus to the opened task');
+  maintenanceFixture.jobs = [];
+  maintenanceFixture.policies = maintenanceFixture.policies.filter(row => row.id !== signerJob.policy_id);
+  await page.locator('#maintenance-refresh').click();
+  await page.locator('#rotation-state').getByText('No replacement in progress.', {exact: true}).waitFor();
   const beforeRotation = settingsWrites.length;
   page.once('dialog', dialog => dialog.dismiss());
   await page.locator('#rotation-prepare').click();
   assert.equal(settingsWrites.length, beforeRotation);
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#rotation-prepare').click();
-  await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor();
+  await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor();
   await page.setViewportSize({width: 390, height: 844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false,
     JSON.stringify(await page.evaluate(() => Array.from(document.querySelectorAll('body *'))
@@ -625,18 +718,20 @@ try {
   await page.locator('#rotation-result').getByText('Upload the public approval, never a private key.', {exact: true}).waitFor();
   assert.equal(settingsWrites.length, beforeRotationPrivate);
   await page.locator('#rotation-refresh').click();
-  await page.locator('#rotation-state').getByText('Rotation: awaiting approval.', {exact: true}).waitFor();
+  await page.locator('#rotation-state').getByText('Waiting for a root key holder.', {exact: true}).waitFor();
   await page.locator('#rotation-certificate').setInputFiles({name: 'approved.pub', mimeType: 'text/plain', buffer: Buffer.from('ssh-ed25519-cert-v01@openssh.com fixture')});
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#rotation-activate').click();
-  await page.locator('#rotation-state').getByText('Rotation: retirement pending.', {exact: true}).waitFor();
+  await page.locator('#rotation-state').getByText('New key active; old key retirement needed.', {exact: true}).waitFor();
   const retirementDownload = page.waitForEvent('download');
   await page.locator('#rotation-retirement-request').click();
   assert.equal((await retirementDownload).suggestedFilename(), 'keylist.payload');
   await page.locator('#rotation-keylist').setInputFiles({name: 'keylist.envelope', mimeType: 'text/plain', buffer: Buffer.from('IRIS-KEYLIST/1\npublic fixture')});
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#rotation-retire').click();
-  await page.locator('#rotation-state').getByText(/Previous key revoked at keylist sequence 8/).waitFor();
+  await page.locator('#rotation-state').getByText('Replacement published.', {exact: true}).waitFor();
+  await page.locator('#signer-rotation details > summary').click();
+  await page.locator('#signer-rotation').getByText('Published revocation list sequence: 8.', {exact: true}).waitFor();
   await page.setViewportSize({width: 390, height: 844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   if (process.env.IRIS_UI_SCREENSHOTS) {
@@ -651,6 +746,7 @@ try {
   await settingsTab('Backup & restore');
   assert.equal(await page.locator('#backup-create').isDisabled(), true);
   backupFixture = {...backupFixture, available: true, target: 'single-docker', note: 'Keep encrypted copies off this host.'};
+  deploymentFixture.jobs[0].state = 'rotated';
   await page.locator('#backup-refresh').click();
   await page.waitForFunction(() => !document.getElementById('backup-create').disabled);
   const beforeCancelled = settingsWrites.length;
@@ -847,12 +943,17 @@ try {
   assert.match(await branchRow.innerText(), /staging/);
   assert.match(await branchRow.innerText(), /Not allowed by role/);
   assert.doesNotMatch(await branchRow.innerText(), /isolated/);
-  assert.match(await page.locator('#iris-policies-root').innerText(), /Preview only — not enforced at the distribution server/);
+  assert.equal(await page.locator('#origin-application-state').innerText(), 'Status unavailable');
+  assert.equal(await page.locator('#origin-apply').isDisabled(), true);
   await page.getByRole('button', {name: 'Edit role branch', exact: true}).click();
   assert.equal(await page.locator('#role-editor-advanced').getAttribute('open'), null);
   await page.locator('#role-editor-advanced > summary').click();
+  await page.getByRole('combobox', {name: 'After the settings expire', exact: true}).waitFor({state: 'visible'});
+  assert.match(await page.locator('#role-expiry-scope').innerText(), /Transfers can continue with either choice/);
+  await page.locator('#rd-on-stale').selectOption('defaults');
+  assert.match(await page.locator('#role-expiry-choice').innerText(), /not your current role or server defaults/);
   assert.equal(await page.locator('[data-qos="overall_up_bps"]').inputValue(), '8192');
-  await page.locator('[data-qos="overall_up_bps"]').fill('4096');
+  await page.locator('[data-qos="overall_up_bps"]').fill('16384');
   await page.locator('#role-def-save').click();
   await page.locator('#role-def-save').getByText('Save role', {exact: true}).waitFor();
   await page.locator('#role-def-save').click();
@@ -878,11 +979,11 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   if (screenshots) await page.screenshot({ path: path.join(screenshots, 'policies-mobile.png') });
   await page.setViewportSize({width: 1440, height: 1000});
-  const policyState = await page.evaluate(() => window.testPolicyState);
-  await page.evaluate(state => window.dispatchEvent(new CustomEvent('iris:policy-state', {detail: {...state, ready: false, disabled: true}})), policyState);
+  const policyState = await page.evaluate(() => window.irisPolicies.state.policy);
+  await page.evaluate(state => window.irisPolicies.policy(state, false), policyState);
   await sharing.getByText('Role permissions unavailable. Refresh or check Advanced.').waitFor();
   assert.equal(await page.getByRole('button', {name: 'New role', exact: true}).isDisabled(), true);
-  await page.evaluate(state => window.dispatchEvent(new CustomEvent('iris:policy-state', {detail: state})), policyState);
+  await page.evaluate(state => window.irisPolicies.policy(state, true), policyState);
   await sharing.getByRole('rowheader').filter({hasText: 'staging'}).waitFor();
   assert.deepEqual(writes, [], 'Navigation, selection and cancelling an editor must not mutate server state');
   await page.getByRole('navigation', { name: 'Primary', exact: true }).getByRole('link', { name: 'Inventory', exact: true }).click();

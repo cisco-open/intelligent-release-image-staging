@@ -10,6 +10,7 @@ security authority is verified. Capture alone never authorizes fleet cutover.
 Topology adapters resolve owned storage and prove stopped writers before capture.
 """
 
+from contextlib import contextmanager
 import json
 import itertools
 import os
@@ -52,11 +53,29 @@ def initialize(journal, installation):
     return key
 
 
-def capture_plan(installation):
+def capture_plan(installation, *, allow_missing_prebuilt=False, cleanup_on_failure=False):
+    from .backup_capture import guard as capture_guard
+    capture_guard(installation.base, request_id=getattr(installation, 'backup_capture_id', None),
+                  instance_id=installation.journal.document['id'])
     from .restore import guard
-    guard(installation.base, operation_id=getattr(installation, 'restore_operation_id', None))
+    guard(installation.base, operation_id=getattr(installation, 'restore_operation_id', None),
+          upgrade_operation_id=getattr(installation, 'application_upgrade_id', None))
     hook = getattr(installation, 'capture_plan', None)
-    return hook() if hook is not None else docker_capture_plan(installation)
+    sources, volumes, containers = hook() if hook is not None else docker_capture_plan(installation)
+    from .prebuilt_backup import capture_sources
+    try:
+        caches = capture_sources(installation, allow_missing=allow_missing_prebuilt)
+        if set(caches) & sources.keys():
+            raise InstallError('Backup cache component conflicts with the deployment topology')
+        sources.update(caches)
+    except BaseException:
+        # Only standalone capture owns disposable mirrors here. Restore and
+        # credential transactions can retain these paths for explicit recovery.
+        cleanup = getattr(installation, 'cleanup_snapshot_sources', None)
+        if cleanup_on_failure and cleanup is not None:
+            cleanup(sources)
+        raise
+    return sources, volumes, containers
 
 
 def docker_capture_plan(installation, *, services=('console', 'iris')):
@@ -235,6 +254,23 @@ def restart_writer(installation, container):
         time.sleep(1)
 
 
+@contextmanager
+def _capture_workspace(installation):
+    """Release this capture's temporary mirrors on success or refusal.
+
+    Kubernetes plans allocate private snapshot directories before the capacity
+    check. These are capture inputs, not live data or recovery authority.
+    Leave operation records and any published encrypted archives intact.
+    """
+    sources, volumes, containers = capture_plan(installation, cleanup_on_failure=True)
+    try:
+        yield sources, volumes, containers
+    finally:
+        cleanup = getattr(installation, 'cleanup_snapshot_sources', None)
+        if cleanup is not None:
+            cleanup(sources)
+
+
 def create(args):
     if os.geteuid() != 0:
         raise InstallError("Run managed deployment backup with sudo")
@@ -252,61 +288,91 @@ def create(args):
         if journal.document is None:
             raise InstallError("No installer-owned deployment was found")
         installation = _installation(journal)
-        sources, volumes, containers = capture_plan(installation)
-        capacity_preflight(installation, sources, output, recovery)
-        signer = initialize(journal, installation)
-        recipient = journal.document['config']['recovery_recipient']
-        set_id = str(uuid.uuid4())
-        metadata = {'backup_set_id': set_id, 'instance_id': journal.document['id'],
-                    'target': target_name(installation), 'volumes': volumes,
-                    'image_ids': journal.document['completed']['images'],
-                    'scope': 'managed-deployment-files', 'cutover_permitted': False}
-        # Export immutable service images while the deployment is still running.
-        with tempfile.TemporaryDirectory(prefix='backup-images-', dir=journal.directory) as temporary:
-            images = Path(temporary) / 'images.tar'
-            export = getattr(installation, 'backup_export_images', None)
-            if export is not None:
-                export(images)
-            else:
-                installation.command(['docker', 'image', 'save', '-o', images,
-                                      *sorted(set(metadata['image_ids'].values()))])
-            images.chmod(0o600)
-            sources['container-images'] = images
-            status = {'state': 'stopping', 'backup_set_id': set_id,
-                      'started_at': int(time.time()), 'containers': containers}
-            status_path = journal.directory / 'backup-operation.json'
-            atomic_write(status_path, json.dumps(status).encode())
-            restart_errors = []
-            try:
-                stop_writers(installation, containers)
-                extras = getattr(installation, 'capture_backup_extras', None)
-                if extras is not None:
-                    extras(sources)
-                backup_archive.create({'service-identity': installation.base / 'age.txt',
-                                       'backup-signer': signer}, recovery, recipient, signer,
-                                      metadata=dict(metadata, scope='identity-recovery'))
-                backup_archive.create(sources, output, recipient, signer, metadata=metadata)
-                status['state'] = 'captured'
-            except Exception:
-                status['state'] = 'failed'
-                raise
-            finally:
-                # Original services only, in server-then-Console order. Capturing
-                # never changes live bytes, so restart is safe even after failure.
-                for container in reversed(containers):
-                    if container['running']:
-                        try:
-                            restart_writer(installation, container)
-                        except (InstallError, OSError):
-                            restart_errors.append(container['service'])
-                status['restart_required'] = restart_errors
-                status['finished_at'] = int(time.time())
+        installation.application_upgrade_id = getattr(args, 'application_upgrade_id', None)
+        if getattr(args, 'managed_capture', False) is True:
+            installation.backup_capture_id = args.request_id
+        with _capture_workspace(installation) as (sources, volumes, containers):
+            capacity_preflight(installation, sources, output, recovery)
+            signer = initialize(journal, installation)
+            recipient = journal.document['config']['recovery_recipient']
+            set_id = str(uuid.uuid4())
+            metadata = {'backup_set_id': set_id, 'instance_id': journal.document['id'],
+                        'target': target_name(installation), 'volumes': volumes,
+                        'image_ids': journal.document['completed']['images'],
+                        'scope': 'managed-deployment-files', 'cutover_permitted': False}
+            capture = None
+            if getattr(args, 'managed_capture', False) is True:
+                from .backup_capture import Capture
+                capture = Capture(installation, args.request_id, args.backup_id).begin(
+                    output=output, recovery=recovery, signer=signer, containers=containers,
+                    volumes=volumes, set_id=set_id)
+                callback = getattr(args, 'on_capture_started', None)
+                if callback is not None:
+                    callback()
+            # Export immutable service images while the deployment is still running.
+            with tempfile.TemporaryDirectory(prefix='backup-images-', dir=journal.directory) as temporary:
+                images = Path(temporary) / 'images.tar'
+                if capture:
+                    capture.phase('exporting')
+                export = getattr(installation, 'backup_export_images', None)
+                if export is not None:
+                    export(images)
+                else:
+                    installation.command(['docker', 'image', 'save', '-o', images,
+                                          *sorted(set(metadata['image_ids'].values()))])
+                images.chmod(0o600)
+                sources['container-images'] = images
+                status = {'state': 'stopping', 'backup_set_id': set_id,
+                          'started_at': int(time.time()), 'containers': containers}
+                status_path = journal.directory / 'backup-operation.json'
                 atomic_write(status_path, json.dumps(status).encode())
-            if restart_errors:
-                raise InstallError("Backup captured, but service restart needs attention")
-            cleanup = getattr(installation, 'cleanup_snapshot_sources', None)
-            if cleanup is not None:
-                cleanup(sources)
+                restart_errors = []
+                try:
+                    if capture:
+                        capture.phase('stopping')
+                    stop_writers(installation, containers)
+                    if capture:
+                        capture.record['clean_stop'] = True
+                        capture.phase('capturing')
+                    extras = getattr(installation, 'capture_backup_extras', None)
+                    if extras is not None:
+                        extras(sources)
+                    envelope = backup_archive.create({'service-identity': installation.base / 'age.txt',
+                                           'backup-signer': signer}, recovery, recipient, signer,
+                        metadata=dict(metadata, scope='identity-recovery'),
+                        **({'on_stage': lambda path: capture.stage('recovery', path)} if capture else {}))
+                    if capture:
+                        capture.published('recovery', envelope)
+                    envelope = backup_archive.create(sources, output, recipient, signer, metadata=metadata,
+                        **({'on_stage': lambda path: capture.stage('data', path)} if capture else {}))
+                    if capture:
+                        capture.published('data', envelope)
+                    status['state'] = 'captured'
+                except Exception:
+                    status['state'] = 'failed'
+                    raise
+                finally:
+                    if capture:
+                        capture.phase('restarting')
+                    # Original services only, in server-then-Console order. Capturing
+                    # never changes live bytes, so restart is safe even after failure.
+                    for container in reversed(containers):
+                        if container['running']:
+                            try:
+                                restart_writer(installation, container)
+                                if capture:
+                                    capture.record['restarted'].append(container['service'])
+                                    capture.save()
+                            except (InstallError, OSError):
+                                restart_errors.append(container['service'])
+                    status['restart_required'] = restart_errors
+                    status['finished_at'] = int(time.time())
+                    atomic_write(status_path, json.dumps(status).encode())
+                    if capture:
+                        capture.record['restart_required'] = restart_errors
+                        capture.phase('settled-' + status['state'] if not restart_errors else 'restarting')
+                if restart_errors:
+                    raise InstallError("Backup captured, but service restart needs attention")
         print('Captured encrypted deployment and separate identity recovery sets: ' + set_id)
         print('Pin the backup signer public key outside this host: ' + str(signer) + '.pub')
         print('Capture is not a verified restore. Verify both sets using the independently held recovery identity.')
@@ -319,3 +385,36 @@ def verify(args):
                                  max_bytes=args.max_bytes)
     print(json.dumps(report, sort_keys=True))
     return 0
+
+
+def recover(state_dir, *, request_id, backup_id, pre_authority_recovery=False):
+    """Settle only the exact managed capture; never call create() again."""
+    from .backup_capture import Capture, guard as capture_guard, writer_authority, _private
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state_dir)
+    with Journal(state_dir).locked() as journal:
+        if journal.document is None:
+            raise InstallError('No managed deployment was found')
+        installation = _installation(journal)
+        capture_guard(state_dir, request_id=request_id, instance_id=journal.document['id'])
+        operation = Capture(installation, request_id, backup_id)
+        try:
+            operation.load()
+        except FileNotFoundError:
+            if pre_authority_recovery is not True:
+                raise InstallError('This capture has no saved same-job recovery authority. Preserve the original evidence; no services were restarted.') from None
+            jobs = json.loads(_private(Path(state_dir) / 'lifecycle-jobs.json'))
+            selected = [job for job in jobs if job.get('id') == request_id]
+            if (len(selected) != 1 or selected[0].get('action') != 'backup'
+                    or selected[0].get('backup_id') != backup_id
+                    or selected[0].get('capture_authority_started') is not False
+                    or selected[0].get('state') not in ('running', 'recovery-required')):
+                raise InstallError('Capture preflight recovery does not match the saved same-job handoff')
+            # The worker persisted this exact FALSE marker before dispatch,
+            # and intent publication precedes every exporter/stop command.
+            # No intent + FALSE therefore admits NO restart or recapture.
+            # Still prove actual worker/writer quiescence before unblocking.
+            writer_authority(installation)
+            return {'state': 'failed', 'services_healthy': False, 'recaptured': False,
+                    'partial_output_retained': True, 'preflight_only': True}
+        return operation.settle()

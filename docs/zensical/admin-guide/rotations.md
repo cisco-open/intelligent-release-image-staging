@@ -6,26 +6,27 @@ SPDX-License-Identifier: Apache-2.0
 
 # Rotate credentials and certificates
 
-Replace any credential or certificate in a running deployment. Each section is one
-procedure: install the new value, confirm both sides use it, retire the old one.
-Run one rotation at a time.
+Renew the signing certificate to extend its validity without changing the key.
+Replace a certificate or key when you need a new identity. Run one change at a
+time, verify its consumers, then retire the previous value.
 
 ## In the Console
 
 | Settings page | What it does |
 | --- | --- |
-| **TLS & trust** | Installs the browser certificate this Console serves and the certificate authorities it trusts. |
+| **TLS & trust** | Shows the browser certificate this Console serves and its expiry. Imports existing certificate/key pairs and trusted authorities. |
 | **Device packages** | Compares the certificate the live services present with the public `iris-catalog.pem` copy that onboarding hands to devices. |
-| **Certificates & keys** | Shows public identities, renews instruction certificates, and guides browser TLS and telemetry credential replacement. |
+| **Certificates & keys** | Shows what each certificate protects, its status and expiry. Open the task you need; technical details and advanced changes start closed. |
 
-For the guided online-certificate workflow, see
-[Renew the instruction signing certificate](instruction-keys.md#renew-the-instruction-signing-certificate).
-For browser TLS and telemetry credentials, use the
-[guided Console workflows](console-credentials.md).
-Installer-owned Docker, split Docker and Kubernetes deployments also have
-[guided deployment trust maintenance](deployment-rotation.md), including offline
-root approval and host-UI recovery-recipient changes. The procedures below
-remain relevant to deployments without that scoped worker.
+For routine signing expiry, select **Renew signing certificate**. Replacing the
+signing key is a separate advanced task. **Scheduled key maintenance** holds
+optional schedules and their history. Dates come from public server files;
+check the live connection separately after a certificate change.
+
+See [Renew the instruction signing certificate](instruction-keys.md#renew-the-instruction-signing-certificate)
+and [Browser and telemetry credentials](console-credentials.md) for those workflows.
+Installer-owned deployments also have [deployment trust maintenance](deployment-rotation.md),
+including root approvals and backup recovery key changes. Use the procedures below without that scoped worker.
 
 ## Rotate the management credential
 
@@ -51,7 +52,7 @@ docker compose -f server/docker-compose.yml exec iris \
   iris-management-token rotate
 ```
 
-2. Open **Devices** in the Console. The page loads.
+2. Open **Inventory** in the Console. The page loads.
 3. Retire the old value:
 
 ```bash
@@ -67,21 +68,23 @@ docker compose -f server/docker-compose.yml exec iris \
 2. Copy that file to the Console host over verified SSH, under a temporary name
    in its `IRIS_TIER_AUTH_DIR`. Set owner `10001:10001` and mode 600, then
    rename it to `current.json` there.
-3. Open **Devices** in the Console. The page loads.
+3. Open **Inventory** in the Console. The page loads.
 4. On the server host, run
    `iris_server exec iris iris-management-token retire-previous` and remove the
    temporary copies.
 
 ### On Kubernetes
 
-1. Generate the new token and put the old one in `previous`:
+1. Use the protected files from [installation](../install/kubernetes.md#3-create-the-namespace-keys-and-certificates).
+   Save the old token, then generate its replacement:
 
 ```bash
-cp iris-tier-auth/current iris-tier-auth/previous
-openssl rand -hex 32 > iris-tier-auth/current
+umask 077
+cp /secure/path/management-current /secure/path/management-previous
+openssl rand -hex 32 > /secure/path/management-current
 kubectl -n iris create secret generic iris-tier-auth \
-  --from-file=current=iris-tier-auth/current \
-  --from-file=previous=iris-tier-auth/previous \
+  --from-file=current=/secure/path/management-current \
+  --from-file=previous=/secure/path/management-previous \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -94,19 +97,17 @@ kubectl -n iris rollout status deployment/iris-seed-server
 kubectl -n iris rollout status deployment/iris-console
 ```
 
-3. Open **Devices** in the Console. The page loads.
+3. Open **Inventory** in the Console. The page loads.
 4. Empty `previous`, apply the Secret again, and restart both Deployments:
 
 ```bash
-: > iris-tier-auth/previous
+: > /secure/path/management-previous
 kubectl -n iris create secret generic iris-tier-auth \
-  --from-file=current=iris-tier-auth/current \
-  --from-file=previous=iris-tier-auth/previous \
+  --from-file=current=/secure/path/management-current \
+  --from-file=previous=/secure/path/management-previous \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n iris rollout restart deployment/iris-seed-server deployment/iris-console
 ```
-
-Secret and Deployment names: [Install on Kubernetes](../install/kubernetes.md).
 
 ## Rotate the certificate that devices trust
 
@@ -140,7 +141,7 @@ the server. New authority or new self-signed certificate:
    beside the current one.
 2. Restart the Console. It still reaches the server.
 3. Replace the server pair and restart the server.
-4. Open **Devices** in the Console. The page loads.
+4. Open **Inventory** in the Console. The page loads.
 5. Remove the old trust entry and restart the Console again.
 
 ### On Kubernetes
@@ -152,7 +153,7 @@ the server. New authority or new self-signed certificate:
    `iris-server-api.iris.svc`.
 3. Restart `deployment/iris-seed-server` and wait for its rollout. The management
    listener loads its certificate when it starts.
-4. Open **Devices** in the Console. Once it loads, remove the old authority from
+4. Open **Inventory** in the Console. Once it loads, remove the old authority from
    `iris-management-ca`, then restart the Console and wait for its rollout.
 
 Run these rollouts with `kubectl -n iris rollout restart deployment/<name>`
@@ -186,8 +187,8 @@ See [Find your way around the Console](../user-guide/console.md).
 
 ## Rotate the seeder announce credential
 
-The seeder, the server's own copy of each published image and the first source
-in the swarm, announces itself to the tracker with its own credential.
+The seeder announces to the tracker with its own credential in an HTTPS authorization header.
+Rotation keeps the published torrent URLs and image hashes unchanged.
 
 1. Freeze maintenance for your layout.
 2. Run `rotate-seeder-announce --maintenance-frozen`. It exits zero only after
@@ -210,8 +211,9 @@ manifest of the pre-rotation torrent bytes, and `--recover` restores it.
     for that image before you lift the freeze.
 
 The rotated-out credential stays valid for 30 days, set by
-`IRIS_SEEDER_PREV_TTL`. Two retired credentials can be valid at once, so run at
-most two rotations per window unless every device has a fresh torrent.
+`IRIS_SEEDER_PREV_TTL`. At most two previous credentials can remain valid.
+Further rotation waits for one to expire; refreshing device torrents does
+not change this limit.
 
 ## Rotate the metrics scrape token
 
@@ -284,11 +286,9 @@ and the seeder endpoint. Reissue the certificate, publish it, re-onboard devices
 
 - A quarantined image, an image that failed the Cisco hash check and is held
   back from devices, is skipped during a seeder rotation and its id is listed.
-  Its torrent keeps the retired announce until you release the quarantine. If
-  every image is quarantined, the command refuses. See
+  Releasing it restarts seeding with the current credential. If every image
+  is quarantined, the command refuses. See
   [Publish and verify images](../user-guide/images.md).
-- A rotation you started but did not finish leaves both values working. Finish it
-  before you start another.
 
 ## Related
 

@@ -41,7 +41,7 @@ The files the server keeps per device, under that device's id. See
 
 ## mutual origin
 
-Two devices that both hold a full copy of the same image. See
+Permission in both directions between a device and the distribution server. See
 [Security model](../architecture/security-model.md).
 
 ## quarantine (image)
@@ -90,8 +90,9 @@ The server's own copy of the image, the first source in the swarm. See
 
 ## park
 
-Keep an unassigned image on the device in case it is assigned again. See
-[Assign images and check status](../user-guide/assignments.md).
+Stop sharing an unassigned image and clean its staging copy. Retained files
+depend on the platform and who supplied them. See
+[What happens to an image you unassign](../user-guide/assignments.md#unassigned-image-park).
 
 ## verifier_missing
 
@@ -105,5 +106,6 @@ The checksum Cisco publishes for an image. See
 
 ## root key, signing root
 
-One of the two offline keys that sign every instruction key. See
+One of two protected keys used to approve online instruction-signing keys and
+sign the key-retirement list. The online key signs device instructions. See
 [Create the signing keys](../install/signing-roots.md).

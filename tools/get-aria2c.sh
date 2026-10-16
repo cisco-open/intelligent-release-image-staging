@@ -19,10 +19,9 @@
 #                                          # and defaults to it (else
 #                                          # linux/amd64) when left off.
 #
-# IRIS does not build aria2c. The binary is produced elsewhere, by the
-# aria2-next-static project, and delivered here as an artifact. That project
-# owns the source pin, the patch set, the build flags and the validation; this
-# repository is purely the consumer.
+# This helper verifies and installs prebuilt aria2c clients; it does not compile
+# them. Maintainers can reproduce the clients from the pinned corresponding
+# source, patch set and build inputs documented in tools/aria2c-build/.
 #
 # The tested clients for both architectures are COMMITTED here --
 # bin/aria2c and deliverables/aria2c-x86_64 (the same bytes) plus
@@ -47,9 +46,8 @@
 # checksum recorded here. Set ARIA2C_NO_DOWNLOAD=1 to forbid the fetch
 # entirely and require a local deliverable.
 #
-# Why not build it here: the build carries local patches. Keeping a second copy
-# of them in this repository guarantees they drift, and a stale copy silently
-# ships a client missing fixes. There is exactly one producer.
+# Client compilation is a separate maintainer workflow. Normal installation uses
+# the tested committed clients and does not ask an operator to rebuild them.
 #
 # Whichever candidate is used -- committed, handed in, or fetched -- it is
 # verified against tools/aria2c.sha256 and this script FAILS CLOSED on a
@@ -152,10 +150,10 @@ esac
 # half-built producer tree must not take its place. Every candidate is
 # verified against tools/aria2c.sha256 below, so a stale copy fails closed
 # either way.
-# The published deliverables live on a release of their own, tagged by the
-# aria2-next version and patch count rather than by an IRIS CalVer release:
-# the binary changes only when the build does.
-ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p10}"
+# When published, deliverables use their own release tag based on the
+# aria2-next version and patch count rather than the IRIS CalVer version.
+# A committed development client may precede publication of those assets.
+ARIA2C_RELEASE_TAG="${ARIA2C_RELEASE_TAG:-aria2c-2.5.6-p12}"
 ARIA2C_RELEASE_URL="${ARIA2C_RELEASE_URL:-https://github.com/cisco-open/intelligent-release-image-staging/releases/download/$ARIA2C_RELEASE_TAG/aria2c-$ARCH}"
 
 DOWNLOADED=""

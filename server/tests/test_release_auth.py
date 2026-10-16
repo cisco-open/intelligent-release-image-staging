@@ -92,14 +92,35 @@ def test_rejects_tampered_or_mismatched_downloads(release, monkeypatch, change):
         AUTH.verify(directory, TAG, COMMIT)
 
 
-def test_workflow_attests_before_publishing_and_pins_actions():
+def test_release_workflow_fetches_the_exact_current_source_asset():
+    lines = [line.split() for line in (ROOT / "tools/aria2c-source/source.sha256").read_text().splitlines()
+             if line and not line.startswith("#")]
+    assert len(lines) == 1
+    source_asset = lines[0][1]
+    assert AUTH.SOURCE_ASSET == source_asset
+    release_tag = source_asset.removesuffix("-source.tar.gz")
     text = (ROOT / ".github/workflows/release.yml").read_text()
-    assert text.index("tools/release-auth.py verify") < text.index("gh release create")
+    assert "gh release download " + release_tag + " \\\n" in text
+    assert "--pattern " + source_asset + " --dir release-assets" in text
+
+
+def test_workflows_separate_authentication_from_manual_publication_and_pin_actions():
+    text = (ROOT / ".github/workflows/release.yml").read_text()
+    publish = (ROOT / ".github/workflows/publish-release.yml").read_text()
+    assert text.index("tools/release-auth.py verify") < text.index("actions/upload-artifact@")
+    assert "gh release create" not in text and "contents: write" not in text
     assert "id-token: write" in text and "attestations: write" in text
     assert "subject-path: release-assets/*" in text
-    assert "--clobber" not in text
+    assert "workflow_dispatch:" in publish and "push:" not in publish and "workflow_run:" not in publish
+    assert "github.ref == 'refs/heads/main'" in publish
+    assert publish.index("tools/release-stage.py prepare-publication") < publish.index("gh release create")
+    assert '"$snapshot"/assets/*' in publish and "--verify-tag" in publish
+    assert "id-token:" not in publish and "attestations:" not in publish
+    assert "build-installer" not in publish and "make-release" not in publish
+    assert "environment:" not in publish
+    assert "--clobber" not in text + publish
     import re
-    for action in re.findall(r"uses: (\S+)", text):
+    for action in re.findall(r"uses: (\S+)", text + publish):
         assert re.fullmatch(r"actions/[\w-]+@[a-f0-9]{40}", action)
 
 
@@ -145,6 +166,70 @@ def test_prepares_complete_publishable_inventory(prepared_inputs):
         assert AUTH.digest(output / record_name) == record["sha256"]
     subprocess.run(["sha256sum", "--check", "SHA256SUMS"], cwd=output, check=True)
     subprocess.run(["sha256sum", "--check", "aria2c.sha256"], cwd=output, check=True)
+
+
+@pytest.mark.parametrize('name', sorted(AUTH.PREBUILT_CANDIDATE_ASSETS))
+@pytest.mark.parametrize('kind', ['file', 'dangling-symlink'])
+def test_unqualified_prebuilt_candidates_refused_before_publication_writes(prepared_inputs, name, kind):
+    repo, output = prepared_inputs
+    candidate = output / name
+    if kind == 'file':
+        candidate.write_bytes(b'local unqualified candidate')
+    else:
+        candidate.symlink_to(output / 'missing')
+    before = {path.name: path.lstat() for path in output.iterdir()}
+    with pytest.raises(ValueError, match='corresponding-source coverage checks'):
+        AUTH.prepare(repo, output, TAG)
+    after = {path.name: path.lstat() for path in output.iterdir()}
+    assert before == after
+    assert not (output / 'release.json').exists()
+
+
+def test_prepare_preserves_exact_prebuilt_source_asset(prepared_inputs):
+    repo, output = prepared_inputs
+    target = output / "iris.tgz"
+    target.write_bytes((repo / "release/iris.tgz").read_bytes())
+    original = target.stat()
+    AUTH.prepare(repo, output, TAG)
+    current = target.stat()
+    assert (current.st_ino, current.st_mtime_ns) == (original.st_ino, original.st_mtime_ns)
+    assert json.loads((output / "release.json").read_text())["assets"]["iris.tgz"]["sha256"] == AUTH.digest(target)
+
+
+@pytest.mark.parametrize("change", ["different", "symlink", "hardlink"])
+def test_prepare_refuses_replacing_existing_prebuilt_source(prepared_inputs, change):
+    import os
+    repo, output = prepared_inputs
+    target = output / "iris.tgz"
+    original = repo / "release/iris.tgz"
+    if change == "different":
+        target.write_bytes(b"other source archive")
+    elif change == "symlink":
+        target.symlink_to(original)
+    else:
+        os.link(original, target)
+    before = target.lstat()
+    with pytest.raises(ValueError):
+        AUTH.prepare(repo, output, TAG)
+    after = target.lstat()
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) == (
+        before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    assert not (output / "release.json").exists()
+    assert original.read_bytes() == b"fixture iris.tgz"
+
+
+def test_source_copy_does_not_replace_a_concurrently_created_output(tmp_path, monkeypatch):
+    source, target = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(b"selected source")
+    original = AUTH.os.link
+    def race(candidate, destination, **kwargs):
+        target.write_bytes(b"concurrent owner file")
+        return original(candidate, destination, **kwargs)
+    monkeypatch.setattr(AUTH.os, "link", race)
+    with pytest.raises(FileExistsError):
+        AUTH._copy_or_match_source(source, target)
+    assert target.read_bytes() == b"concurrent owner file"
+    assert set(path.name for path in tmp_path.iterdir()) == {"source", "destination"}
 
 
 @pytest.mark.parametrize("change", ["tag", "dirty", "source", "inventory"])

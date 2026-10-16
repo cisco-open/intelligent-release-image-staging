@@ -43,8 +43,9 @@ The tool installs at `tools/bin/ioxclient`, checked against
 
 ## 2. Check ARM64 emulation
 
-Building the arm64 IOx package on an amd64 host needs QEMU emulation. Check the
-host:
+An amd64 build host needs QEMU for the server's ARM64 verification helpers and
+the arm64 IOx package. The Ubuntu installer handles this dependency. For a
+manual source build, check the host:
 
 ```bash
 grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready
@@ -52,8 +53,9 @@ grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready
 
 `ready` means the handler is registered and turned on. If the command prints
 nothing, install your distribution's static QEMU package, `qemu-user-static` on
-Ubuntu and Debian, then check again. The builders can also register the handler
-for you, from the `tonistiigi/binfmt` image named by digest in
+Ubuntu and Debian, then check again. Do this before building the server or
+running a direct image build. The arm64 IOx staging helper can register the
+handler from the `tonistiigi/binfmt` image named by an audited digest in
 `BINFMT_IMAGE_DIGEST`.
 
 ## 3. Install skopeo and rpmbuild

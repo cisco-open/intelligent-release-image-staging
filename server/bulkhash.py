@@ -49,10 +49,13 @@ the original exception's exact type.
 import collections
 import csv
 import io
+import json
+import math
 import os
 import socket
 import ssl
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.error
@@ -62,6 +65,7 @@ import trust
 
 _DOWNLOAD_CHUNK = 1024 * 1024
 _OPENSSL_TIMEOUT = 60
+DEFAULT_TOTAL_TIMEOUT = 600
 
 # The real feed's CSV was ~88.5 MB uncompressed on 2026-08-29 and grows
 # (append-only) over time; this leaves decades of headroom while still
@@ -137,7 +141,70 @@ def _download_error_detail(exc):
     return exc.__class__.__name__
 
 
-def fetch(url, timeout, out_path):
+def _fetch_stream(url, timeout, fd, max_bytes, chunk_size):
+    """Network-only worker; the parent owns admission, deadline and rename."""
+    opener = urllib.request.build_opener(
+        _NoDowngradeRedirectHandler,
+        urllib.request.HTTPSHandler(context=trust.ssl_context()))
+    with os.fdopen(fd, "wb", closefd=False) as f:
+        try:
+            with opener.open(url, timeout=timeout) as resp:
+                declared_length = resp.headers.get("Content-Length")
+                if declared_length is not None:
+                    try:
+                        declared_length = int(declared_length)
+                    except (TypeError, ValueError) as exc:
+                        raise BulkHashError(
+                            "download failed: invalid Content-Length") from exc
+                    if declared_length < 0:
+                        raise BulkHashError("download failed: invalid Content-Length")
+                total = 0
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise BulkHashError(
+                            "download failed: exceeds maximum size of %d bytes" % max_bytes)
+                    f.write(chunk)
+                if declared_length is not None and total != declared_length:
+                    raise BulkHashError("download failed: Content-Length mismatch")
+        except BulkHashError:
+            raise
+        except urllib.error.HTTPError as exc:
+            raise BulkHashError("download failed: HTTP %d" % exc.code) from exc
+        except Exception as exc:
+            raise BulkHashError(
+                "download failed: %s" % _download_error_detail(exc)) from exc
+    return total
+
+
+_FETCH_WORKER = r'''
+import json,os,stat,sys
+sys.path.insert(0,sys.argv[1])
+import bulkhash
+try:
+    raw=sys.stdin.buffer.read(65537)
+    if len(raw)>65536: raise ValueError()
+    request=json.loads(raw)
+    if set(request)!={'url','timeout','maxBytes','chunkSize'}: raise ValueError()
+    if not isinstance(request['url'],str): raise ValueError()
+    if type(request['maxBytes']) is not int or not 0<request['maxBytes']<=bulkhash._MAX_DOWNLOAD_BYTES: raise ValueError()
+    if type(request['chunkSize']) is not int or not 0<request['chunkSize']<=bulkhash._DOWNLOAD_CHUNK: raise ValueError()
+    fd=int(sys.argv[2]);info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size!=0: raise ValueError()
+    count=bulkhash._fetch_stream(request['url'],request['timeout'],fd,request['maxBytes'],request['chunkSize'])
+    result={'ok':True,'bytes':count}
+except bulkhash.BulkHashError as error:
+    result={'ok':False,'detail':str(error)}
+except Exception as error:
+    result={'ok':False,'detail':'download failed: '+bulkhash._download_error_detail(error)}
+sys.stdout.write(json.dumps(result))
+'''
+
+
+def fetch(url, timeout, out_path, total_timeout=DEFAULT_TOTAL_TIMEOUT):
     """Stream-download `url` to `out_path`, atomically: a temp file in the
     same directory is renamed into place only once every byte has arrived,
     so a failed or partial download never clobbers a prior good file at
@@ -145,55 +212,84 @@ def fetch(url, timeout, out_path):
     network/timeout error, short read, the response exceeding
     `_MAX_DOWNLOAD_BYTES`, or a redirect that would downgrade an https
     request to a non-https URL -- see `_refuse_downgrade`); returns
-    `out_path` on success."""
+    `out_path` on success. ``timeout`` is a socket-operation timeout;
+    ``total_timeout`` bounds the entire network worker, including DNS,
+    redirects, response headers and trickled bodies. The worker is killed
+    and reaped before temporary-file cleanup on expiry."""
+    if (isinstance(total_timeout, bool)
+            or not isinstance(total_timeout, (int, float))
+            or not math.isfinite(total_timeout) or total_timeout <= 0):
+        raise BulkHashError("download failed: invalid total download timeout")
     dest_dir = os.path.dirname(os.path.abspath(out_path)) or "."
     os.makedirs(dest_dir, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=dest_dir, prefix=".bulkhash-",
                                     suffix=".tmp")
-    opener = urllib.request.build_opener(
-        _NoDowngradeRedirectHandler,
-        urllib.request.HTTPSHandler(context=trust.ssl_context()))
+    identity = os.fstat(fd)
+    worker = None
     try:
-        with os.fdopen(fd, "wb") as f:
-            try:
-                with opener.open(url, timeout=timeout) as resp:
-                    declared_length = resp.headers.get("Content-Length")
-                    if declared_length is not None:
-                        try:
-                            declared_length = int(declared_length)
-                        except (TypeError, ValueError) as exc:
-                            raise BulkHashError(
-                                "download failed: invalid Content-Length") from exc
-                        if declared_length < 0:
-                            raise BulkHashError(
-                                "download failed: invalid Content-Length")
-                    total = 0
-                    while True:
-                        chunk = resp.read(_DOWNLOAD_CHUNK)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > _MAX_DOWNLOAD_BYTES:
-                            raise BulkHashError(
-                                "download failed: exceeds maximum size of "
-                                "%d bytes" % _MAX_DOWNLOAD_BYTES)
-                        f.write(chunk)
-                    if (declared_length is not None
-                            and total != declared_length):
-                        raise BulkHashError(
-                            "download failed: Content-Length mismatch")
-            except BulkHashError:
-                raise
-            except urllib.error.HTTPError as exc:
-                raise BulkHashError(
-                    "download failed: HTTP %d" % exc.code) from exc
-            except Exception as exc:
-                raise BulkHashError(
-                    "download failed: %s" % _download_error_detail(exc)) from exc
+        payload = json.dumps({"url": url, "timeout": timeout,
+                              "maxBytes": _MAX_DOWNLOAD_BYTES,
+                              "chunkSize": _DOWNLOAD_CHUNK}, allow_nan=False).encode()
+        if len(payload) > 65536:
+            raise BulkHashError("download failed: invalid download request")
+        worker = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", _FETCH_WORKER,
+             os.path.dirname(os.path.abspath(__file__)), str(fd)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, pass_fds=(fd,))
+        try:
+            output, _ = worker.communicate(payload, timeout=total_timeout)
+        except subprocess.TimeoutExpired as exc:
+            worker.kill()
+            worker.communicate()
+            raise BulkHashError(
+                "download failed: total download deadline exceeded") from exc
+        if worker.returncode != 0 or len(output) > 4096:
+            raise BulkHashError("download failed: network worker failed")
+        try:
+            result = json.loads(output)
+        except (ValueError, UnicodeError) as exc:
+            raise BulkHashError("download failed: invalid network worker result") from exc
+        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+            raise BulkHashError("download failed: invalid network worker result")
+        if not result["ok"]:
+            detail = result.get("detail")
+            if not isinstance(detail, str) or len(detail) > 512:
+                detail = "download failed: network worker failed"
+            raise BulkHashError(detail)
+        if type(result.get("bytes")) is not int or not 0 <= result["bytes"] <= _MAX_DOWNLOAD_BYTES:
+            raise BulkHashError("download failed: invalid network worker result")
+        after = os.fstat(fd)
+        same = lambda s: (s.st_dev, s.st_ino, s.st_uid, s.st_gid, s.st_mode, s.st_nlink)
+        if (same(identity) != same(after)
+                or same(after) != same(os.stat(tmp_path, follow_symlinks=False))
+                or after.st_size != result["bytes"]):
+            raise BulkHashError("download failed: temporary file identity changed")
+        os.fsync(fd)
         os.replace(tmp_path, out_path)
+    except BulkHashError:
+        raise
+    except Exception as exc:
+        raise BulkHashError(
+            "download failed: %s" % _download_error_detail(exc)) from exc
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        try:
+            if worker is not None:
+                if worker.poll() is None:
+                    worker.kill()
+                worker.wait()
+                for stream in (worker.stdin, worker.stdout, worker.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+        except OSError as exc:
+            raise BulkHashError("download failed: network worker cleanup failed") from exc
+        finally:
+            os.close(fd)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
     return out_path
 
 

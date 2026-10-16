@@ -23,20 +23,36 @@ case "$PLATFORMS" in
 esac
 
 CONTEXT_DIR=""
-OCI_ARCHIVE="${IRIS_DEVICE_IMAGE_OCI:-$REPO/artifacts/iris-device-$VERSION$ARCHIVE_SUFFIX.oci.tar}"
+OCI_ARCHIVE="${IRIS_DEVICE_IMAGE_OCI:-}"
 ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
+ROOTS_EXPLICIT=0
+[ -z "${IRIS_INSTRUCTION_ROOTS_DIR+x}" ] || ROOTS_EXPLICIT=1
+NEUTRAL_TRUST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --context) CONTEXT_DIR="${2:?--context needs a directory}"; shift 2 ;;
     --output) OCI_ARCHIVE="${2:?--output needs a path}"; shift 2 ;;
+    --neutral-trust) NEUTRAL_TRUST=1; shift ;;
     --instruction-roots-dir)
-      ROOTS="${2:?--instruction-roots-dir needs a directory}"; shift 2 ;;
+      ROOTS="${2:?--instruction-roots-dir needs a directory}"; ROOTS_EXPLICIT=1; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --context DIR [--output iris-device.oci.tar] [--instruction-roots-dir DIR]"
+      echo "usage: $0 --context DIR [--output iris-device.oci.tar] [--instruction-roots-dir DIR | --neutral-trust]"
       exit 0 ;;
     *) echo "!! unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+MANIFEST_FORMAT=iris-device-oci-v1
+TRUST_MODE=rooted
+if [ "$NEUTRAL_TRUST" -eq 1 ]; then
+  [ "$ROOTS_EXPLICIT" -eq 0 ] || { echo "!! --neutral-trust cannot use instruction roots" >&2; exit 2; }
+  [ "$PLATFORMS" = linux/amd64,linux/arm64 ] \
+    || { echo "!! neutral runtime requires both amd64 and arm64" >&2; exit 2; }
+  MANIFEST_FORMAT=iris-device-neutral-oci-v1
+  TRUST_MODE=neutral
+  ARCHIVE_SUFFIX=-neutral
+fi
+OCI_ARCHIVE="${OCI_ARCHIVE:-$REPO/artifacts/iris-device-$VERSION$ARCHIVE_SUFFIX.oci.tar}"
 
 [ -n "$CONTEXT_DIR" ] || { echo "!! --context is required" >&2; exit 2; }
 [ -d "$CONTEXT_DIR" ] || { echo "!! context directory does not exist: $CONTEXT_DIR" >&2; exit 1; }
@@ -120,7 +136,14 @@ for tuple in "amd64:x86_64:iris-agent.tgz" "arm64:aarch64:iris-agent-arm.tgz"; d
   chmod +x "$dest"
 done
 
-PYTHONPATH="$REPO/server${PYTHONPATH:+:$PYTHONPATH}" \
+if [ "$NEUTRAL_TRUST" -eq 1 ]; then
+  # These empty COPY inputs are removed before the flattened image is exported.
+  # Neutral mode never opens an operator's instruction roots or invokes their
+  # renderer. The completed archive is separately checked for absent trust.
+  : > "$CONTEXT_DIR/agent/iris-signers.allowed_signers"
+  : > "$CONTEXT_DIR/agent/iris-root.allowed_signers"
+else
+  PYTHONPATH="$REPO/server${PYTHONPATH:+:$PYTHONPATH}" \
   python3 - "$ROOTS" "$CONTEXT_DIR/agent" <<'PYTHON'
 import sys
 from instruction_keys import InstructionKeyError, render_device_trust
@@ -132,6 +155,7 @@ except InstructionKeyError as exc:
           file=sys.stderr)
     raise SystemExit(1)
 PYTHON
+fi
 for trust in iris-signers.allowed_signers iris-root.allowed_signers; do
   [ -f "$CONTEXT_DIR/agent/$trust" ] \
     || { echo "!! instruction trust renderer omitted $trust" >&2; exit 1; }
@@ -152,11 +176,20 @@ oci_identity() {
   # at the actual multi-platform image index. Record/verify the latter: that
   # digest is the portable object a registry signer addresses. Also accept a
   # direct untagged index, which is valid OCI output from other builders.
-  python3 - "$1" "$PLATFORMS" <<'PY'
+  python3 - "$1" "$PLATFORMS" "$TRUST_MODE" "$REPO/tools" <<'PY'
 import hashlib
 import json
 import sys
 import tarfile
+
+if sys.argv[3] == "neutral":
+    sys.path.insert(0, sys.argv[4])
+    from iris_installer.device_finalize import inspect_neutral
+    with open(sys.argv[1], "rb") as source:
+        expected = hashlib.file_digest(source, "sha256").hexdigest()
+    inspected = inspect_neutral(sys.argv[1], expected_archive_sha256=expected)
+    print(inspected["index_digest"], ",".join("linux/" + arch for arch in sorted(inspected["platforms"])))
+    raise SystemExit(0)
 
 with tarfile.open(sys.argv[1]) as archive:
     root_raw = archive.extractfile("index.json").read()
@@ -196,8 +229,18 @@ with tarfile.open(sys.argv[1]) as archive:
 PY
 }
 archive_valid=0
+# Force-rebuilding stale source is different from changing trust mode. Never
+# replace a rooted archive with a neutral one (or vice versa), even with force.
+if [ -e "$OCI_ARCHIVE" ] || [ -e "$MANIFEST" ]; then
+  existing_format="$(manifest_value format)"
+  if { [ "$existing_format" = iris-device-oci-v1 ] && [ "$TRUST_MODE" = neutral ]; } \
+     || { [ "$existing_format" = iris-device-neutral-oci-v1 ] && [ "$TRUST_MODE" = rooted ]; }; then
+    echo "!! existing canonical OCI uses a different trust mode; choose a new output" >&2
+    exit 1
+  fi
+fi
 if [ -r "$OCI_ARCHIVE" ] && [ -r "$MANIFEST" ] \
-   && [ "$(manifest_value format)" = iris-device-oci-v1 ] \
+   && [ "$(manifest_value format)" = "$MANIFEST_FORMAT" ] \
    && [ "$(manifest_value source_sha256)" = "$SOURCE_SHA256" ]; then
   actual_archive="$(sha256sum "$OCI_ARCHIVE" | awk '{print $1}')"
   identity="$(oci_identity "$OCI_ARCHIVE" 2>/dev/null || true)"
@@ -234,6 +277,7 @@ else
   # Default remains --platform linux/amd64,linux/arm64; an explicitly scoped
   # amd64 lab build uses a separate archive and never refreshes ARM packages.
   docker buildx build "$pull_flag" \
+    --build-arg "IRIS_NEUTRAL_TRUST=$NEUTRAL_TRUST" \
     --platform "$PLATFORMS" --provenance=false --sbom=false \
     -t "iris-device:$VERSION" --output "type=oci,dest=$tmp_archive" "$CONTEXT_DIR"
   archive_sha="$(sha256sum "$tmp_archive" | awk '{print $1}')"
@@ -241,7 +285,8 @@ else
   index_digest="${identity%% *}"
   platforms="${identity#* }"
   {
-    echo 'format=iris-device-oci-v1'
+    echo "format=$MANIFEST_FORMAT"
+    echo "trust_mode=$TRUST_MODE"
     echo "source_sha256=$SOURCE_SHA256"
     echo "index_digest=$index_digest"
     echo "archive_sha256=$archive_sha"

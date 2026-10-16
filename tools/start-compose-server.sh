@@ -37,6 +37,13 @@ COMPOSE=(docker compose -f "$REPO/server/docker-compose.yml")
 IRIS_RUNTIME_UID=10001
 missing=()
 
+# The amd64 server also builds the ARM64 helpers it publishes to devices.
+# Refuse before BuildKit runs; no privileged container or handler is adopted.
+if [ ! -r /proc/sys/fs/binfmt_misc/qemu-aarch64 ] \
+    || ! grep -q '^enabled$' /proc/sys/fs/binfmt_misc/qemu-aarch64; then
+  missing+=("ARM64 emulation is not enabled on the Docker build host. The Ubuntu installer provisions it automatically; for a manual source build follow docs/zensical/install/build-tools.md.")
+fi
+
 # server/Dockerfile COPYs bin/aria2c, the seeder client. It is committed, as
 # is each deliverables/aria2c-<cpu> the device builders read, so a normal
 # clone has every client already and this block does nothing. It exists for

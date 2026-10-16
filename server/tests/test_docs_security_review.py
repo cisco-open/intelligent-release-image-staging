@@ -23,6 +23,15 @@ def page(name):
     return " ".join((DOCS / name).read_text().split())
 
 
+def test_origin_storage_error_does_not_promise_that_approval_was_not_saved():
+    problems = page("problems.md")
+    unavailable = problems.split("## origin_enforcement_unavailable", 1)[1]
+    unavailable = unavailable.split("## ", 1)[0]
+    assert "The approval may already have been saved" in unavailable
+    assert "reread the current approval and status before starting a new preview" in unavailable
+    assert "no new restriction was approved" not in unavailable
+
+
 def test_capability_repair_does_not_claim_compose_run_drops_service_limits():
     compose = (ROOT / "server/docker-compose.yml").read_text()
     assert "cap_drop: [ALL]" in compose
@@ -102,7 +111,12 @@ def test_explicit_ssh_pin_fails_closed_without_changing_unset_default():
     assert "stops SSH and SCP before connection" in reference
 
 
-def test_peer_revocation_does_not_claim_immediate_session_termination():
+def test_peer_revocation_distinguishes_token_revocation_and_bounded_native_enforcement():
     security = page("architecture/security-model.md")
-    assert "Token revocation does not immediately disconnect established peer sessions" in security
-    assert "certificate expiry is checked during the TLS handshake" in security
+    assert "Revoking only the catalog token prevents renewal; it is separate from withdrawing a peer certificate" in security
+    assert "A failed refresh does not extend its expiry" in security
+    assert "stops encrypted peer connections when the list expires" in security
+    assert "Clients without revocation support can accept unexpired certificates and continue existing transfers" in security
+    assert "For immediate isolation, block the device's network access" in security
+    assert "A saved revocation or one device's report is not proof that every peer has enforced it" in security
+    assert "certificate expiry is checked during the TLS handshake, not continuously" not in security

@@ -58,7 +58,8 @@ nav = [
   ] },
   { "Administration Guide" = [
     { "Keep IRIS running" = "admin-guide/index.md" },
-    { "Upgrade to a new release" = "admin-guide/upgrade.md" },
+    { "Deploy a new release" = "admin-guide/upgrade.md" },
+    { "Remove an IRIS deployment" = "admin-guide/uninstall.md" },
     { "Back up and restore" = "admin-guide/backups.md" },
     { "Routine maintenance" = "admin-guide/maintenance.md" },
     { "Rotate credentials and certificates" = "admin-guide/rotations.md" },

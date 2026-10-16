@@ -42,6 +42,7 @@ import bounded_pool
 import bulkhash_refresh
 import peer_tls_settings
 import peer_tls_issuer
+import peer_tls_revocations
 # aliased: `catalog` is the injected STORE everywhere below
 import catalog as catalog_mod
 import deployment_records
@@ -65,10 +66,12 @@ import iox_transport
 import iox_verification
 import live_samples
 import origin_qos
+import origin_enforcement
 import otlp
 import peer_endpoints
 import peer_policy
 import peer_enforcement
+import projection_reads
 import role_csv
 import role_management
 import schedule_runner
@@ -88,7 +91,7 @@ import tier_auth
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
 COOKIE = "iris_sid"
 SWARMMAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "swarmmap.html")
+                            "console-ui", "dist", "swarmmap.html")
 _IRIS_CERT_DEFAULT = "/run/iris/tls/cert.pem"
 # heartbeat freshness horizon (s): a device whose last_seen is older than
 # this is what the UI badges "offline" (app.js uses the same 600), so the
@@ -100,9 +103,9 @@ _HEARTBEAT_FRESH = 600
 # errored_image_ids alongside genuinely dead ones, which is why the precise
 # tier below cannot read that list alone.
 _RETRYABLE_STAGE_STATES = ("flash_full", "flash_full_seeding_only")
-# GET /swarmmap swaps this exact placeholder line in the single-source
-# server/swarmmap.html for the console config line (the file on disk keeps
-# working standalone; only the served copy is rewritten):
+# GET /swarmmap swaps this exact placeholder in the generated self-contained
+# map for its authenticated Console config (the file on disk keeps its
+# read-only standalone default; only the served copy is rewritten):
 _MAP_PLACEHOLDER = "window.IRIS_MAP_CFG = null;"
 # eventsUrlTemplate: operator-configured deep link ({ip}/{device_id}
 # placeholders) rendered by the swarm-map drawer; unset -> no button (the map
@@ -151,6 +154,9 @@ _CONTENT_TYPES = {
     ".woff2": "font/woff2",
 }
 _MAX_BODY = 64 * 1024  # cap request bodies (esp. the pre-auth /api/login POST) — DoS guard
+_MAX_SIGNING_APPROVAL = 192 * 1024  # bounded public approval plus base64/JSON
+_MAX_BROWSER_APPROVAL = 128 * 1024  # bounded public PEM plus escaped JSON
+_MAX_TRUST_APPROVAL = 256 * 1024  # bounded certificate and signed keylist together
 _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
                   # (queue-wait and new output both reset it — a deep-queued job
                   # behind the onboard pool legitimately waits >10 min)
@@ -591,6 +597,19 @@ def _revoke_device_secrets(app, device_id):
     return "ok"
 
 
+def _peer_tls_required():
+    try:
+        return peer_tls_settings.mode() == "required"
+    except (ValueError, OSError):
+        raise peer_tls_revocations.RevocationError("Peer TLS mode is unavailable") from None
+
+
+def _device_certificate_status(device_id, value=None):
+    value = peer_tls_revocations.Ledger().status(device_id) if value is None else value
+    return dict(value, peer_tls_required=_peer_tls_required(),
+                enforcement="not-applicable" if value["state"] == "active" else "pending")
+
+
 def _fmt_bytes(n):
     """Human-readable byte count for audit details: '1.2 GiB' / '340 MiB' /
     '12 KiB' (1024-based, 1 decimal, trailing .0 dropped). Non-numeric or
@@ -784,6 +803,12 @@ def _device_filter_params(qs):
     return out
 
 
+def _target_os_family(fleet_row, deployment_type=None):
+    """The OS authority shared by full projections and count-only facts."""
+    return (fleet_row.get("os_family") or
+            (deployment_type or {}).get("os_family") or "")
+
+
 def trusted_target_projection(fleet_row, deployment_type=None):
     """Derive scheduling facts from server-owned inventory/record inputs.
 
@@ -794,11 +819,38 @@ def trusted_target_projection(fleet_row, deployment_type=None):
     deployment_type = deployment_type or {}
     return {
         "model_family": gui_onboard.family(fleet_row.get("model")),
-        "os_family": (fleet_row.get("os_family") or
-                      deployment_type.get("os_family") or ""),
+        "os_family": _target_os_family(fleet_row, deployment_type),
         "platform_resolved": (deployment_type.get("platform") or
                               fleet_row.get("platform") or ""),
     }
+
+
+def _device_staging_projection(device, policy, heartbeat, job):
+    """Shared staging fields for Inventory and Overview, without device detail.
+
+    Assignment authority is the catalog policy, never a heartbeat. Missing
+    per-image reports stay None: aggregate staging rules distinguish them from
+    an explicit empty set. Preserve the full row's existing onboarding fallback
+    when no newer job exists.
+    """
+    row = {key: device[key] for key in (
+        "device_id", "onboard_action", "onboard_state", "onboard_finished_at")
+        if key in device}
+    row.update({
+        "assigned_image_id": policy.get("approved_image_id"),
+        "assigned_image_ids": policy.get("approved_image_ids"),
+        "last_seen": heartbeat.get("last_seen"),
+        "stage_state": heartbeat.get("stage_state"),
+        "stage_error": heartbeat.get("stage_error"),
+        "current_image_id": heartbeat.get("current_image_id"),
+        "staged_image_ids": heartbeat.get("staged_image_ids"),
+        "errored_image_ids": heartbeat.get("errored_image_ids"),
+    })
+    if job:
+        row["onboard_action"] = job["action"]
+        row["onboard_state"] = job["state"]
+        row["onboard_finished_at"] = job["finished_at"]
+    return row
 
 
 def deployment_target_snapshot(records):
@@ -1351,8 +1403,9 @@ def _list_deploy_logs(log_dir, device_id=None, after_ts=None, before_ts=None,
         if device_id is not None and entry["device_id"] != device_id:
             continue
         if registered_at is not None:
+            finished = entry.get("finished_at")
             entry["previous_registration"] = (
-                entry.get("finished_at") or 0) < registered_at
+                finished is not None and finished < registered_at)
         # Inclusive at both ends: a brush selection must contain the entries
         # sitting exactly on the edges the operator dragged to.
         ts = entry.get("finished_at")
@@ -1530,6 +1583,9 @@ def _validate_otlp_endpoint(raw, authenticated=False):
     url = raw.strip()
     try:
         parts = urlsplit(url)
+        # urlsplit defers malformed and out-of-range port validation until
+        # this property is read. Refuse before saving an unusable override.
+        _ = parts.port
         if parts.scheme not in ("http", "https") or not parts.netloc:
             return None, "endpoint must be an http:// or https:// URL with a host"
         if parts.username is not None or parts.password is not None:
@@ -1954,14 +2010,16 @@ class _OnboardSubmissionAdapter(object):
                     def on_success():
                         self.record_store.retire_device(
                             device_id,
-                            "forced agent-only teardown; the record no longer "
+                            "forced IRIS teardown; the record no longer "
                             "describes this device")
+                force_detail = "forced IRIS agent teardown requested"
+                if resolved.get("platform") == "router":
+                    force_detail += "; includes IRIS-marked VPG/NAT configuration"
                 audit_emit(
                     "undeploy_forced", "onboard", action="start",
                     target=device_id, actor=actor, result="ok",
-                    detail="forced agent-footprint teardown; VPG/NAT left "
-                           "untouched, any deployment record abandoned once "
-                           "the teardown succeeds")
+                    detail=force_detail + "; any deployment record abandoned "
+                           "once the teardown succeeds")
             else:
                 try:
                     record = self.record_store.recoverable_for_device(
@@ -1973,12 +2031,12 @@ class _OnboardSubmissionAdapter(object):
                 except ValueError as exc:
                     return reject(
                         409, "%s; retry with force to remove the agent "
-                        "footprint only" % exc)
+                        "footprint" % exc)
                 if record is None:
                     return reject(
                         409, "no deployment record for this device; adopt it "
                         "first, then undeploy, or retry with force to remove "
-                        "the agent footprint only")
+                        "the IRIS footprint")
                 selected_record_id = record["record_id"]
                 try:
                     resolved = self._teardown_resolved(record)
@@ -3069,6 +3127,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
     api_rate_limiter = (api_rate_limiter or
                         api_rate_limit.AggregateRateLimiter.from_env())
     login_limiter = gui_auth.LoginRateLimiter()
+    projection_gate = projection_reads.ReadProjectionGate()
     # A bounded, process-local replay ledger for legacy POST operations that
     # create an asynchronous job or an auditable resource mutation. Durable
     # jobs remain authoritative after restart; the ledger prevents the common
@@ -3139,6 +3198,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         except (catalog_mod.StateFileError, OSError, TypeError, ValueError,
                 RecursionError, OverflowError):
             return None
+
+    def staging_snapshot():
+        """Read each staging authority once; never substitute stale/empty data."""
+        heartbeat_rows = instruction_heartbeat_snapshot(unavailable_ok=False)
+        heartbeat_available = isinstance(heartbeat_rows, list)
+        hb = {row.get("device_id"): row for row in (heartbeat_rows or [])
+              if isinstance(row, dict) and isinstance(row.get("device_id"), str)}
+        # The latest job accounts for the gap before the first agent heartbeat.
+        jobs = onboard.latest_jobs_by_device() if onboard else {}
+        # Use the strict assignment projection, not the raw stamp aggregate.
+        policies = catalog.list_policies() if catalog else {}
+        return policies, hb, jobs, heartbeat_available
 
     def instruction_heartbeat_for_device(device_id):
         """Read one heartbeat shard without turning evidence loss into 5xx."""
@@ -3297,6 +3368,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "enforcement": enforcement, "origin_qos": origin_view,
                 "instruction_keys": custody}
 
+    @projection_gate.ordered
+    def policy_read_view():
+        # Mutation preflight and refusal paths keep calling policy_view directly:
+        # they never wait on the read-only projection queue or hold it for a write.
+        return policy_view()
+
     def role_policy_snapshot():
         """The authoritative policy result used by preview drift checks."""
         auth_path, lkg_path, _ = policy_paths()
@@ -3434,6 +3511,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     ("PUT", "/internal/v1/peer-policy/roles/{name}"),
                     ("DELETE", "/internal/v1/peer-policy/roles/{name}"),
                     ("PUT", "/internal/v1/peer-policy/qos"),
+                    ("GET", "/internal/v1/peer-policy/origin-enforcement"),
+                    ("PUT", "/internal/v1/peer-policy/origin-enforcement"),
                     ("POST", "/internal/v1/devices/{device_id}/role"),
                     ("POST", "/internal/v1/devices/{device_id}/peer-telemetry"),
                     ("POST", "/internal/v1/devices/bulk-role"),
@@ -4431,7 +4510,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _serve_swarmmap(self):
             """Serve the swarm-map page (session gate happens in do_GET) from
-            server/swarmmap.html, read fresh per request. Sends its own headers
+            the generated React document, read fresh per request. Sends its own headers
             instead of _send(): the global _SECURITY_HEADERS CSP has no
             script-src, so its default-src 'self' would block the page's
             nonce'd inline <script>, and X-Frame-Options: DENY would break the
@@ -4439,8 +4518,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             try:
                 with open(SWARMMAP_PATH, encoding="utf-8") as f:
                     html = f.read()
-            except OSError:
-                self._send(404, "text/plain", b"not found")
+                # A partial or incompatible build cannot be safely configured
+                # or nonced. Fail clearly instead of serving a blank map.
+                if (html.count(_MAP_PLACEHOLDER) != 1
+                        or any(html.count("<%s>" % tag) != 1
+                               or len(re.findall(r"<%s\b" % tag, html, re.I)) != 1
+                               or len(re.findall(r"</%s\s*>" % tag, html, re.I)) != 1
+                               for tag in ("script", "style"))):
+                    raise ValueError("invalid map build")
+            except (OSError, UnicodeError, ValueError):
+                api_problem.send(self, 503, "swarm-map-unavailable",
+                                 "Swarm map unavailable",
+                                 detail="Rebuild the server image.")
                 return
             nonce = secrets.token_urlsafe(16)
             html = html.replace(_MAP_PLACEHOLDER, _map_cfg_line())
@@ -4533,9 +4622,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/peer-policy":
                 if app.session_info(self._sid()) is None:
                     self._session_refusal(); return
-                view = policy_view()
+                try:
+                    view = policy_read_view()
+                except projection_reads.ProjectionBusy:
+                    self._projection_busy(); return
                 self._json(200, view, extra_headers=[
                     ("ETag", _revision_etag("peer-policy", view["revision"]))])
+                return
+            if path == "/api/peer-policy/origin-enforcement":
+                if app.session_info(self._sid()) is None:
+                    self._session_refusal(); return
+                self._origin_enforcement_request()
                 return
             if path == "/api/audit":
                 if app.session_info(self._sid()) is None:
@@ -4561,11 +4658,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         after_ts = float(qs["after_ts"][0])
                     except ValueError:
                         after_ts = None
-                events = (audit.read_events(audit_path, limit=limit,
-                                            before_ts=before_ts, after_ts=after_ts,
-                                            category=category)
-                         if audit_path else [])
-                self._json(200, {"events": events}); return
+                cursor_qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "",
+                                     keep_blank_values=True)
+                cursor = (cursor_qs.get("cursor") or [None])[0]
+                try:
+                    page = audit.read_page(audit_path, limit=limit,
+                                           before_ts=before_ts, after_ts=after_ts,
+                                           category=category, cursor=cursor)
+                except audit.CursorExpired:
+                    self._json(409, {"error": "audit_cursor_expired",
+                                     "detail": "Audit log changed. Refresh to load events."}); return
+                except ValueError:
+                    self._json(400, {"error": "invalid audit cursor"}); return
+                self._json(200, page); return
             if path == "/api/audit/histogram":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -4658,6 +4763,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 try:
                     rows, total, revision, target_facts = self._device_page(
                         limit, offset, q, filters)
+                except projection_reads.ProjectionBusy:
+                    self._projection_busy(); return
                 except deployment_records.RecordStoreUnreadable:
                     self._json(503, {
                         "error": "deployment targeting facts unavailable"})
@@ -4687,9 +4794,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/install-options":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
-                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "",
+                              keep_blank_values=True)
                 model = (qs.get("model") or [""])[0]
-                self._json(200, {"options": gui_onboard.install_options_for(model)}); return
+                if "management_type" in qs:
+                    management = qs["management_type"][0]
+                    options = (gui_fleet.install_options_for_record(
+                        {"model": model, "management_type": management})
+                        if management in ("routed", "inband", "router-routed",
+                                          "router-nat", "xr-host") else [])
+                else:
+                    # Retain the original model-only API, including null for
+                    # an unknown model. Forms request the explicit pair.
+                    options = gui_onboard.install_options_for(model)
+                self._json(200, {"options": options}); return
             if path.startswith("/api/devices/") and path.endswith("/plan"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -4702,6 +4820,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except ValueError as exc:
                     self._json(409, {"error": str(exc)}); return
                 self._json(200, {"plan": plan}); return
+            if path.startswith("/api/devices/") and path.endswith("/certificate"):
+                if app.session_info(self._sid()) is None:
+                    self._json(401, {"error": "unauthorized"}); return
+                did = unquote(path[len("/api/devices/"):-len("/certificate")])
+                if fleet is None or fleet.get_device(did) is None:
+                    self._json(404, {"error": "no such device"}); return
+                try:
+                    with peer_tls_settings.LOCK:
+                        result = _device_certificate_status(did)
+                except (peer_tls_revocations.RevocationError, OSError, ValueError):
+                    self._json(503, {"error": "Device certificate status unavailable"}); return
+                self._json(200, result); return
             if path == "/api/devices/export-csv":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -4727,7 +4857,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if fleet is None or fleet.get_device(did) is None:
                     self._json(422, {"error": "device is not in fleet"}); return
                 reports = catalog.get_telemetry(did) if catalog else []
-                self._json(200, {"reports": reports}); return
+                now = time.time()
+                pending = catalog.pending_request(did, now) if catalog else None
+                self._json(200, {"reports": reports, "device_id": did,
+                                 "observed_at": now, "pending_request": pending}); return
             if path.startswith("/api/devices/") and path.endswith("/deployment"):
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -4899,7 +5032,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/overview":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
-                self._json(200, self._overview()); return
+                try:
+                    view = self._overview()
+                except projection_reads.ProjectionBusy:
+                    self._projection_busy(); return
+                self._json(200, view); return
             if path == "/api/swarm":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -5020,7 +5157,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/settings/backups":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
-                self._json(200, lifecycle_client.status())
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if query and (set(query) != {'retention_request_id'} or len(query['retention_request_id']) != 1
+                              or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', query['retention_request_id'][0])):
+                    self._json(400, {'error': 'Choose one exact maintenance retention request ID'}); return
+                try:
+                    self._json(200, lifecycle_client.status(query['retention_request_id'][0]) if query else lifecycle_client.status())
+                except lifecycle_client.LifecycleConflict as exc:
+                    self._json(409, {'error': str(exc)})
                 return
             if path == "/api/settings/setup-status":
                 info = app.session_info(self._sid())
@@ -5087,11 +5231,30 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._serve_static("/login.html"); return
             self._serve_static(path)
 
+        def _projection_busy(self):
+            api_problem.send(
+                self, 503, "projection-busy", "Device status temporarily busy",
+                headers=(("Retry-After", "1"),))
+
         def _device_view(self):
-            """The WHOLE merged fleet, in store order — what /api/overview's
-            aggregates and the unpaginated /api/devices are defined by."""
+            """The complete Inventory projection, in fleet store order."""
             return self._device_page()[0]
 
+        def _staging_view(self):
+            """Overview's staging inputs, without unconsumed inventory detail.
+
+            Every call reads current fleet, heartbeat, assignment and job state.
+            Targeting facts, installation choices and instruction diagnostics
+            remain on the detailed Inventory path that actually returns them.
+            """
+            devices = fleet.snapshot()[1] if fleet else []
+            policies, hb, jobs, _available = staging_snapshot()
+            return [_device_staging_projection(
+                device, policies.get(device.get("device_id"), {}),
+                hb.get(device.get("device_id"), {}),
+                jobs.get(device.get("device_id"))) for device in devices]
+
+        @projection_gate.ordered
         def _device_page(self, limit=None, offset=0, q=None, filters=None):
             """(rows, total, revision, target_facts) for the device projection.
 
@@ -5119,19 +5282,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             paging = limit is not None or offset or active_filter
             if paging:
                 devs.sort(key=lambda d: str(d.get("device_id") or ""))
-            heartbeat_rows = instruction_heartbeat_snapshot(unavailable_ok=False)
-            heartbeat_available = isinstance(heartbeat_rows, list)
-            hb = {d.get("device_id"): d for d in (heartbeat_rows or [])
-                  if isinstance(d, dict) and isinstance(d.get("device_id"), str)}
-            # each device's latest onboard/undeploy job, so the UI can show
-            # "onboarding…" / "waiting for heartbeat" instead of a misleading
-            # "not enrolled" before the fresh agent's first heartbeat lands
-            jobs = onboard.latest_jobs_by_device() if onboard else {}
-            # one policy.json read for the whole table — get_policy() re-parses
-            # the file per call, which multiplies badly on the polled endpoints
-            # Keep the established strict policy projection for assignments.
-            # Raw policy rows exist only for policy_view's stamp aggregate.
-            policies = catalog.list_policies() if catalog else {}
+            policies, hb, jobs, heartbeat_available = staging_snapshot()
             revoked_principals = instruction_revocation_snapshot()
             observed_at = now_fn()
             deployment_types = deployment_type_snapshot()
@@ -5171,16 +5322,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # requested page. They need only trusted fleet/record fields,
                 # so the fast path still avoids merging heartbeat and catalog
                 # state for rows it will not render.
-                fact_rows = []
-                for device in devs:
-                    resolved = deployment_types.get(device.get("device_id"), {})
-                    fact_row = dict(device)
-                    fact_row.update(trusted_target_projection(device, resolved))
-                    fact_rows.append(fact_row)
                 facts = {
                     "missing_os_family": sum(
-                        not row.get("os_family") for row in fact_rows),
-                    "role_drift": sum(role_drift(row) for row in fact_rows),
+                        not _target_os_family(device, deployment_types.get(
+                            device.get("device_id"))) for device in devs),
+                    "role_drift": sum(role_drift(device) for device in devs),
                 }
                 return rows, total, revision, facts
 
@@ -5316,22 +5462,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # store enforces, so the Console offers only those instead of a
             # choice the server refuses and the table then snaps back from.
             row["install_options"] = gui_fleet.install_options_for_record(d)
-            row["assigned_image_id"] = pol.get("approved_image_id")
-            row["assigned_image_ids"] = pol.get("approved_image_ids")
-            row["last_seen"] = h.get("last_seen")
-            row["stage_state"] = h.get("stage_state")
+            row.update(_device_staging_projection(d, pol, h, jobs.get(did)))
             row["peer_tls"] = h.get("peer_tls")
-            row["stage_error"] = h.get("stage_error")
-            row["current_image_id"] = h.get("current_image_id")
-            # the ordered set of images the agent reports as staged
-            # (Task 3); absent from an agent that predates the field, in
-            # which case rollout falls back to current_image_id/stage_state
-            row["staged_image_ids"] = h.get("staged_image_ids")
-            # which assigned images hit a terminal per-image failure on
-            # the agent's last tick; absent from an agent that predates
-            # the field, in which case staging falls back to guessing
-            # from the single aggregate stage_state (_row_is_staging)
-            row["errored_image_ids"] = h.get("errored_image_ids")
             row["heartbeat_model"] = h.get("model")
             # the "copying to <fs>" badge needs the heartbeat's target FS
             row["target_fs"] = h.get("target_fs")
@@ -5349,11 +5481,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             row["instruction"] = _instruction_device_projection(
                 h, revoked, observed_at,
                 heartbeat_available=heartbeat_available)
-            j = jobs.get(did)
-            if j:
-                row["onboard_action"] = j["action"]
-                row["onboard_state"] = j["state"]
-                row["onboard_finished_at"] = j["finished_at"]
             return row
 
         @staticmethod
@@ -5473,12 +5600,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             staged, errored = set(sids), set(eids)
             return any(iid not in staged and iid not in errored for iid in ids)
 
+        @projection_gate.ordered
         def _overview(self):
             imgs = catalog.list_images() if catalog else []
-            # the merged device rows already carry policy + heartbeat, so one
-            # _device_view() pass feeds rollout, totals, and the awaiting count
-            # without re-reading the fleet/policy/heartbeat stores here
-            rows = self._device_view()
+            # One staging-only pass feeds rollout, totals and awaiting count;
+            # none of these aggregates consumes Inventory's detailed projection.
+            rows = self._staging_view()
             rollout = []
             for img in imgs:
                 iid = img.get("id")
@@ -5732,6 +5859,49 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(status, result)
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        def _origin_enforcement_request(self, actor=None):
+            store = origin_enforcement.Store(policy_state_dir(),
+                os.environ.get("IRIS_HOST_IP"), revoked=instruction_revocation_snapshot,
+                now=now_fn)
+            try:
+                if urlsplit(self.path).query:
+                    raise origin_enforcement.OriginError("invalid_origin_enforcement", 422)
+                if actor is None:
+                    result = store.read()
+                else:
+                    try:
+                        length = int(self.headers.get("Content-Length", "0") or 0)
+                    except ValueError:
+                        raise origin_enforcement.OriginError("invalid_origin_enforcement", 422)
+                    if length <= 0 or length > _MAX_BODY:
+                        raise origin_enforcement.OriginError("invalid_origin_enforcement", 422)
+                    try:
+                        body = json.loads(self.rfile.read(length))
+                    except (ValueError, UnicodeDecodeError, RecursionError):
+                        raise origin_enforcement.OriginError("invalid_origin_enforcement", 422)
+                    result = store.change(body, self.headers.get_all("If-Match", []))
+                    if result["dry_run"] is False:
+                        self._audit("peer_policy_change", "device", actor=actor,
+                            action="put", target="origin-enforcement",
+                            detail="reviewed control revision %d; mode %s" %
+                                   (result["revision"], result["mode"]))
+                self._json(200, result, extra_headers=[
+                    ("ETag", origin_enforcement.etag(result["revision"]))])
+            except (origin_enforcement.OriginError, peer_endpoints.EndpointStoreError,
+                    OSError, ValueError) as exc:
+                code = exc.code if isinstance(exc, origin_enforcement.OriginError) \
+                    else "origin_enforcement_unavailable"
+                status = exc.status if isinstance(exc, origin_enforcement.OriginError) else 503
+                self._finish_idempotency(None)
+                headers = []
+                try:
+                    current = origin_enforcement.load_control(store.control_path)
+                    headers.append(("ETag", origin_enforcement.etag(current["revision"])))
+                except (origin_enforcement.OriginError, OSError):
+                    pass
+                api_problem.send(self, status, code,
+                    code.replace("_", " ").capitalize(), error=code, headers=headers)
 
         def _policy_problem(self, status, code, revision=None, **details):
             self._finish_idempotency(None)
@@ -5988,13 +6158,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             422, "invalid_policy_request", revision)
                         return
                     qos = peer_policy.explain_qos(doc, did)
-                    # These are pinned aria2 client constraints, not tracker caps:
-                    # DefaultBtAnnounce.cc emits 50 or 0; the peerless leecher
-                    # overrides min interval with BtAnnounce's 2 minute default.
+                    # DefaultBtAnnounce.cc emits 50 peers or 0 when disabled.
+                    # Its announce timer uses the interval returned by the
+                    # tracker, including while a leecher has no peers.
                     qos["numwant"].update(effective_ceiling=min(qos["numwant"]["value"], 50),
                         runtime_request_zero="disabled", constraint_source="pinned-aria2-client")
-                    qos["announce_min_interval_s"].update(peerless_leecher_floor_s=120,
-                        constraint_source="pinned-aria2-client")
                     qos["catalog_tick_s"].update(offline_horizon_s=_HEARTBEAT_FRESH,
                                                 heartbeat_always=True)
                     heartbeat, heartbeat_available = \
@@ -6020,10 +6188,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 tracker_qos["numwant"]["value"], 50),
                             runtime_request_zero="disabled",
                             constraint_source="pinned-aria2-client")
-                        if tracker_state == "leecher":
-                            tracker_qos["announce_min_interval_s"].update(
-                                peerless_leecher_floor_s=120,
-                                constraint_source="pinned-aria2-client")
                         result.update(tracker_state=tracker_state,
                                       tracker_qos=tracker_qos)
                 else:
@@ -6081,6 +6245,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
+            if path == "/api/peer-policy/origin-enforcement":
+                info = self._require_session_csrf()
+                if info is not None:
+                    self._origin_enforcement_request("console:" + info["username"])
+                return
             if re.fullmatch(r"/api/schedules/[^/]+", path):
                 try:
                     length = int(self.headers.get("Content-Length", "0") or 0)
@@ -6317,6 +6486,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             elif path in ("/api/devices/bulk-credential",
                            "/api/devices/bulk-role"):
                 cap = _MAX_BULK_DEVICE_IDS
+            elif path in ("/api/settings/certificates/instruction/rotation",
+                          "/api/settings/certificates/instruction/renew"):
+                cap = _MAX_SIGNING_APPROVAL
+            elif path == "/api/settings/certificates/browser/rotation":
+                cap = _MAX_BROWSER_APPROVAL
+            elif path == "/api/settings/trust-rotation":
+                cap = _MAX_TRUST_APPROVAL
             else:
                 cap = _MAX_BODY
             if length > cap:
@@ -6442,6 +6618,52 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 return
             sid = self._sid()
             actor = "console:" + info["username"]
+            if path.startswith("/api/devices/") and path.endswith(("/certificate/revoke", "/certificate/reenroll")):
+                operation = "reenroll" if path.endswith("/reenroll") else "revoke"
+                did = unquote(path[len("/api/devices/"):-len("/certificate/" + operation)])
+                if fleet is None or fleet.get_device(did) is None:
+                    self._json(404, {"error": "no such device"}); return
+                data = self._json_body(raw)
+                if data is None:
+                    return
+                if not isinstance(data, dict) or set(data) != {
+                        "expected_revision", "expected_identity_sha256", "request_id"}:
+                    self._json(400, {"error": "Provide the reviewed certificate identity, revision and request ID"}); return
+                try:
+                    with peer_tls_settings.LOCK:
+                        if not _peer_tls_required():
+                            self._json(409, {"error": "Certificate revocation requires peer TLS"}); return
+                        ledger = peer_tls_revocations.Ledger()
+                        if operation == "reenroll":
+                            def check_jobs():
+                                if onboard is None:
+                                    raise peer_tls_revocations.RevocationError("Device onboarding status is unavailable")
+                                try:
+                                    active = any(job["device_id"] == did and job["state"] in ("queued", "running")
+                                                 for job in onboard.list_jobs())
+                                except Exception:
+                                    raise peer_tls_revocations.RevocationError("Device onboarding status is unavailable") from None
+                                if active:
+                                    raise peer_tls_revocations.RevisionConflict(
+                                        "Finish or cancel this device's current job before approving fresh onboarding")
+                            result = ledger.prepare_reenrollment(did, actor=actor, admission_check=check_jobs, **data)
+                        else:
+                            result = ledger.revoke(did, actor=actor, **data)
+                        result = _device_certificate_status(did, result)
+                except ValueError:
+                    self._json(400, {"error": "Invalid certificate operation request"}); return
+                except peer_tls_revocations.RevisionConflict as exc:
+                    self._json(409, {"error": str(exc)}); return
+                except (peer_tls_revocations.RevocationError, OSError):
+                    self._audit("device_certificate_" + operation, "device", action=operation,
+                                target=did, actor=actor, result="fail",
+                                detail="Certificate operation outcome needs a status check")
+                    self._json(503, {"error": "Certificate operation could not be confirmed; refresh certificate status before retrying"}); return
+                self._audit("device_certificate_" + operation, "device", action=operation,
+                            target=did, actor=actor,
+                            detail="Certificate identity %s; revision %d; state %s" %
+                                   (result["identity_sha256"], result["revision"], result["state"]))
+                self._json(200, result); return
             if path == "/api/logout":
                 app.logout(sid)
                 self._audit("logout", "auth", action="logout", actor=actor,
@@ -6494,6 +6716,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     result = lifecycle_client.call(data)
                 except ValueError as exc:
                     self._json(400, {'error': str(exc)}); return
+                except lifecycle_client.LifecycleConflict as exc:
+                    self._json(409, {'error': str(exc)}); return
                 except lifecycle_client.LifecycleUnavailable as exc:
                     self._json(503, {'error': str(exc)}); return
                 self._audit('deployment_rotation', 'security', action=data['action'],
@@ -6508,7 +6732,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._audit('trust_approval', 'security', action=data.get('action'), actor=actor,
                         target=data.get('family'), detail='Public trust approval state updated', src_ip=self._client_ip())
                     self._json(200, result)
-                except (trust_rotation.RotationError, instruction_keys.InstructionKeyError) as exc:
+                except (trust_rotation.RotationError, tls_rotation.RotationError,
+                        instruction_keys.InstructionKeyError) as exc:
                     self._json(409, {'error': str(exc)})
                 except (OSError, ValueError, subprocess.SubprocessError):
                     self._json(503, {'error': 'Trust operation incomplete; refresh the request before retrying'})
@@ -6517,12 +6742,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 data = self._json_body(raw)
                 if data is None:
                     return
-                if data.get('action') not in ('backup', 'verify', 'extract', 'restore', 'recover-restore'):
+                if data.get('action') not in ('backup', 'recover-backup', 'verify', 'extract', 'restore', 'recover-restore',
+                                             'retire-history', 'delete-backup', 'resume-delete'):
                     self._json(400, {"error": "Choose backup, verify, extraction or deployment restore"}); return
                 try:
                     result = lifecycle_client.call(data)
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)}); return
+                except lifecycle_client.LifecycleConflict as exc:
+                    self._json(409, {"error": str(exc)}); return
                 except lifecycle_client.LifecycleUnavailable as exc:
                     self._json(503, {"error": str(exc)}); return
                 self._audit('deployment_maintenance', 'security', action=data['action'],
@@ -6701,6 +6929,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 password = data.get("password")
                 if password is not None and not isinstance(password, str):
                     self._json(400, {"error": "password must be a string"})
+                    return
+                if isinstance(password, str) and "\0" in password:
+                    self._json(400, {"error": "password must not contain NUL"})
                     return
                 candidate = dict(fields, port=port, auto=auto)
                 err = audit_export.validate_settings(candidate)
@@ -7387,14 +7618,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if catalog is None:
                     self._json(404, {"error": "not found"}); return
                 now = time.time()
-                if not catalog.request_report(did, now):
+                directive = catalog.request_report_details(did, now)
+                if directive is None:
                     self._json(429, {"error": "request already pending"}); return
                 self._audit("request_report", "telemetry", action="request",
                            target=did, actor=actor,
                            detail="fresh telemetry report requested (valid %dm)"
                                   % (catalog.PULL_TTL // 60))
-                self._json(200, {"ok": True,
-                                 "expires_at": int(now) + catalog.PULL_TTL})
+                self._json(200, {"ok": True, "device_id": did, **directive})
                 return
             if path == "/api/telemetry/stream":
                 # Fleet-wide stream tuning (spec 8.2): writes the settings

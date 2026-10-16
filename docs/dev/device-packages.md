@@ -46,6 +46,11 @@ platform:
 
 A build needs exactly two distinct approved public root files (`.pub`) in
 `IRIS_INSTRUCTION_ROOTS_DIR`, or passed with `--instruction-roots-dir DIR`.
+
+The server image includes both architecture-matched Guest Shell clients and
+their compiled verification helpers. Startup and instruction-root rotation
+refresh both `iris-agent.tgz` and `iris-agent-arm.tgz`, including their digest
+sidecars. Readiness requires both bundles to contain the current public trust.
 Set `ARIA2C_BIN_AMD64` and `ARIA2C_BIN_ARM64` to point at the current pinned
 `aria2c` binaries when older ones are still sitting in the fallback
 locations; a mismatched architecture or checksum stops the build. These
@@ -171,12 +176,13 @@ Normal installation uses the committed tested binaries. A failed download
 is a connectivity or release-availability problem. Do not bypass verification
 or substitute an unverified source build to work around it.
 
-For source audits, use the matching release's
-`aria2c-2.5.6-p10-source.tar.gz` asset. It contains the upstream source, ten
+For source audits, use the matching
+`aria2c-2.5.6-p12-source.tar.gz` asset. It contains the upstream source, twelve
 patches, build recipes, dependency sources and license files. Follow
 [aria2c source distribution](../../tools/aria2c-source/README.md) for the
 archive checks and rebuild procedure. Source archives supplement the
-precompiled clients; they do not replace them.
+precompiled clients; they do not replace them. The current p12 clients and
+source are local development artifacts until an authorized publication.
 
 For development from this checkout, use the pinned source and tracked recipe:
 
@@ -239,8 +245,10 @@ pins.
 
 ## Resolve ARM64 emulation for the build host
 
-An amd64 host needs ARM64 emulation to build the arm64 IOx package, whose
-image runs `apk add` and `chmod` steps inside the target platform. The host
+An amd64 host needs ARM64 emulation to build the server's ARM64 verification
+helpers and the arm64 IOx package. These builds run commands inside the target
+platform. The Ubuntu installer provisions and checks emulation before building.
+The host
 also needs it for an intentional `aarch64` `aria2c` source build.
 [Download the tools that build device packages](../zensical/install/build-tools.md)
 covers checking whether the host already has a working handler and
@@ -248,9 +256,10 @@ installing the distribution package that provides one. Run those checks on
 the host where the Docker daemon builds the packages, not on the Console
 host or a Kubernetes worker chosen at random.
 
-When no handler is registered, the builders register one themselves, and
-require an audited `tonistiigi/binfmt` digest rather than a floating tag.
-Review the tag you intend to use, resolve it to a digest, and export it:
+The server start helper and direct image builds need the handler ready before
+building. The arm64 IOx staging helper can register it with an audited
+`tonistiigi/binfmt` digest rather than a floating tag. For that helper, review
+the tag you intend to use, resolve it to a digest, and export it:
 
 ```bash
 docker buildx imagetools inspect tonistiigi/binfmt:<reviewed-tag> \
@@ -258,8 +267,8 @@ docker buildx imagetools inspect tonistiigi/binfmt:<reviewed-tag> \
 export BINFMT_IMAGE_DIGEST=sha256:<the digest printed above>
 ```
 
-With the digest unset, the build fails instead of pulling an image nobody
-reviewed.
+If registration is needed and the digest is unset, the IOx staging helper
+fails instead of pulling an image nobody reviewed.
 
 Use a Buildx builder that supports multi-platform OCI export. Reuse an
 approved one, or, once it is approved, create a dedicated
@@ -289,8 +298,9 @@ package` call, it points `HOME` at a scratch directory holding an inert
 profile it writes there. That profile names `localhost` and a placeholder
 credential, and the build discards it with the rest of the build context.
 
-Packaging never reaches a device: it assembles and signs a directory,
-offline. Because packaging runs with this throwaway profile in place, an
+Packaging never reaches a device: it assembles an unsigned package offline.
+Native signing is a separate [IOx package signing step](../zensical/install/iox.md#native-package-signing).
+Because packaging runs with this throwaway profile in place, an
 ordinary operator profile, which may hold a real device address and
 credential, plays no part in it. IRIS reaches devices through its own
 onboarding, never through `ioxclient`.

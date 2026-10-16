@@ -1,0 +1,30 @@
+/* Copyright 2026 Cisco Systems, Inc. and its affiliates
+ * SPDX-License-Identifier: Apache-2.0 */
+
+.certificate-protection-list { margin: 20px 0; }
+.certificate-protection { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, auto); gap: 24px; padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.certificate-protection:first-child { border-top: 1px solid var(--rule); }
+.certificate-protection strong { color: var(--text-heading); }
+.certificate-protection p { margin: 4px 0 0; max-width: 70ch; color: var(--text-secondary); }
+.certificate-expiry { display: block; margin-top: 4px; font-size: 12px; }
+.certificate-state { font-weight: 600; }
+.certificate-state-warning { color: var(--warning); }
+.certificate-state-danger { color: var(--danger); }
+.certificate-next { font-weight: 600; color: var(--text-heading); }
+.certificate-option { display: block; padding: 2px 0; min-height: 28px; margin-top: 6px; border: 0; background: none; font: inherit; color: var(--action); text-decoration: underline; cursor: pointer; }
+.certificate-option:focus-visible { outline: 2px solid var(--action); outline-offset: 3px; }
+.certificate-task { scroll-margin-top: 72px; }
+.certificate-task > summary { cursor: pointer; padding: 4px 0; }
+.certificate-task > summary strong { font-size: 16px; color: var(--text-heading); }
+.certificate-task > summary > span { display: block; margin: 5px 0 0 19px; color: var(--text-secondary); font-size: 13px; }
+.certificate-task > summary:focus-visible, .certificate-technical > summary:focus-visible { outline: 2px solid var(--action); outline-offset: 4px; border-radius: var(--radius-control); }
+.certificate-task-body { padding-top: 12px; }
+.certificate-task > div > .card { padding: 12px 0 0; margin-bottom: 0; border: 0; box-shadow: none; }
+.certificate-technical { margin: 16px 0; }
+.certificate-technical > summary { cursor: pointer; color: var(--action); }
+.certificate-technical .table-scroll { margin-top: 12px; }
+@media (max-width: 600px) {
+  .certificate-protection { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .certificate-protection p { font-size: 13px; }
+  .certificate-expiry { display: block; }
+}

@@ -60,6 +60,51 @@ def test_signed_encrypted_roundtrip_and_restrictive_restore(recovery):
     assert (restored / 'RESTORE-INVENTORY.json').exists()
 
 
+def test_extraction_age_child_has_pipes_not_inherited_private_destination(recovery, monkeypatch):
+    # Inspect the actual child before archive.read starts its feeder. Even an
+    # explicitly inheritable parent output FD is closed in the age process;
+    # only the Python worker creates or publishes extraction files.
+    backup = capture(recovery)
+    destination = recovery['directory'] / 'isolated-result'
+    private = recovery['directory'] / 'parent-private-output'
+    fd = os.open(private, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.set_inheritable(fd, True)
+    original = subprocess.Popen
+    children = []
+    def inspect(*args, **kwargs):
+        process = original(*args, **kwargs)
+        if args[0][:2] == ['age', '-d']:
+            children.append(process)
+            try:
+                assert args[0] == ['age', '-d', '-i', str(recovery['identity'])]
+                assert kwargs['stdin'] == kwargs['stdout'] == subprocess.PIPE
+                assert kwargs['stderr'] == subprocess.DEVNULL
+                child_fds = Path('/proc') / str(process.pid) / 'fd'
+                targets = []
+                for path in child_fds.iterdir():
+                    try:
+                        targets.append(os.readlink(path))
+                    except FileNotFoundError:
+                        pass  # A closed transient read descriptor is no writer.
+                assert os.readlink(child_fds / '0').startswith('pipe:')
+                assert os.readlink(child_fds / '1').startswith('pipe:')
+                assert str(private) not in targets
+                assert str(destination) not in kwargs['env'].values()
+                assert not destination.exists()
+            except BaseException:
+                process.kill(); process.wait(timeout=5)
+                raise  # Test-only emergency cleanup, never hidden as a pass.
+        return process
+    monkeypatch.setattr(subprocess, 'Popen', inspect)
+    try:
+        result = archive.read(backup, recovery['identity'], recovery['public'], destination=destination)
+    finally:
+        os.close(fd)
+    assert result['state'] == 'verified-isolated-files'
+    assert len(children) == 1 and children[0].returncode == 0
+    assert private.read_bytes() == b''
+
+
 def test_bounded_pax_preserves_long_unicode_paths(recovery):
     name = 'long-' + 'image-' * 20 + 'å.bin'
     (recovery['source'] / name).write_bytes(b'long unicode name')

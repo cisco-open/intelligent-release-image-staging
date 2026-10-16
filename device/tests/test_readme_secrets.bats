@@ -17,9 +17,12 @@ setup() {
   grep -rq "enrollment token" "$DOCS"
 }
 
-@test "docs document the re-provision cutover" {
-  DOCS="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/docs/zensical"
-  grep -rqi "re-provision" "$DOCS"
+@test "docs document replacement through undeploy and fresh enrollment" {
+  DOC="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/docs/zensical/admin-guide/upgrade.md"
+  grep -Fq '## 1. Back up and undeploy' "$DOC"
+  grep -Fq '## 2. Remove the old deployment' "$DOC"
+  grep -Fq '## 3. Install and onboard' "$DOC"
+  grep -Fq 'its deployment-specific credentials.' "$DOC"
 }
 
 @test "README no longer claims the generator registers a permanent token" {

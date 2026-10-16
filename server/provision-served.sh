@@ -28,6 +28,7 @@ set -uo pipefail
 ART="${1:-${IRIS_ARTIFACTS_DIR:-/srv/artifacts}}"
 DEVICE="${IRIS_DEVICE_DIR:-/opt/iris/device}"
 ARIA2="${IRIS_ARIA2:-/opt/iris/bin/aria2c}"
+ARIA2_ARM="${IRIS_ARIA2_ARM:-/opt/iris/bin/aria2c-arm64}"
 CRT="${IRIS_CRT_SRC:-${IRIS_CONFIG:-/etc/iris}/tls/crt.pem}"
 ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -47,7 +48,7 @@ if state == "ok":
     contents = {}
     embedded = {}
     identities = {}
-    for name in ("iris-agent.tgz", "iris-agent.tgz.sha256", "bootstrap.sh",
+    for name in ("iris-agent.tgz", "iris-agent.tgz.sha256", "iris-agent-arm.tgz", "iris-agent-arm.tgz.sha256", "bootstrap.sh",
                  "iris-signers.pem"):
         target = os.path.join(artifacts, name)
         info = os.lstat(target)
@@ -59,7 +60,7 @@ if state == "ok":
             if not stat.S_ISREG(opened.st_mode) or \
                     (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
                 raise SystemExit("served publication changed while opening")
-            if name == "iris-agent.tgz.sha256" and opened.st_size != 65:
+            if name.endswith(".tgz.sha256") and opened.st_size != 65:
                 raise SystemExit("served bundle digest sidecar is invalid")
             if name == "iris-signers.pem" and opened.st_size > 128 * 1024:
                 raise SystemExit("served signer trust is too large")
@@ -68,12 +69,12 @@ if state == "ok":
             data = bytearray()
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
-                if name in ("iris-agent.tgz.sha256", "iris-signers.pem"):
-                    limit = 65 if name == "iris-agent.tgz.sha256" else 128 * 1024
+                if name.endswith(".tgz.sha256") or name == "iris-signers.pem":
+                    limit = 65 if name.endswith(".tgz.sha256") else 128 * 1024
                     if len(data) + len(chunk) > limit:
                         raise SystemExit("served publication grew while being read")
                     data.extend(chunk)
-            if name == "iris-agent.tgz":
+            if name in ("iris-agent.tgz", "iris-agent-arm.tgz"):
                 handle.seek(0)
                 with tarfile.open(fileobj=handle, mode="r:gz") as archive:
                     archive_members = archive.getmembers()
@@ -95,6 +96,8 @@ if state == "ok":
                                 or len(trust_data) != members[0].size:
                             raise SystemExit(
                                 "served bundle trust member is invalid")
+                        if trust_name in embedded and embedded[trust_name] != trust_data:
+                            raise SystemExit("architecture bundles have different instruction trust")
                         embedded[trust_name] = trust_data
                         record[trust_name] = hashlib.sha256(
                             trust_data).hexdigest()
@@ -105,10 +108,10 @@ if state == "ok":
         record[name] = digest.hexdigest()
         contents[name] = bytes(data)
         identities[name] = identity
-    bundle_digest = record["iris-agent.tgz"]
-    sidecar = contents["iris-agent.tgz.sha256"]
-    if len(sidecar) != 65 or sidecar != (bundle_digest + "\n").encode("ascii"):
-        raise SystemExit("served bundle digest sidecar is invalid")
+    for bundle in ("iris-agent.tgz", "iris-agent-arm.tgz"):
+        sidecar = contents[bundle + ".sha256"]
+        if len(sidecar) != 65 or sidecar != (record[bundle] + "\n").encode("ascii"):
+            raise SystemExit("served bundle digest sidecar is invalid")
     if embedded["iris-signers.allowed_signers"] != \
             contents["iris-signers.pem"]:
         raise SystemExit("public and bundled signer trust differ")
@@ -140,23 +143,24 @@ write_status pending provisioning || {
 }
 
 verify_aria2() {
-  python3 - "$ARIA2" "$SUMS" <<'PYTHON'
+  python3 - "$ARIA2" "$ARIA2_ARM" "$SUMS" <<'PYTHON'
 import hashlib, pathlib, sys
-binary, manifest = sys.argv[1:]
+amd64, arm64, manifest = sys.argv[1:]
 try:
-    entries = [line.split()[0] for line in pathlib.Path(manifest).read_text().splitlines()
-               if len(line.split()) == 2 and line.split()[1] == "x86_64"]
-    if len(entries) != 1 or len(entries[0]) != 64:
-        raise ValueError("missing or invalid x86_64 checksum pin")
-    with open(binary, "rb") as handle:
-        header = handle.read(20)
-        if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
-            raise ValueError("aria2c is not an x86_64 ELF binary")
-        digest = hashlib.sha256(header)
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    if digest.hexdigest() != entries[0]:
-        raise ValueError("aria2c checksum does not match the x86_64 pin")
+    for binary, architecture, machine in ((amd64, "x86_64", b"\x3e\x00"), (arm64, "aarch64", b"\xb7\x00")):
+        entries = [line.split()[0] for line in pathlib.Path(manifest).read_text().splitlines()
+                   if len(line.split()) == 2 and line.split()[1] == architecture]
+        if len(entries) != 1 or len(entries[0]) != 64:
+            raise ValueError("missing or invalid architecture checksum pin")
+        with open(binary, "rb") as handle:
+            header = handle.read(20)
+            if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != machine:
+                raise ValueError("aria2c is not an " + architecture + " ELF binary")
+            digest = hashlib.sha256(header)
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != entries[0]:
+            raise ValueError("aria2c checksum does not match its architecture pin")
 except (OSError, UnicodeError, ValueError) as exc:
     print("provision-served: aria2c verification failed: " + str(exc), file=sys.stderr)
     sys.exit(1)
@@ -203,7 +207,7 @@ TX="$(mktemp -d "$ART/.served-bundle.XXXXXX")" || {
   exit 1
 }
 trap 'rm -rf "$TX"' EXIT
-if [ ! -d "$DEVICE/agent" ] || [ ! -f "$ARIA2" ]; then
+if [ ! -d "$DEVICE/agent" ] || [ ! -f "$ARIA2" ] || [ ! -f "$ARIA2_ARM" ]; then
   bundle_failed inputs-missing
 elif ! verify_aria2; then
   bundle_failed verification-failed
@@ -211,13 +215,18 @@ elif ! render_trust "$TX/trust"; then
   bundle_failed instruction-roots-unavailable
 elif "$HERE/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$TX/iris-agent.tgz" \
       --instruction-roots-dir "$ROOTS" \
+    && IRIS_AEAD_HELPER="${IRIS_AEAD_HELPER_ARM:-/opt/iris/bin/iris-aead-arm64}" \
+      "$HERE/pack-agent-bundle.sh" "$DEVICE" "$ARIA2_ARM" "$TX/iris-agent-arm.tgz" \
+      --ssh-keygen "${IRIS_SSH_KEYGEN_ARM:-/opt/iris/bin/ssh-keygen-arm64}" --instruction-roots-dir "$ROOTS" \
     && cp "$DEVICE/bootstrap.sh" "$TX/bootstrap.sh" \
     && cp "$TX/trust/iris-signers.allowed_signers" "$TX/iris-signers.pem" \
     && chmod 0644 "$TX/bootstrap.sh" "$TX/iris-signers.pem" \
     && stage_atomic "$TX/iris-signers.pem" iris-signers.pem \
     && stage_atomic "$TX/bootstrap.sh" bootstrap.sh \
     && stage_atomic "$TX/iris-agent.tgz" iris-agent.tgz \
-    && stage_atomic "$TX/iris-agent.tgz.sha256" iris-agent.tgz.sha256; then
+    && stage_atomic "$TX/iris-agent.tgz.sha256" iris-agent.tgz.sha256 \
+    && stage_atomic "$TX/iris-agent-arm.tgz" iris-agent-arm.tgz \
+    && stage_atomic "$TX/iris-agent-arm.tgz.sha256" iris-agent-arm.tgz.sha256; then
   if write_status ok ready; then
     echo "provision-served: staged digest- and trust-bound Guest Shell bundle"
   else

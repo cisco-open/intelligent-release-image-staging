@@ -289,14 +289,15 @@ class Transaction:
                     raise InstallError('Recovery identity must match the independent recovery recipient')
                 if recovery:
                     raise InstallError('There is no credential operation to recover')
-                if preflight is not None:
-                    preflight(install, self.kind, self.id)
+                admission = preflight(install, self.kind, self.id) if preflight is not None else None
                 self.directory.parent.mkdir(mode=0o700, exist_ok=True)
                 backup_archive.private_directory(self.directory.parent)
                 self.directory.mkdir(mode=0o700)
                 self.record = {'schema': 1, 'operation_id': self.id, 'kind': self.kind,
                                'instance_id': journal.document['id'], 'backup_id': self.id,
                                'recovery_recipient_before': recipient, 'mutations_admitted': False}
+                if self.kind == 'age-recovery' and admission is not None:
+                    self.record['recovery_candidate_approval'] = admission
                 self.save('backup-pending')
         if self.record['phase'] == 'backup-pending':
             backup_id = self.record['backup_id']
@@ -542,33 +543,66 @@ def _age_apply(install, kind, operation_id):
     tx.apply_plan()
 
 
-def _replacement_identity(install):
-    """Resolve ONLY a host-custodian-approved identity; never browser paths."""
-    tx = install.credential_transaction
-    if 'replacement_identity_path' not in tx.record:
-        path = install.base / 'recovery-candidate.json'
+def _recovery_candidate(install, operation_id):
+    """Read exact host approval before downtime; never import or publish it."""
+    path = install.base / 'recovery-candidate.json'
+    try:
         _safe_file(path, private=True)
-        candidate = json.loads(regular_bytes(path, 16384))
-        if (set(candidate) != {'operation_id', 'identity_path', 'recipient'}
-                or candidate.get('operation_id') != tx.id
+        raw = regular_bytes(path, 16384)
+        candidate = json.loads(raw)
+        if (not isinstance(candidate, dict) or set(candidate) != {'operation_id', 'identity_path', 'recipient'}
+                or candidate.get('operation_id') != operation_id
                 or not isinstance(candidate.get('identity_path'), str)
                 or not Path(candidate['identity_path']).is_absolute()):
             raise InstallError('Recovery recipient requires a matching local custody approval')
         identity = Path(candidate['identity_path'])
         _safe_file(identity, private=True)
-        public = install.command(['age-keygen', '-y', identity], capture=True).decode().strip()
-        service = install.command(['age-keygen', '-y', install.base / 'age.txt'], capture=True).decode().strip()
+        private = regular_bytes(identity, 8192)
+        public = install.command(['age-keygen', '-y'], input=private, capture=True).decode().strip()
+        service_bytes = regular_bytes(install.base / 'age.txt', 8192)
+        service = install.command(['age-keygen', '-y'], input=service_bytes, capture=True).decode().strip()
         if (public != candidate['recipient'] or public in (service, install.config['recovery_recipient'])
                 or not re.fullmatch(r'age1[0-9a-z]{58}', public)):
             raise InstallError('Select a different independent recovery identity')
+        _safe_file(path, private=True); _safe_file(identity, private=True)
+        if (regular_bytes(path, 16384) != raw or regular_bytes(identity, 8192) != private
+                or regular_bytes(install.base / 'age.txt', 8192) != service_bytes):
+            raise InstallError('Recovery custody changed during admission')
+    except (OSError, ValueError, TypeError):
+        raise InstallError('Recovery recipient requires a matching protected host candidate') from None
+    return identity, public, service, {'candidate_sha256': _sha(raw), 'identity_sha256': _sha(private),
+                                      'service_recipient': service}
+
+
+def _check_recovery_admission(install, operation_id):
+    identity, public, service, approval = _recovery_candidate(install, operation_id)
+    transaction = getattr(install, 'credential_transaction', None)
+    expected = transaction.record.get('recovery_candidate_approval') if transaction is not None else None
+    if expected is not None and approval != expected:
+        raise InstallError('Recovery custody changed after admission; prepare a new approved request')
+    return identity, public, service, approval
+
+
+def _replacement_identity(install):
+    """Resolve ONLY a host-custodian-approved identity; never browser paths."""
+    tx = install.credential_transaction
+    if 'replacement_identity_path' not in tx.record:
+        identity, public, service, _ = _check_recovery_admission(install, tx.id)
         tx.record.update(replacement_identity_path=str(identity), recovery_recipient_after=public,
                          service_recipient=service)
         tx.save('applying')
     identity = Path(tx.record['replacement_identity_path'])
     _safe_file(identity, private=True)
-    public = install.command(['age-keygen', '-y', identity], capture=True).decode().strip()
+    private = regular_bytes(identity, 8192)
+    public = install.command(['age-keygen', '-y'], input=private, capture=True).decode().strip()
+    _safe_file(identity, private=True)
+    if regular_bytes(identity, 8192) != private:
+        raise InstallError('Approved replacement recovery identity changed during validation')
     if public != tx.record['recovery_recipient_after']:
         raise InstallError('Approved replacement recovery identity changed')
+    approval = tx.record.get('recovery_candidate_approval')
+    if approval is not None and _sha(private) != approval['identity_sha256']:
+        raise InstallError('Approved replacement recovery identity bytes changed')
     return identity
 
 
@@ -839,11 +873,15 @@ def _credential_preflight(install, kind, operation_id):
     elif kind == 'management-tls':
         _capability(install, 'management-key.pem.age')
     else:
+        approval = _check_recovery_admission(install, operation_id)[3] if kind == 'age-recovery' else None
         _pending_preflight(install)
+        return approval
 
 
 def _credential_pre_apply_check(install, kind, operation_id):
     if kind in ('age-identity', 'age-recovery'):
+        if kind == 'age-recovery':
+            _check_recovery_admission(install, operation_id)
         _pending_preflight(install)
 
 

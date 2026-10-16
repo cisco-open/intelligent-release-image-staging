@@ -18,7 +18,11 @@ sections when you replace a certificate or configure monitoring.
 
 The default browser identity is generated and stored encrypted in `tls/console-fallback.pem.age`, and reused on restart. Separate Docker hosts and Kubernetes mount their own.
 
-A browser warns about it the first time. Add it to each client's trust store after you check it through a channel you already trust, or install your own certificate. A certificate is tied to one address. Install a matching one whenever the address operators browse to changes.
+A browser warns about it the first time. Add it to each client's trust store
+after you check it through a channel you already trust, or install your own
+certificate. The certificate must cover every DNS name or IP address operators
+use. If an address changes, replace the certificate unless it already covers
+the new address.
 
 On one Docker host, export only the public certificate through an authenticated
 host connection. Run from the repository root:
@@ -42,7 +46,13 @@ Never copy the combined runtime PEM: it also contains the private key.
 
 1. Open **Settings → TLS & trust**.
 2. Upload the certificate and its private key. Leaf-only or full chain both work.
-3. Check the result. The Console reloads its listener.
+3. Check the result. If the certificate was saved but reload was not confirmed,
+   restart that Console. With several Console instances, restart the others too.
+4. Open a new trusted connection to each Console and verify its served certificate.
+
+Uploading a certificate changes the saved override, but reload reaches only the
+Console that handled the request. A saved result alone does not prove a listener
+is using the replacement.
 
 ## Install a root certificate authority
 
@@ -83,7 +93,7 @@ The same material arrives as Secrets, created before you apply the manifests. [I
 
 | File | Secret | Format |
 | --- | --- | --- |
-| `current` and `previous` | `iris-tier-auth` | The management record |
+| `current` and `previous` | `iris-tier-auth` | Raw token or scoped JSON management record |
 | `current` and `previous` | `iris-observability-auth` | The raw token value |
 | `headers` | `iris-otlp-headers` | Comma-separated `Name=Value` headers |
 | `tls.crt` and `tls.key` | `iris-console-tls` | The browser certificate |

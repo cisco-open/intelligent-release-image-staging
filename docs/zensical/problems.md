@@ -16,12 +16,13 @@ Codes appear in alphabetical order below, grouped here by the part of IRIS that 
 | Group | Codes |
 | --- | --- |
 | HTTP | [`authentication-required`](#authentication-required) · [`content-length-required`](#content-length-required) · [`credential-store-unavailable`](#credential-store-unavailable) · [`csrf-validation-failed`](#csrf-validation-failed) · [`forbidden`](#forbidden) · [`internal-error`](#internal-error) · [`invalid-content-length`](#invalid-content-length) · [`invalid-request`](#invalid-request) · [`invalid-request-body`](#invalid-request-body) · [`method-not-allowed`](#method-not-allowed) · [`payload-too-large`](#payload-too-large) · [`precondition-failed`](#precondition-failed) · [`rate-limit-exceeded`](#rate-limit-exceeded) · [`request-body-not-supported`](#request-body-not-supported) · [`request-timeout`](#request-timeout) · [`resource-conflict`](#resource-conflict) · [`resource-not-found`](#resource-not-found) · [`route-not-found`](#route-not-found) · [`service-unavailable`](#service-unavailable) · [`unprocessable-content`](#unprocessable-content) · [`unsupported-media-type`](#unsupported-media-type) · [`upstream-operation-failed`](#upstream-operation-failed) |
-| Console and management | [`console-certificate-unavailable`](#console-certificate-unavailable) · [`console-session-required`](#console-session-required) · [`invalid-authorization-request`](#invalid-authorization-request) · [`management-api-unavailable`](#management-api-unavailable) · [`management-authentication-required`](#management-authentication-required) · [`reconciliation_required`](#reconciliation_required) |
+| Console and management | [`console-certificate-unavailable`](#console-certificate-unavailable) · [`console-session-required`](#console-session-required) · [`invalid-authorization-request`](#invalid-authorization-request) · [`management-api-unavailable`](#management-api-unavailable) · [`management-authentication-required`](#management-authentication-required) · [`projection-busy`](#projection-busy) · [`reconciliation_required`](#reconciliation_required) |
 | Artifact server | [`artifact-authentication-required`](#artifact-authentication-required) · [`artifact-forbidden`](#artifact-forbidden) · [`artifact-not-found`](#artifact-not-found) · [`artifact-request-failed`](#artifact-request-failed) · [`artifact-resource-forbidden`](#artifact-resource-forbidden) · [`range-not-satisfiable`](#range-not-satisfiable) |
 | Catalog and device instructions | [`catalog-authentication-required`](#catalog-authentication-required) · [`instruction-device-forbidden`](#instruction-device-forbidden) · [`instruction-keylist-missing`](#instruction-keylist-missing) · [`instruction-keylist-unavailable`](#instruction-keylist-unavailable) · [`instruction-rate-limit-exceeded`](#instruction-rate-limit-exceeded) · [`instruction-state-unavailable`](#instruction-state-unavailable) · [`instruction-stamp-missing`](#instruction-stamp-missing) · [`invalid-tracker-auth-selector`](#invalid-tracker-auth-selector) · [`stale_pointer`](#stale_pointer) |
 | Roles and sharing policy | [`acl_not_found`](#acl_not_found) · [`asymmetric_peers`](#asymmetric_peers) · [`bad_acl`](#bad_acl) · [`bad_device_id`](#bad_device_id) · [`bad_quarantine`](#bad_quarantine) · [`bad_role`](#bad_role) · [`bad_role_mapping`](#bad_role_mapping) · [`confirmation_required`](#confirmation_required) · [`device_not_found`](#device_not_found) · [`fleet_write_failed`](#fleet_write_failed) · [`incomparable_role_change`](#incomparable_role_change) · [`invalid_policy`](#invalid_policy) · [`invalid_policy_request`](#invalid_policy_request) · [`invalid_roles_csv`](#invalid_roles_csv) · [`mixed_role_direction`](#mixed_role_direction) · [`operation_backlog_full`](#operation_backlog_full) · [`policy_error`](#policy_error) · [`policy_fail_closed`](#policy_fail_closed) · [`policy_unavailable`](#policy_unavailable) · [`precondition_failed`](#precondition_failed) · [`precondition_required`](#precondition_required) · [`principal_unresolvable`](#principal_unresolvable) · [`revision_conflict`](#revision_conflict) · [`role_in_use`](#role_in_use) · [`role_isolated`](#role_isolated) · [`role_management_error`](#role_management_error) · [`role_not_found`](#role_not_found) · [`role_reserved_name`](#role_reserved_name) · [`role_shadowed_by_assignment`](#role_shadowed_by_assignment) · [`unknown_device`](#unknown_device) |
 | Schedules | [`invalid_schedule`](#invalid_schedule) · [`schedule_conflict`](#schedule_conflict) · [`schedule_not_found`](#schedule_not_found) · [`schedule_state_unavailable`](#schedule_state_unavailable) · [`schedule_target_heartbeat_unavailable`](#schedule_target_heartbeat_unavailable) · [`schedule_target_policy_unavailable`](#schedule_target_policy_unavailable) · [`schedule_target_status_unavailable`](#schedule_target_status_unavailable) · [`schedule_target_unavailable`](#schedule_target_unavailable) |
 | Observability | [`observability-authentication-required`](#observability-authentication-required) · [`telemetry-status-unavailable`](#telemetry-status-unavailable) |
+| Distribution access | [`invalid_origin_enforcement`](#invalid_origin_enforcement) · [`origin_enforcement_blocked`](#origin_enforcement_blocked) · [`origin_enforcement_unavailable`](#origin_enforcement_unavailable) · [`origin_review_stale`](#origin_review_stale) · [`policy_revision_conflict`](#policy_revision_conflict) |
 
 ## acl_not_found
 
@@ -133,6 +134,9 @@ The request body does not match the schema the operation requires.
 ## invalid-tracker-auth-selector
 
 The catalog torrent request asked for a tracker authentication mode IRIS does not support.
+## invalid_origin_enforcement
+
+422: distribution-access input is invalid. Use the documented mode, integer limits and current policy revision, then preview again.
 ## invalid_policy
 
 A role definition, role graph, network value, or QoS value breaks the fixed policy schema. Fix the named field and validate the whole candidate again.
@@ -166,12 +170,24 @@ Peer policy, also called sharing policy, is the rules that say which devices may
 ## payload-too-large
 
 The request body, declared or received, is larger than this operation's documented limit.
+## origin_enforcement_blocked
+
+409: the reviewed restriction cannot be applied safely. Resolve the preview's checks before applying.
+## origin_enforcement_unavailable
+
+503: required private state could not be read or saved reliably. The approval may already have been saved. Check tracker health and storage, then reread the current approval and status before starting a new preview.
+## origin_review_stale
+
+409: the preview no longer matches the exact current devices, addresses, policy or settings. Refresh and preview again.
 ## policy_error
 
 503: role, QoS, or schedule coordination cannot safely use policy that is out of date. The legacy quarantine check keeps its own 422 response for the same condition. Repair the current policy before you retry; an old cached copy does not authorize new changes.
 ## policy_fail_closed
 
 503: no trustworthy peer policy is available, so the change is refused. Restore the current policy and check that it is healthy before you retry.
+## policy_revision_conflict
+
+409: sharing policy changed after the distribution-access read. Refresh both policy and distribution status, then preview again.
 ## policy_unavailable
 
 The role or QoS interface cannot use the current policy, or a policy store it needs is unavailable. This can be a refusal before any write happens, or it can follow a successful inventory write whose policy write then failed. Check the partial outcome, revision, and drift fields, then refresh both stores before you retry.
@@ -187,6 +203,11 @@ The role or QoS change left out the required `If-Match` header carrying the curr
 ## principal_unresolvable
 
 The pair-explanation lookup could not resolve one requested principal to exactly one fresh, unambiguous address. Wait for a fresh announce, or fix shared attribution; this route never guesses an address from inventory.
+## projection-busy
+
+503: an Inventory, Overview or sharing-policy read waited too long for another
+status read to finish. Retry the GET after `Retry-After`. If this continues,
+check server load and storage health.
 ## range-not-satisfiable
 
 The requested byte range cannot be served.

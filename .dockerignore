@@ -36,6 +36,9 @@ bin/
 !bin/aria2c
 images/
 deliverables/
+# The server publishes both Guest Shell architectures. Keep only this exact
+# committed ARM client; other deliverables and generated packages stay out.
+!deliverables/aria2c-aarch64
 agentinfo/
 fleet/*.csv
 fleet/*.conf

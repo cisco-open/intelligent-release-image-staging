@@ -281,6 +281,8 @@ def test_renewal_operation_identifier_is_bounded(identifier):
 def test_transport_jobs_do_not_leak_into_browser_backup_schema(tmp_path):
     for name in ("state", "backup", "recovery"):
         (tmp_path / name).mkdir(mode=0o700)
+    atomic_write(tmp_path / 'state/installation.json', json.dumps(dict(schema=1,
+        id=str(uuid.uuid4()), config={'target': 'docker'}, completed={})).encode())
     worker = lifecycle_worker.Worker(tmp_path / "state", tmp_path / "backup", tmp_path / "recovery")
     worker.jobs = [{"id": str(uuid.uuid4()), "action": "renew-transport", "state": "renewed"}]
     assert worker.status()["jobs"] == []

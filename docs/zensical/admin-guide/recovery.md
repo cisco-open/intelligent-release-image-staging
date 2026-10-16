@@ -16,7 +16,7 @@ maintenance worker:
 sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris status
 ```
 
-Find the rotation or restore marked `recovery-required`. Check its operation ID,
+Find the backup, rotation or restore marked `recovery-required`. Check its operation ID,
 backup or key type, and recorded results. Resume that operation:
 
 ```bash
@@ -26,6 +26,12 @@ sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris recover \
 
 Confirm when asked, then run `status` again to check completion. The worker uses
 the saved operation record. An accepted request is not proof of completion.
+For an interrupted backup, recovery restarts the original services and checks
+whether both archives completed. It keeps incomplete output and never starts
+another capture. Review the result before requesting a new backup.
+If the attempt stopped before service changes began, recovery closes it as
+failed without restarting services. Missing or changed recovery records require
+inspection; keep the original records and files in place.
 
 The installer manages the worker as a host service outside the containers or pods.
 If it is unavailable, check `irisctl worker-status` and use
@@ -47,6 +53,11 @@ the worker preserves it when resuming. Use the same operation ID and retain its
 original data directories. For a new restore, follow
 [Restore a backup](backups.md#restore-a-backup).
 
+For local k3s installations, backup, credential rotation, and restore protect
+the recorded server and Console images from automatic image cleanup before
+stopping services. If an image is missing, restore recovers its exact bytes
+from the authenticated backup.
+
 ## Replace the independent recovery recipient
 
 Create the replacement with
@@ -61,6 +72,8 @@ sudo irisctl maintenance --state-dir /var/lib/iris-installer/iris replace-recove
 ```
 
 Compare the public recipient with your independent copy and confirm when asked.
+The worker checks the matching host-prepared key before backup or downtime and
+checks it again before changing encrypted data.
 Use `status` to check the operation. This private recovery key stays outside the
 Console. Private signing roots must remain on their holders' machines.
 
@@ -81,7 +94,7 @@ file permissions, leaves IRIS stuck. Each procedure here clears one state.
 | An IOS-XR undeploy stopped partway and the device shows a red `needs-reconcile` badge | The job ended before teardown finished | Recovering an interrupted IOS-XR teardown |
 | A Guest Shell job reports `copy_failed`, and a later job says the hash launch was never confirmed | The native hash job's result was lost | Recover an interrupted Guest Shell root-hash job |
 | The server refuses to start and reports an unsafe deployment-authority or transcript mode | A volume mount rewrote private file modes | Repair a volume whose file permissions were changed |
-| A read of a device store fails, and the file at its old path is not valid JSON | Older code is reading the path the store moved away from | Roll back the per-device state split |
+| A read of a device store fails, and the file at its old path is not valid JSON | A reader used the retired whole-fleet path | Inspect retained per-device migration evidence |
 
 ## Recovering an IOx attempt cut off mid-run
 
@@ -214,26 +227,31 @@ storage:
     Never use recursive `chmod` or `chown`, never delete authority evidence,
     never weaken the validators, and never change permissions while a job runs.
 
-## Roll back the per-device state split { #rollback-after-the-shard-migration }
+## Inspect retained per-device migration evidence { #rollback-after-the-shard-migration }
 
 The server now keeps one file per device instead of one whole-fleet JSON
 document per store. See
 [Data formats and states](../reference/state-and-data.md). The original
-document keeps a `.migrated` suffix, and an invalid placeholder at its old path
-names the original and backup paths.
+document keeps a `.migrated` suffix. An invalid placeholder at its old path
+names the retained document and current data directory. Keep both as evidence.
 
 1. Stop every reader and writer of the selected store.
 2. Back up the whole state volume: per-device files, revision metadata,
    placeholders, and `.migrated` files.
-3. Restore the retained document at the original path. Code from before the
-   split can then read it, but it **does not restore writes made after the
-   migration**. If those writes matter, export them with the newer release, or
-   restore a consistent backup first.
+3. Check the original deployment's recorded source and state paths. Its
+   per-device readers use the current files, not the retired whole-fleet path.
+   For same-deployment recovery, follow [Restore a backup](backups.md#restore-a-backup)
+   with current security records and a consistent backup.
 4. Verify inventory and policy together. An empty store is not a successful
    recovery.
 
 !!! warning
-    Do not delete the per-device files, and do not overwrite the only backup.
+    Do not replace the placeholder with the retained document or run older
+    application code against this store. The retained document can omit newer
+    writes. Keep the per-device files, guard and backup intact.
+
+For another release, follow [Deploy a new release](upgrade.md): remove the old
+deployment, install its replacement and onboard devices to the new identity.
 
 ## Replace the two root keys { #instruction-root-ceremony-and-recovery }
 
@@ -258,10 +276,10 @@ for Force. Both are described in [Console API](../reference/console-api.md).
 | Result | Next step |
 | --- | --- |
 | Online key or certificate changed | Prepare a new request in **Settings → Certificates & keys**, then obtain approval for the current key. |
-| Renewed certificate must extend the existing expiry | Check the file returned by the custodian; an older approval cannot replace a newer certificate. |
+| Renewed certificate must extend the existing expiry | Check the file returned by the key holder; an older approval cannot replace a newer certificate. |
 | Lifecycle worker unavailable | Check the worker on the installer host and its dedicated control mount. See [Back up and restore](backups.md#console-backup-controls). |
 | Backup refused for storage sharing, space or an unclean stop | Correct the reported host condition before retrying. Check that the original services recovered. |
-| `recovery-required` | Preserve `backup-operation.json` and `lifecycle-jobs.json` in the installer's private state directory. Review service state and unfinished files with the deployment maintainer; clearing the record does not repair an interrupted capture. |
+| `recovery-required` | Use the recovery action beside the original operation in the Console, or the [host recovery command](#recover-a-deployment-rotation-while-the-console-is-stopped) if it is offline. If recovery refuses changed or missing records, keep the private state and unfinished files for inspection. |
 | Backup signature rejected | Compare the signer with the independently recorded public key. Do not replace trusted signer material with a key supplied beside an unverified archive. |
 | `verified-isolated-files` | File extraction passed. Keep the target isolated until former-primary fencing, instruction history and revocations have been reconciled. |
 

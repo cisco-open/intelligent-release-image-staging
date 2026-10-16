@@ -29,14 +29,14 @@ def test_dashboards_use_traced_wording_for_operators():
 
 
 def test_swarmmap_verify_label_is_not_ios_specific():
-    text = open(os.path.join(SERVER, "swarmmap.html"), encoding="utf-8").read()
+    text = open(os.path.join(SERVER, "console-ui", "src", "swarm-map.jsx"), encoding="utf-8").read()
     assert "IOS copy /verify" not in text, \
         "the verify row label must not name IOS: XR devices report 'unsupported' here"
     assert "Device copy verification" in text
 
 
 def test_swarmmap_still_reads_the_persisted_wire_field():
-    text = open(os.path.join(SERVER, "swarmmap.html"), encoding="utf-8").read()
+    text = open(os.path.join(SERVER, "console-ui", "src", "swarm-map.jsx"), encoding="utf-8").read()
     assert "ios_copy_verify_state" in text, \
         "the wire field name is persisted and must not be renamed"
 

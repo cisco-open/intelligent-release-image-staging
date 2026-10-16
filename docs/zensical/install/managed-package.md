@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The Ubuntu 24.04 amd64 installer builds the server, Console, both IOx
 architectures, IOS-XR RPM and Guest Shell bundles. It installs the tools it needs,
-creates the server's keys, and pauses for your signing-key holder's approval.
+creates the server's keys, and completes local signing approval by default.
 Run it over SSH or in a local terminal. You create your Console account yourself.
 
 Published packages carry GitHub artifact attestations from the public IRIS
@@ -54,17 +54,51 @@ and source inventories. See GitHub's
 ## Prepare once
 
 Use an Ubuntu host with a synchronized clock and network access for builds and
-dependencies. Keep the two private signing keys on their holders' separate
-offline machines. Provide only their public files and the public recovery
-recipient. Keep a separate copy of the private recovery key away from the server.
+dependencies. Install the authenticated package:
 
 ```bash
-sudo apt install ./iris-download/iris-installer_<version>_amd64.deb
+sudo apt install ./iris-download/iris-installer_*_amd64.deb
 ```
 
-Each key holder runs `iris-key-setup` in a terminal on their own machine.
-Its menu guides key creation, request approval and copying public files.
-Follow [Create keys and approve signing requests](offline-approval.md).
+### Guided local setup
+
+Run this as your normal user, without `sudo`:
+
+```bash
+irisctl setup
+```
+
+Automatic key setup is the default (`--key-mode automatic`). Follow its four steps:
+
+1. Review the server and Console addresses, then confirm **Start setup?**
+2. Setup creates protected local signing and recovery keys, then builds the server.
+3. It approves that server's signing request and finishes the device packages.
+4. Open the displayed Console address and create your administrator account.
+
+You do not choose or type signing-key passphrases. Setup generates a separate
+strong random passphrase for each signing key and stores them in mode `0600` files.
+The owner-only key folder is mode `0700`, outside deployment storage and backups.
+Its default is `~/.local/share/iris-setup-keys/<instance>`; setup prints the path.
+Use `--key-directory` to choose another protected location. Your operating-system
+password for `sudo` and the Console administrator password remain separate.
+
+Keeping keys and their passphrases on this host means a host compromise can expose
+both. Keep a secure independent copy of the entire key folder, including passphrase
+files and `recovery.age`. The deployment backup does not include these private setup keys.
+
+Rerun the same command with the same `--instance` or `--state-dir` to continue.
+Automatic setup checks and reuses its recorded keys. Existing manual keys are
+never replaced or unlocked automatically: use `--key-mode manual` and their
+original `--key-directory`, then enter their passphrases when OpenSSH asks.
+Manual mode also lets you choose key passphrases for a new installation.
+Add the layout options below for split Docker or Kubernetes; setup supports all three layouts.
+
+### Separate key holders
+
+To keep signing keys on separate offline machines from the start, each holder
+runs `iris-key-setup` there. Follow
+[Create keys and approve signing requests](offline-approval.md), then use
+`sudo irisctl install` with the public inputs shown below.
 
 Choose a new instance name and an empty state directory. Existing deployments
 are refused, not adopted. Restrict access to the Console before exposing its
@@ -73,8 +107,10 @@ your organization's firewall.
 
 ## Choose the layout
 
-All layouts use these common options; append the layout options below to the
-same command. Replace the example addresses and public recipient first.
+For separate key holders, all layouts use these common options. Append the
+layout options below to the same command. Replace the placeholders first.
+With guided local setup, append only the layout options to `irisctl setup`;
+the script supplies `--roots-dir` and `--recovery-recipient` for you.
 
 ```bash
 sudo irisctl install --instance my-iris \
@@ -84,6 +120,11 @@ sudo irisctl install --instance my-iris \
   --recovery-recipient <independent-age-public-recipient> \
   --accept-changes
 ```
+
+Add `--observability` to a new `irisctl setup` or `irisctl install` command to
+enable authenticated `/metrics` on port 9101 in any layout. It is off by default.
+The choice is saved for resume. Set the scraper token through
+[Rotate telemetry credentials](../admin-guide/console-credentials.md#replace-the-metrics-scraping-token).
 
 ### Docker on one host
 
@@ -191,7 +232,15 @@ administrator-provisioned PV bound to this namespace's `iris-data` claim.
 
 ## Approve and resume
 
-Exit `20` means the installer is waiting for offline approval. Transfer only
+Continue local setup with `irisctl setup`, keeping the same key mode and paths.
+For separate key holders, use `irisctl resume` with the same `--state-dir`.
+Keep the original installer version until setup finishes. Resume checks recorded
+inputs and preserves changed or unknown files.
+For failed builds, see [Installer command failures](../user-guide/troubleshooting.md#installer-command-failures).
+
+Automatic setup approves its own server request and resumes for you. Manual
+local setup asks you to approve it. With separate key holders, exit `20` means
+the installer is waiting for approval. Transfer only
 `requests/online.pub` from the state directory to a key holder. Record its SHA256
 value and share that value separately so the holder can check the request.
 On the holder's machine, run:

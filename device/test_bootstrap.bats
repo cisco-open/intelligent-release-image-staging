@@ -43,6 +43,7 @@ agent/instr.py
 agent/iris_agent.py
 agent/peer-transfer-hook.sh
 agent/peer_tls.py
+agent/peer_revocations.py
 agent/telemetry_report.py
 agent/verify_image.py
 agent/xr_deps.py
@@ -100,6 +101,229 @@ install_prior_agent() {
     > "$STAGE/agent/iris_agent.py"
   printf 'prior instruction signer trust\n' > "$STAGE/iris-signers.allowed_signers"
   printf 'prior root signer trust\n' > "$STAGE/iris-root.allowed_signers"
+}
+
+make_pending_inputs() {
+  CAP=0123456789abcdef0123456789abcdef
+  pack_valid_bundle "$TMP/bundle.tgz"
+  local name path
+  PENDING_NAMES=(bootstrap.sh iris-agent.conf rpc-secret iris-catalog.pem
+    iris-signers.allowed_signers iris-instructions.bootstrap bundle.tgz.sha256 bundle.tgz)
+  EXPECTED=()
+  for name in "${PENDING_NAMES[@]}"; do
+    path="$SRC/.iris-upload-$CAP-$name"
+    case "$name" in
+      bootstrap.sh) cp "$BATS_TEST_DIRNAME/bootstrap.sh" "$path" ;;
+      iris-agent.conf) printf 'device_id = test\ncatalog_token = synthetic-private-value\n' > "$path" ;;
+      rpc-secret) : > "$path" ;;
+      iris-catalog.pem) cp "$STAGE/iris-catalog.pem" "$path" ;;
+      iris-signers.allowed_signers) cp "$TMP/$name" "$path" ;;
+      iris-instructions.bootstrap) printf 'sealed instruction\n' > "$path" ;;
+      bundle.tgz.sha256) write_bundle_digest "$TMP/bundle.tgz" "$path" ;;
+      bundle.tgz) cp "$TMP/bundle.tgz" "$path" ;;
+    esac
+    EXPECTED+=("$(wc -c < "$path" | tr -d '[:space:]'):$(sha256sum "$path" | awk '{print $1}')")
+  done
+}
+
+@test "pending midcopy inode is ignored until completed publication, then bundle is accepted" {
+  make_pending_inputs
+  pending="$SRC/.iris-upload-$CAP-bundle.tgz"
+  cp "$pending" "$TMP/complete"
+  # Keep the actual uploader FD open while a full normal bootstrap tick runs.
+  exec 7>"$pending"
+  head -c 128 "$TMP/complete" >&7
+  install_prior_agent
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ] || return 1
+  [ -f "$TMP/prior-agent-invoked" ] || return 1
+  [ "$(stat -c %h "$pending")" -eq 1 ] || return 1
+  [ ! -e "$STAGE/bundle-outcome.json" ] || return 1
+  tail -c +129 "$TMP/complete" >&7
+  python3 -c 'import os; os.fsync(7)'
+  exec 7>&-
+  run env SRC="$SRC" STAGE="$STAGE" bash "$SRC/.iris-upload-$CAP-bootstrap.sh" \
+    --publish-inputs "$CAP" "${EXPECTED[@]}"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == "IRIS-INPUTS-PUBLISHED:$CAP:${EXPECTED[7]#*:}" ]] || return 1
+  [ ! -e "$STAGE/bundle-outcome.json" ] || return 1
+  for name in "${PENDING_NAMES[@]}"; do [ -f "$SRC/$name" ] || return 1; done
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ] || return 1
+  [ -f "$TMP/new-agent-invoked" ] || return 1
+  run python3 - "$STAGE/bundle-outcome.json" "${EXPECTED[7]#*:}" <<'PY'
+import json, os, sys
+value = json.load(open(sys.argv[1]))
+assert value['status'] == 'accepted' and value['reason'] == 'bundle-committed'
+assert value['expectedArchiveSha256'] == sys.argv[2]
+assert os.stat(sys.argv[1]).st_mode & 0o777 == 0o600
+assert 'synthetic-private-value' not in json.dumps(value)
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "incomplete or replaced pending input refuses before any final name changes" {
+  for shape in incomplete symlink wronghash; do
+    make_pending_inputs
+    printf 'old launcher\n' > "$SRC/bootstrap.sh"
+    printf 'old config\n' > "$SRC/iris-agent.conf"
+    pending="$SRC/.iris-upload-$CAP-bundle.tgz"
+    case "$shape" in
+      incomplete) head -c 128 "$pending" > "$TMP/short"; cp "$TMP/short" "$pending" ;;
+      symlink) rm "$pending"; ln -s "$TMP/bundle.tgz" "$pending" ;;
+      wronghash) EXPECTED[7]="${EXPECTED[7]%:*}:$(printf '0%.0s' {1..64})" ;;
+    esac
+    run env SRC="$SRC" STAGE="$STAGE" bash "$SRC/.iris-upload-$CAP-bootstrap.sh" \
+      --publish-inputs "$CAP" "${EXPECTED[@]}"
+    [ "$status" -ne 0 ] || return 1
+    [ "$(cat "$SRC/bootstrap.sh")" = 'old launcher' ] || return 1
+    [ "$(cat "$SRC/iris-agent.conf")" = 'old config' ] || return 1
+    [ ! -e "$SRC/bundle.tgz" ] || return 1
+    rm -f "$pending"
+  done
+}
+
+@test "published malformed final archive is rejected with bounded durable public outcome" {
+  make_pending_inputs
+  pending="$SRC/.iris-upload-$CAP-bundle.tgz"
+  printf 'not an archive\n' > "$pending"
+  write_bundle_digest "$pending" "$SRC/.iris-upload-$CAP-bundle.tgz.sha256"
+  EXPECTED[7]="$(wc -c < "$pending" | tr -d '[:space:]'):$(sha256sum "$pending" | awk '{print $1}')"
+  EXPECTED[6]="65:$(sha256sum "$SRC/.iris-upload-$CAP-bundle.tgz.sha256" | awk '{print $1}')"
+  run env SRC="$SRC" STAGE="$STAGE" bash "$SRC/.iris-upload-$CAP-bootstrap.sh" \
+    --publish-inputs "$CAP" "${EXPECTED[@]}"
+  [ "$status" -eq 0 ] || return 1
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ] || return 1
+  [ ! -e "$STAGE/bundle.tgz" ] || return 1
+  [ ! -e "$STAGE/bundle.tgz.sha256" ] || return 1
+  run python3 - "$STAGE/bundle-outcome.json" "${EXPECTED[7]#*:}" <<'PY'
+import json, os, sys
+raw = open(sys.argv[1], 'rb').read()
+value = json.loads(raw)
+assert len(raw) < 512 and value['schema'] == 'iris-bootstrap-bundle-outcome-v1'
+assert value['status'] == 'rejected' and value['reason'] == 'invalid-archive'
+assert value['expectedArchiveSha256'] == sys.argv[2]
+assert set(value) == {'schema', 'status', 'reason', 'expectedArchiveSha256', 'at'}
+assert os.stat(sys.argv[1]).st_mode & 0o777 == 0o600
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "failure to persist rejection outcome retains evidence and prior runnable state" {
+  install_prior_agent
+  printf 'bad' > "$SRC/bundle.tgz"
+  mkdir "$STAGE/bundle-outcome.json"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *'cannot record bundle outcome; retaining inputs'* ]] || return 1
+  [ -f "$STAGE/bundle.tgz" ] || return 1
+  [ -f "$STAGE/agent/iris_agent.py" ] || return 1
+  [ ! -e "$TMP/prior-agent-invoked" ]
+}
+
+@test "input publication waits for the existing bootstrap lock before any rename" {
+  make_pending_inputs
+  run python3 - "$SRC" "$STAGE" "$CAP" "${EXPECTED[@]}" <<'PY'
+import fcntl, os, subprocess, sys, time
+source, stage, capability = sys.argv[1:4]
+with open(os.path.join(stage, '.bundle-lock'), 'w') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    child = subprocess.Popen(['bash', os.path.join(source, '.iris-upload-' + capability + '-bootstrap.sh'),
+                              '--publish-inputs', capability] + sys.argv[4:],
+                             env=dict(os.environ, SRC=source, STAGE=stage), stdout=subprocess.PIPE)
+    time.sleep(0.2)
+    assert child.poll() is None
+    assert not os.path.exists(os.path.join(source, 'bundle.tgz'))
+    assert os.path.exists(os.path.join(source, '.iris-upload-' + capability + '-bundle.tgz'))
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    output, _ = child.communicate(timeout=3)
+    assert child.returncode == 0 and b'IRIS-INPUTS-PUBLISHED:' in output
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "publication lock deadline returns a bounded refusal without changing inputs" {
+  make_pending_inputs
+  mkdir "$TMP/clock-hook"
+  cat > "$TMP/clock-hook/sitecustomize.py" <<'PY'
+import time
+ticks = [0]
+def monotonic():
+    ticks[0] += 60
+    return ticks[0]
+time.monotonic = monotonic
+time.sleep = lambda _: None
+PY
+  run python3 - "$SRC" "$STAGE" "$TMP/clock-hook" "$CAP" "${EXPECTED[@]}" <<'PY'
+import fcntl, os, subprocess, sys
+source, stage, hook, capability = sys.argv[1:5]
+with open(os.path.join(stage, '.bundle-lock'), 'w') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    result = subprocess.run(['bash', os.path.join(source, '.iris-upload-' + capability + '-bootstrap.sh'),
+                             '--publish-inputs', capability] + sys.argv[5:],
+                            env=dict(os.environ, SRC=source, STAGE=stage, PYTHONPATH=hook),
+                            capture_output=True, timeout=3)
+    assert result.returncode == 75
+    assert b'lock busy; no inputs published' in result.stderr
+    assert b'IRIS-INPUTS-PUBLISHED:' not in result.stdout
+    assert not os.path.exists(os.path.join(source, 'bundle.tgz'))
+    assert os.path.exists(os.path.join(source, '.iris-upload-' + capability + '-bundle.tgz'))
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "interrupted publication leaves complete predecessors and no new bundle or success" {
+  make_pending_inputs
+  install_prior_agent
+  cp "$STAGE/agent/iris_agent.py" "$TMP/prior"
+  mkdir "$TMP/replace-hook"
+  cat > "$TMP/replace-hook/sitecustomize.py" <<'PY'
+import os
+original = os.replace
+count = [0]
+def replace(*args, **kwargs):
+    count[0] += 1
+    if count[0] == 4:
+        raise OSError('injected publication interruption')
+    return original(*args, **kwargs)
+os.replace = replace
+PY
+  run env PYTHONPATH="$TMP/replace-hook" SRC="$SRC" STAGE="$STAGE" \
+    bash "$SRC/.iris-upload-$CAP-bootstrap.sh" --publish-inputs "$CAP" "${EXPECTED[@]}"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" != *IRIS-INPUTS-PUBLISHED:* ]] || return 1
+  cmp "$TMP/prior" "$STAGE/agent/iris_agent.py" || return 1
+  [ ! -e "$SRC/bundle.tgz" ] || return 1
+  [ -f "$SRC/.iris-upload-$CAP-bundle.tgz" ] || return 1
+  [ -f "$SRC/.iris-upload-$CAP-iris-catalog.pem" ] || return 1
+  cmp "$SRC/bootstrap.sh" "$BATS_TEST_DIRNAME/bootstrap.sh" || return 1
+  [ "$(sha256sum "$SRC/iris-agent.conf" | awk '{print $1}')" = "${EXPECTED[1]#*:}" ] || return 1
+  [ ! -e "$STAGE/bundle-outcome.json" ]
+}
+
+@test "same-byte pending metadata drift is refused before publication" {
+  make_pending_inputs
+  mkdir "$TMP/mode-hook"
+  cat > "$TMP/mode-hook/sitecustomize.py" <<'PY'
+import os, stat
+original = os.fsync
+count = [0]
+def fsync(fd):
+    result = original(fd)
+    count[0] += 1
+    if count[0] == 3:
+        path = os.environ['IRIS_TEST_PENDING_BOOTSTRAP']
+        os.chmod(path, stat.S_IMODE(os.stat(path).st_mode) ^ 0o040)
+    return result
+os.fsync = fsync
+PY
+  run env PYTHONPATH="$TMP/mode-hook" SRC="$SRC" STAGE="$STAGE" \
+    IRIS_TEST_PENDING_BOOTSTRAP="$SRC/.iris-upload-$CAP-bootstrap.sh" \
+    bash "$SRC/.iris-upload-$CAP-bootstrap.sh" --publish-inputs "$CAP" "${EXPECTED[@]}"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" != *IRIS-INPUTS-PUBLISHED:* ]] || return 1
+  for name in "${PENDING_NAMES[@]}"; do [ ! -e "$SRC/$name" ] || return 1; done
 }
 
 @test "bootstrap syncs rpc-secret and leaves PID-scoped replacement to launcher" {
@@ -357,6 +581,88 @@ install_prior_agent() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"log rotation failed"* ]]
   [ -f "$TMP/agent-invoked" ]
+}
+
+prepare_marker_failure() {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STAGE/guestshell-start.sh"
+  mkdir -p "$STAGE/agent"
+  printf 'import os\nopen(r"%s/agent-invoked", "w").write(oct(os.umask(0)))\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+}
+
+@test "launch marker atomically replaces writable stale files with fresh private metadata" {
+  prepare_marker_failure
+  for mask in 0000 0002 0022 0077; do
+    printf 'stale\n' > "$STAGE/aria2c-launch-failed"
+    chmod 664 "$STAGE/aria2c-launch-failed"
+    prior_inode="$(stat -c %i "$STAGE/aria2c-launch-failed")"
+    run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash -c 'umask "$1"; exec bash "$2"' _ "$mask" "$BATS_TEST_DIRNAME/bootstrap.sh"
+    [ "$status" -eq 0 ] || return 1
+    [ "$(stat -c %a "$STAGE/aria2c-launch-failed")" = 600 ] || return 1
+    [ "$(stat -c %u "$STAGE/aria2c-launch-failed")" = "$(id -u)" ] || return 1
+    [ "$(stat -c %h "$STAGE/aria2c-launch-failed")" = 1 ] || return 1
+    [ "$(stat -c %i "$STAGE/aria2c-launch-failed")" != "$prior_inode" ] || return 1
+    [[ "$(cat "$STAGE/aria2c-launch-failed")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+    [ -f "$TMP/agent-invoked" ] || return 1
+    [ -z "$(find "$STAGE" -maxdepth 1 -name '.aria2c-launch-failed.*' -print)" ] || return 1
+  done
+  [ "$(cat "$TMP/agent-invoked")" = 0o77 ]
+}
+
+@test "launch marker replaces symlinks without modifying their file or directory targets" {
+  prepare_marker_failure
+  printf 'operator file\n' > "$TMP/operator-file"
+  mkdir "$TMP/operator-directory"
+  for target in "$TMP/operator-file" "$TMP/operator-directory"; do
+    rm -f "$STAGE/aria2c-launch-failed"
+    ln -s "$target" "$STAGE/aria2c-launch-failed"
+    run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+    [ "$status" -eq 0 ] || return 1
+    [ ! -L "$STAGE/aria2c-launch-failed" ] || return 1
+    [ "$(stat -c %a "$STAGE/aria2c-launch-failed")" = 600 ] || return 1
+    [ "$(cat "$TMP/operator-file")" = 'operator file' ] || return 1
+    [ -z "$(ls -A "$TMP/operator-directory")" ] || return 1
+  done
+}
+
+@test "launch marker write failures preserve the old marker and do not stop the agent" {
+  prepare_marker_failure
+  for failed in mktemp chmod date mv; do
+    printf 'stale\n' > "$STAGE/aria2c-launch-failed"
+    chmod 664 "$STAGE/aria2c-launch-failed"
+    prior_inode="$(stat -c %i "$STAGE/aria2c-launch-failed")"
+    printf '#!/usr/bin/env bash\ncase "$*" in *aria2c-launch-failed*|*%%Y-%%m-%%dT%%H:%%M:%%SZ*) exit 1 ;; esac\nexec /usr/bin/%s "$@"\n' "$failed" > "$BIN/$failed"
+    chmod +x "$BIN/$failed"
+    rm -f "$TMP/agent-invoked"
+    run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"could not record aria2c launch failure; continuing"* ]] || return 1
+    [ "$(cat "$STAGE/aria2c-launch-failed")" = stale ] || return 1
+    [ "$(stat -c %i "$STAGE/aria2c-launch-failed")" = "$prior_inode" ] || return 1
+    [ "$(stat -c %a "$STAGE/aria2c-launch-failed")" = 664 ] || return 1
+    [ -f "$TMP/agent-invoked" ] || return 1
+    [ -z "$(find "$STAGE" -maxdepth 1 -name '.aria2c-launch-failed.*' -print)" ] || return 1
+    rm "$BIN/$failed"
+  done
+}
+
+@test "launch marker helper preserves caller traps and umask" {
+  # Execute the actual helper in a shell with an existing lock-cleanup trap.
+  helper="$(sed -n '/^record_launch_failure() (/,/^)/p' "$BATS_TEST_DIRNAME/bootstrap.sh")"
+  run env STAGE="$STAGE" bash -c '
+    eval "$1"
+    trap ": caller-lock-cleanup" EXIT
+    before=$(trap -p EXIT)
+    umask 0002
+    record_launch_failure
+    [ "$(trap -p EXIT)" = "$before" ] && [ "$(umask)" = 0002 ]
+  ' _ "$helper"
+  [ "$status" -eq 0 ]
 }
 
 @test "a healthy aria2c launch clears a stale launch-failure marker" {
@@ -755,6 +1061,110 @@ PYTHON
     [ "$(cat "$STAGE/iris-root.allowed_signers")" = "prior root signer trust" ]
     [ "$(cat "$STAGE/iris-signers.allowed_signers")" = "prior instruction signer trust" ]
   done
+}
+
+assert_public_trust_modes() {
+  local mask="$1"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash -c 'umask "$1"; exec bash "$2"' _ "$mask" "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/new-agent-invoked" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+  python3 - "$STAGE" <<'PYTHON'
+import os
+import stat
+import sys
+
+stage = sys.argv[1]
+public = ("iris-root.allowed_signers", "iris-signers.allowed_signers")
+for name in public:
+    path = os.path.join(stage, name)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o644, name
+    with open(path) as stream:
+        assert stream.read() == "fixture:" + name + "\n"
+for name in ("agent/iris_agent.py", "agent/instr.py"):
+    assert stat.S_IMODE(os.stat(os.path.join(stage, name)).st_mode) == 0o600
+for name in ("agent", "aria2c", "agent/ssh-keygen", "guestshell-start.sh"):
+    assert stat.S_IMODE(os.stat(os.path.join(stage, name)).st_mode) == 0o700
+PYTHON
+}
+
+@test "new public trust is read-only to others under restrictive umask 077" {
+  assert_public_trust_modes 077
+}
+
+@test "new public trust has exact safe modes under umask 022" {
+  assert_public_trust_modes 022
+}
+
+@test "native owner remapping cannot make newly promoted public trust unreadable" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  hook="$TMP/trust-owner-remap-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+_replace = os.replace
+_open = os.open
+_remapped = set()
+_trust = ("iris-root.allowed_signers", "iris-signers.allowed_signers")
+
+def replace(source, destination, *args, **kwargs):
+    result = _replace(source, destination, *args, **kwargs)
+    if '/new/' in str(source) and os.path.basename(destination) in _trust:
+        _remapped.add(str(destination))
+    return result
+
+def open_file(path, flags, *args, **kwargs):
+    # IOS native reads preserve mode but change the projected owner away from
+    # the guest UID. Model its resulting permission check without root/chown.
+    if str(path) in _remapped and not os.stat(path).st_mode & 0o004:
+        raise PermissionError('fixture: remapped trust lacks other-read permission')
+    return _open(path, flags, *args, **kwargs)
+
+os.replace = replace
+os.open = open_file
+PYTHON
+  run env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash -c 'umask 077; exec bash "$1"' _ "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"bundle rejected"* ]]
+  [ -f "$TMP/new-agent-invoked" ]
+  [ ! -e "$TMP/prior-agent-invoked" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+}
+
+@test "public trust mode failure rejects extraction without changing existing trust" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  hook="$TMP/trust-mode-failure-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+_fchmod = os.fchmod
+
+def fchmod(descriptor, mode):
+    if mode == 0o644:
+        raise PermissionError('fixture: new public trust mode cannot be applied')
+    return _fchmod(descriptor, mode)
+
+os.fchmod = fchmod
+PYTHON
+  run env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"bundle rejected (invalid-archive)"* ]]
+  [ ! -e "$TMP/new-agent-invoked" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [ "$(cat "$STAGE/iris-root.allowed_signers")" = "prior root signer trust" ]
+  [ "$(cat "$STAGE/iris-signers.allowed_signers")" = "prior instruction signer trust" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
 }
 
 @test "an incomplete promotion is rolled back before anything launches" {

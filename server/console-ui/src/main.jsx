@@ -7,6 +7,24 @@ import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { mountSettingsNavigation } from './settings-navigation.jsx';
 import { mountPolicies } from './policies.jsx';
+import { mountSettings } from './settings.jsx';
+import { mountCertificates } from './certificates.jsx';
+import { mountSecurityLifecycle } from './security-lifecycle.jsx';
+import { mountWorkerLifecycle } from './worker-lifecycle.jsx';
+import { mountSetupPackages } from './setup-packages.jsx';
+import { mountImageVerification } from './image-verification.jsx';
+import { mountSwarmView } from './swarm-view.jsx';
+import { mountOverview } from './overview.jsx';
+import { mountImages } from './images.jsx';
+import { mountMonitoring } from './monitoring.jsx';
+import { mountDeviceDetails } from './device-details.jsx';
+import { mountActivity } from './activity.jsx';
+import { mountInventory } from './inventory.jsx';
+import { mountDeviceForms } from './device-forms.jsx';
+import { mountAssignments } from './assignments.jsx';
+import { mountInventoryActions } from './inventory-actions.jsx';
+import { mountSchedules } from './schedules.jsx';
+import { mountRoleActions } from './role-actions.jsx';
 import './shell.css';
 
 const primary = [
@@ -193,6 +211,24 @@ export function mountConsoleShell() {
     createRoot(navigation).render(<Navigation />);
     mountSettingsNavigation();
     mountPolicies();
+    mountSettings();
+    mountCertificates();
+    mountSecurityLifecycle();
+    mountWorkerLifecycle();
+    mountSetupPackages();
+    mountImageVerification();
+    mountSwarmView();
+    mountOverview();
+    mountImages();
+    mountMonitoring();
+    mountDeviceDetails();
+    mountActivity();
+    mountInventory();
+    mountDeviceForms();
+    mountAssignments();
+    mountInventoryActions();
+    mountSchedules();
+    mountRoleActions();
   });
 }
 

@@ -12,6 +12,7 @@ from pathlib import Path
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 
@@ -29,6 +30,7 @@ import management_api
 import secrets_store
 import telemetry
 import tracker
+from native_listener_fixture import https_fixture_url, start_fixture_server
 
 
 def _write_secret(path, value, scope="management"):
@@ -51,9 +53,12 @@ def _certificate(tmp_path, stem="tls"):
 
 
 def _thread(server):
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return thread
+    return start_fixture_server(server)
+
+
+def _fixture_server(server, request):
+    """Register cleanup before startup, including partial fixture failures."""
+    return start_fixture_server(server, request)
 
 
 def _request(port, path, method="GET", headers=None, body=None, https=False):
@@ -65,6 +70,95 @@ def _request(port, path, method="GET", headers=None, body=None, https=False):
     result = (response.status, dict(response.getheaders()), response.read())
     conn.close()
     return result
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_fixture_backend_uses_its_bound_family_before_first_request(
+        tmp_path, monkeypatch, request, console_transport_failures, method):
+    """A second-family listener must not receive the fixture's TLS traffic."""
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 loopback is unavailable")
+    cert, key = _certificate(tmp_path, "owned-management")
+    other_cert, other_key = _certificate(tmp_path, "other-family")
+    token = tmp_path / "token"
+    _write_secret(token, "t" * 64)
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    management = management_api.make_server(
+        "127.0.0.1", 0, app, certfile=str(cert), keyfile=str(key),
+        management_token_file=str(token))
+    _fixture_server(management, request)
+    port = management.server_address[1]
+    original_resolve = socket.getaddrinfo
+    choices = original_resolve("localhost", port, 0, socket.SOCK_STREAM)
+    if not any(row[0] == socket.AF_INET6 for row in choices):
+        pytest.skip("localhost has no IPv6 loopback address")
+
+    class OtherFamily(management_api._ConsoleServer):
+        address_family = socket.AF_INET6
+
+    try:
+        other = OtherFamily(("::1", port), management.RequestHandlerClass)
+    except OSError as error:
+        import errno
+        if error.errno == errno.EADDRINUSE:
+            pytest.skip("IPv6 loopback port is unavailable for the interference fixture")
+        if error.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL):
+            pytest.skip("IPv6 loopback is unavailable")
+        raise
+    try:
+        other.tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        other.tls_context.load_cert_chain(str(other_cert), str(other_key))
+        _fixture_server(other, request)
+    except BaseException:
+        other.server_close()
+        raise
+    accepts = {"owned": 0, "other": 0}
+
+    def count_connections(server, label):
+        original = server.get_request
+
+        def get_request():
+            value = original()
+            accepts[label] += 1
+            return value
+
+        monkeypatch.setattr(server, "get_request", get_request)
+
+    count_connections(management, "owned")
+    count_connections(other, "other")
+
+    def ipv6_first(host, target_port, *args, **kwargs):
+        rows = original_resolve(host, target_port, *args, **kwargs)
+        # Reorder only real resolver results for this exact negative control.
+        if host == "localhost" and target_port == port:
+            rows.sort(key=lambda row: row[0] != socket.AF_INET6)
+        return rows
+
+    monkeypatch.setattr(socket, "getaddrinfo", ipv6_first)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
+    path = "/api/v1/settings" if method == "GET" else "/api/v1/login"
+    body = None if method == "GET" else json.dumps({"username": "admin", "password": "pw"})
+    bad = gui_server.make_server(
+        "127.0.0.1", 0, "https://localhost:%d" % port, str(token), str(cert))
+    _fixture_server(bad, request)
+    status, _, payload = _request(
+        bad.server_address[1], path, method=method, body=body,
+        headers={"Content-Type": "application/json"})
+    assert status == 503 and json.loads(payload)["code"] == "management-api-unavailable"
+    assert accepts == {"owned": 0, "other": 1}
+    assert list(console_transport_failures) == [{
+        "operation": "browser-request", "exception": "SSLCertVerificationError",
+        "stage": "tls-handshake"}]
+    fixed = gui_server.make_server(
+        "127.0.0.1", 0, https_fixture_url(management), str(token), str(cert))
+    _fixture_server(fixed, request)
+    status, _, _ = _request(
+        fixed.server_address[1], path, method=method, body=body,
+        headers={"Content-Type": "application/json"})
+    assert status == (401 if method == "GET" else 200)
+    assert accepts == {"owned": 1 if method == "GET" else 2, "other": 1}
+    assert len(console_transport_failures) == 1
 
 
 def test_bff_probe_body_matches_content_length_without_extra_crlf(
@@ -211,7 +305,7 @@ def test_bff_unknown_and_known_routes_authenticate_before_existence(
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % management.server_address[1],
+        https_fixture_url(management),
         str(token), str(cert))
     _thread(console)
     try:
@@ -316,7 +410,7 @@ def test_bff_rejects_ambiguous_framing_and_forwards_one_validated_length(
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % backend.server_address[1],
+        https_fixture_url(backend),
         str(token), str(cert))
     _thread(console)
 
@@ -354,6 +448,76 @@ def test_bff_rejects_ambiguous_framing_and_forwards_one_validated_length(
         backend.server_close()
 
 
+@pytest.mark.parametrize("failure", [
+    "before-headers", "malformed-chunk", "truncated-chunk", "none",
+])
+def test_proxy_stream_failure_emits_one_response_without_replay(
+        tmp_path, request, failure):
+    """Real TLS on both hops: never append an error to an existing response."""
+    cert, key = _certificate(tmp_path, "stream-management")
+    combined = tmp_path / "stream-console.pem"
+    combined.write_bytes(cert.read_bytes() + key.read_bytes())
+    combined.chmod(0o600)
+    token = tmp_path / "stream-token"
+    _write_secret(token, "s" * 64)
+    requests = []
+    prefix = b"synthetic-prefix\n"
+
+    class Backend(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.command, self.path))
+            if failure == "before-headers":
+                self.close_connection = True
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            if failure == "truncated-chunk":
+                # Declare more bytes than arrive: HTTPResponse.read1 raises
+                # IncompleteRead after forwarding the available prefix.
+                self.wfile.write(b"40\r\n" + prefix)
+            else:
+                self.wfile.write(("%x\r\n" % len(prefix)).encode() + prefix + b"\r\n")
+                self.wfile.write(b"invalid-size\r\n" if failure == "malformed-chunk"
+                                 else b"0\r\n\r\n")
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, *_args):
+            pass
+
+    backend = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(cert), str(key))
+    backend.socket = context.wrap_socket(backend.socket, server_side=True)
+    _fixture_server(backend, request)
+    console = gui_server.make_server(
+        "127.0.0.1", 0,
+        https_fixture_url(backend),
+        str(token), str(cert), certfile=str(combined))
+    _fixture_server(console, request)
+    client_context = ssl.create_default_context(cafile=str(cert))
+    with socket.create_connection(console.server_address, timeout=3) as raw:
+        with client_context.wrap_socket(raw, server_hostname="localhost") as tls:
+            tls.sendall(b"GET /api/v1/session HTTP/1.1\r\n"
+                        b"Host: localhost\r\nConnection: close\r\n\r\n")
+            chunks = []
+            while chunk := tls.recv(4096):
+                chunks.append(chunk)
+    wire = b"".join(chunks)
+    headers, body = wire.split(b"\r\n\r\n", 1)
+    assert wire.count(b"HTTP/1.0 ") == 1
+    assert requests == [("GET", "/internal/v1/session")]
+    if failure == "before-headers":
+        assert headers.startswith(b"HTTP/1.0 503 ")
+        assert json.loads(body)["code"] == "management-api-unavailable"
+    else:
+        assert headers.startswith(b"HTTP/1.0 200 ")
+        assert body == prefix
+        assert b"503" not in wire
+
+
 def test_split_login_cookie_follows_public_bff_scheme_not_tls_backend(
         tmp_path, monkeypatch):
     cert, key = _certificate(tmp_path, "cookie-management")
@@ -371,11 +535,11 @@ def test_split_login_cookie_follows_public_bff_scheme_not_tls_backend(
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     plain = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % management.server_address[1],
+        https_fixture_url(management),
         str(token), str(cert))
     tls = gui_server.make_server(
         "127.0.0.1", 0,
-        "https://localhost:%d" % management.server_address[1],
+        https_fixture_url(management),
         str(token), str(cert), certfile=str(combined))
     _thread(plain)
     _thread(tls)
@@ -435,9 +599,287 @@ def test_management_does_not_fall_back_to_device_certificate(tmp_path, monkeypat
             management_token_file=str(token))
 
 
+def _console_transport_failure(error):
+    """Classify a swallowed transport exception without copying its text/locals."""
+    kinds = {"OSError", "FileNotFoundError", "PermissionError", "TimeoutError", "gaierror",
+             "ConnectionRefusedError", "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError",
+             "SSLError", "SSLCertVerificationError", "SSLEOFError",
+             "RemoteDisconnected", "BadStatusLine", "IncompleteRead",
+             "ConsoleConfigurationError", "CredentialUnavailable"}
+    kind = type(error).__name__
+    result = {"exception": kind if kind in kinds else "other", "stage": "proxy"}
+    stages = {
+        ("gui_server", "_tls_client_context"): "tls-context",
+        ("gui_server", "_token_pair"): "credential-read",
+        ("gui_server", "_authorize_mutation"): "authorization",
+        ("gui_server", "_management_request"): "management-request",
+        ("http.client", "connect"): "connect",
+        ("socket", "create_connection"): "connect",
+        ("ssl", "do_handshake"): "tls-handshake",
+        ("http.client", "send"): "request-write",
+        ("http.client", "getresponse"): "response-headers",
+        ("http.client", "_read_status"): "response-status",
+        ("http.client", "read"): "response-body",
+        ("http.client", "read1"): "response-body",
+    }
+    trace = error.__traceback__ if error is not None else None
+    while trace is not None:
+        stage = stages.get((trace.tb_frame.f_globals.get("__name__"),
+                            trace.tb_frame.f_code.co_name))
+        if stage is not None:
+            result["stage"] = stage
+        trace = trace.tb_next
+    return result
+
+
+def _certificate_http_diagnostic(status, body, transport_failures=()):
+    """Keep failure context without trusting a response to redact secrets.
+
+    Only exact public contract phrases are echoed. Unknown fields, arbitrary
+    text, cookies, tokens, and PEM bodies never enter the assertion message.
+    """
+    result = {"status": status, "body_bytes": len(body)}
+    if transport_failures:
+        result["transport"] = list(transport_failures)
+    if len(body) > 64 * 1024:
+        return dict(result, problem="oversized body omitted")
+    try:
+        problem = json.loads(body)
+    except (ValueError, UnicodeError):
+        return dict(result, problem="non-JSON body omitted")
+    if not isinstance(problem, dict):
+        return dict(result, problem="non-object JSON omitted")
+    known = dict(api_problem.STATUS_DEFAULTS.values())
+    known.update({
+        "management-api-unavailable": "Management API unavailable",
+        "management-authentication-required": "Management authentication required",
+        "console-session-required": "Console session required",
+        "csrf-validation-failed": "CSRF validation failed",
+        "console-certificate-unavailable": "Console certificate unavailable",
+    })
+    public_types = {api_problem.TYPE_BASE + code for code in known}
+    public_text = set(known.values()) | {text.lower() for text in known.values()}
+    for field in ("type", "title", "detail", "error"):
+        if field in problem:
+            value = problem[field]
+            allowed = public_types if field == "type" else public_text
+            result[field] = (value if isinstance(value, str) and value in allowed
+                             else "[redacted]")
+    return result
+
+
+def test_certificate_http_diagnostic_retains_only_public_contract_text():
+    body = json.dumps({
+        "type": api_problem.TYPE_BASE + "management-api-unavailable",
+        "title": "Management API unavailable", "detail": "Management API unavailable",
+        "token": "secret-token", "csrf": "secret-csrf", "cookie": "secret-cookie",
+        "cert_pem": "-----BEGIN CERTIFICATE----- secret-certificate",
+        "key_pem": "-----BEGIN PRIVATE KEY----- secret-key",
+    }).encode()
+    assert _certificate_http_diagnostic(503, body) == {
+        "status": 503, "body_bytes": len(body),
+        "type": api_problem.TYPE_BASE + "management-api-unavailable",
+        "title": "Management API unavailable", "detail": "Management API unavailable",
+    }
+    for value in ("secret-token", "iris_sid=secret-cookie",
+                  "-----BEGIN PRIVATE KEY----- secret-key", ["secret-token"],
+                  {"value": "secret-token"}, None):
+        untrusted = json.dumps(dict.fromkeys(("type", "title", "detail", "error"), value)).encode()
+        assert _certificate_http_diagnostic(503, untrusted) == {
+            "status": 503, "body_bytes": len(untrusted),
+            "type": "[redacted]", "title": "[redacted]",
+            "detail": "[redacted]", "error": "[redacted]",
+        }
+    for untrusted, explanation in (
+            (b"-----BEGIN PRIVATE KEY----- secret-key", "non-JSON body omitted"),
+            (b'"secret-token"', "non-object JSON omitted"),
+            (b"x" * (64 * 1024 + 1), "oversized body omitted")):
+        assert _certificate_http_diagnostic(503, untrusted) == {
+            "status": 503, "body_bytes": len(untrusted), "problem": explanation}
+
+
+@pytest.mark.parametrize("fault,expected", [
+    ("connect", {"exception": "ConnectionRefusedError", "stage": "connect"}),
+    ("tls-context", {"exception": "ConsoleConfigurationError", "stage": "tls-context"}),
+    ("credential-read", {"exception": "CredentialUnavailable", "stage": "credential-read"}),
+])
+def test_console_transport_failure_diagnostics_observe_native_failures(
+        tmp_path, monkeypatch, console_transport_failures, capsys, fault, expected):
+    expected = dict(expected, operation="browser-request")
+    cert, _ = _certificate(tmp_path, "transport-diagnostic")
+    token = tmp_path / "token"
+    _write_secret(token, "synthetic-private-token-" + "s" * 48)
+    if fault == "tls-context":
+        cert.write_text("synthetic-private-invalid-CA")
+    elif fault == "credential-read":
+        token.chmod(0o644)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
+    # Keep the destination bound but not listening: no unrelated process can
+    # claim it between selection and the real refused TCP connection.
+    with socket.socket() as unavailable:
+        unavailable.bind(("127.0.0.1", 0))
+        console = gui_server.make_server(
+            "127.0.0.1", 0, "https://127.0.0.1:%d" % unavailable.getsockname()[1],
+            str(token), str(cert))
+        thread = _thread(console)
+        try:
+            status, _, body = _request(console.server_address[1], "/api/v1/settings")
+            assert status == 503
+            assert list(console_transport_failures) == [expected]
+            diagnostic = _certificate_http_diagnostic(status, body, console_transport_failures)
+            assert diagnostic["transport"] == [expected]
+        finally:
+            console.shutdown()
+            console.server_close()
+            thread.join(timeout=3)
+    captured = capsys.readouterr()
+    assert "synthetic-private" not in json.dumps(diagnostic) + captured.out + captured.err
+    # Even exception text supplied by an untrusted peer is never included.
+    assert _console_transport_failure(OSError("synthetic-private-error")) == {
+        "exception": "OSError", "stage": "proxy"}
+
+
+def test_swallowed_startup_transport_failure_remains_in_later_safe_assertion(
+        tmp_path, monkeypatch, console_transport_failures, capsys):
+    cert, key = _certificate(tmp_path, "startup-diagnostic")
+    token = tmp_path / "token"
+    _write_secret(token, "synthetic-private-token-" + "s" * 48)
+    output = tmp_path / "runtime.pem"
+    failures = []
+    original_connect = http.client.HTTPSConnection.connect
+
+    def fail_with_private_context(connection):
+        try:
+            return original_connect(connection)
+        except OSError as error:
+            error.args = ("synthetic-private-error-token-cookie-key",)
+            failures.append(error)
+            raise
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", fail_with_private_context)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
+    with socket.socket() as unavailable:
+        unavailable.bind(("127.0.0.1", 0))
+        backend = "https://127.0.0.1:%d" % unavailable.getsockname()[1]
+        source = gui_server.fetch_console_certificate(
+            backend, str(token), str(cert), str(output), timeout=1,
+            default_certfile=str(cert), default_keyfile=str(key))
+        assert source == "default" and b"PRIVATE KEY" in output.read_bytes()
+        expected = {"operation": "startup-certificate",
+                    "exception": "ConnectionRefusedError", "stage": "connect"}
+        assert list(console_transport_failures) == [expected]
+        assert len(failures) == 1
+        console = gui_server.make_server(
+            "127.0.0.1", 0, backend, str(token), str(cert))
+        thread = _thread(console)
+        try:
+            status, _, body = _request(console.server_address[1], "/api/v1/settings")
+            assert status == 503
+            assert len(failures) == 2, "observation must not retry either failed request"
+            diagnostic = _certificate_http_diagnostic(status, body, console_transport_failures)
+            assert diagnostic["transport"] == [expected, dict(expected, operation="browser-request")]
+            with pytest.raises(AssertionError) as later:
+                assert status == 401, json.dumps(diagnostic)
+            assert "startup-certificate" in str(later.value)
+            assert "browser-request" in str(later.value)
+            assert "synthetic-private" not in str(later.value)
+        finally:
+            console.shutdown()
+            console.server_close()
+            thread.join(timeout=3)
+    captured = capsys.readouterr()
+    assert "synthetic-private" not in json.dumps(diagnostic) + captured.out + captured.err
+
+
+def test_startup_transport_observer_preserves_successful_default_response(
+        tmp_path, monkeypatch, console_transport_failures):
+    cert, key = _certificate(tmp_path, "startup-default")
+    token = tmp_path / "token"
+    _write_secret(token, "t" * 64)
+    output = tmp_path / "runtime.pem"
+    calls, closed = [], []
+
+    class DefaultResponse:
+        status = 204
+
+        def read(self, size):
+            assert size == 1024 * 1024 + 1
+            return b""
+
+        def getheader(self, name, default=""):
+            assert name == "X-IRIS-Certificate-Source"
+            return "default"
+
+    response = DefaultResponse()
+
+    class Connection:
+        def __init__(self, host, port, *, context, timeout):
+            assert (host, port, timeout) == ("localhost", 9443, 7)
+            assert context.verify_mode == ssl.CERT_REQUIRED
+
+        def request(self, method, path, *, body, headers):
+            calls.append((method, path, body, headers))
+
+        def getresponse(self):
+            return response
+
+        def close(self):
+            closed.append(self)
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
+    assert gui_server.fetch_console_certificate(
+        "https://localhost:9443", str(token), str(cert), str(output), timeout=7,
+        default_certfile=str(cert), default_keyfile=str(key)) == "default"
+    assert calls == [("GET", "/internal/v1/console-certificate", None, {
+        "Accept": "application/x-pem-file", "X-IRIS-Default-Certificate": "available",
+        "Authorization": "Bearer " + "t" * 64})]
+    assert len(closed) == 1 and not console_transport_failures
+    assert output.read_bytes() == cert.read_bytes() + b"\n" + key.read_bytes()
+
+
+def test_startup_transport_observer_reraises_same_exception_without_replay(
+        monkeypatch, console_transport_failures):
+    failure = ssl.SSLError("synthetic-private-error")
+    attempts, closed = [], []
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            attempts.append(self)
+            raise failure
+
+        def close(self):
+            closed.append(self)
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
+    with pytest.raises(ssl.SSLError) as caught:
+        gui_server._management_request("localhost", 9443, None, "GET", "/internal/v1/settings",
+                                       {}, ("current", "previous"), timeout=7)
+    assert caught.value is failure
+    assert len(attempts) == 1 and closed == attempts
+    assert not console_transport_failures, "outside startup, the 503 observer owns the diagnostic"
+
+
 @pytest.mark.parametrize("projection_order", ["current-only", "server-first", "console-first"])
 def test_remote_console_reports_and_reloads_its_own_certificate(
-        tmp_path, monkeypatch, projection_order):
+        tmp_path, monkeypatch, projection_order, console_transport_failures,
+        request):
+    def accepted_by_settings(action, result):
+        """Validate the actual proxy reply with the shipped browser model."""
+        model = Path(__file__).parents[1] / "console-ui/src/settings-model.mjs"
+        program = ("import assert from 'node:assert/strict';\n"
+                   "import {checkedSettingsResult, successMessage} from "
+                   + json.dumps(model.as_uri()) + ";\n"
+                   "const action = " + json.dumps(action) + ", body = "
+                   + json.dumps(result) + ";\n"
+                   "assert.equal(checkedSettingsResult({action}, {ok:true, status:200}, body), 'saved');\n"
+                   "if (!body.applied) assert.match(successMessage(action, body), /saved; restart/);")
+        checked = subprocess.run(["node", "--input-type=module"], input=program,
+                                 capture_output=True, text=True, timeout=10)
+        assert checked.returncode == 0, checked.stdout + checked.stderr
+
     management_cert, management_key = _certificate(tmp_path, "management")
     default_cert, default_key = _certificate(tmp_path, "browser-default")
     custom_cert, custom_key = _certificate(tmp_path, "browser-custom")
@@ -466,8 +908,8 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         "127.0.0.1", 0, app, certfile=str(management_cert),
         keyfile=str(management_key), management_token_file=str(server_token),
         management_previous_token_file=str(server_previous))
-    _thread(management)
-    backend = "https://localhost:%d" % management.server_address[1]
+    _fixture_server(management, request)
+    backend = https_fixture_url(management)
     runtime = tmp_path / "console-runtime.pem"
     gui_server.fetch_console_certificate(
         backend, str(token), str(management_cert), str(runtime),
@@ -477,7 +919,7 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         "127.0.0.1", 0, backend, str(token), str(management_cert),
         certfile=str(runtime), default_certfile=str(default_cert),
         default_keyfile=str(default_key), previous_token_file=str(console_previous))
-    _thread(console)
+    _fixture_server(console, request)
     port = console.server_address[1]
 
     def fingerprint(cert):
@@ -494,17 +936,18 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
                 return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
 
     try:
-        assert request("/api/v1/settings")[0] == 401
+        status, _, body = request("/api/v1/settings")
+        assert status == 401, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         status, login_headers, body = request(
             "/api/v1/login", "POST",
             json.dumps({"username": "admin", "password": "password-for-test"}),
             {"Content-Type": "application/json"})
-        assert status == 200
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         auth = {"Cookie": login_headers["Set-Cookie"].split(";", 1)[0],
                 "X-CSRF-Token": json.loads(body)["csrf"],
                 "Content-Type": "application/json"}
         status, headers, body = request("/api/v1/settings", headers=auth)
-        assert status == 200
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         assert int(headers["Content-Length"]) == len(body)
         settings = json.loads(body)
         assert settings["gui_cert"]["source"] == "built-in"
@@ -516,19 +959,21 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
             "/api/v1/settings/gui-cert", "POST",
             json.dumps({"cert_pem": custom_cert.read_text(),
                         "key_pem": custom_key.read_text()}), auth)
-        assert status == 200
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         result = json.loads(body)
         assert result["applied"] is True and result["note"] is None
         assert result["gui_cert"]["source"] == "custom"
         assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(custom_cert)
         assert served_fingerprint() == fingerprint(custom_cert)
+        accepted_by_settings("cert", result)
         status, _, body = request("/api/v1/settings/gui-cert", "DELETE", headers=auth)
-        assert status == 200
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         result = json.loads(body)
         assert result["applied"] is True
         assert result["gui_cert"]["source"] == "built-in"
         assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(default_cert)
         assert served_fingerprint() == fingerprint(default_cert)
+        accepted_by_settings("certDefault", result)
 
         # A durable save can succeed while the remote Console fails to fetch it.
         upstream_request = http.client.HTTPSConnection.request
@@ -542,9 +987,10 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
             "/api/v1/settings/gui-cert", "POST",
             json.dumps({"cert_pem": custom_cert.read_text(),
                         "key_pem": custom_key.read_text()}), auth)
-        assert status == 200
+        assert status == 200, json.dumps(_certificate_http_diagnostic(status, body, console_transport_failures))
         result = json.loads(body)
         assert result["applied"] is False and "restart" in result["note"]
+        accepted_by_settings("cert", result)
         assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(default_cert)
         assert served_fingerprint() == fingerprint(default_cert)
         assert b"PRIVATE KEY" not in body
@@ -553,6 +999,62 @@ def test_remote_console_reports_and_reloads_its_own_certificate(
         console.server_close()
         management.shutdown()
         management.server_close()
+
+
+@pytest.mark.parametrize("failure", [
+    "certificate-fetch", "console-construction", "console-start", "first-get",
+])
+def test_certificate_overlap_setup_failure_closes_owned_servers(
+        tmp_path, monkeypatch, console_transport_failures, failure):
+    """Injected failures prove cleanup, not the historical first-GET cause."""
+    finalizers = []
+    servers = []
+    threads = []
+
+    class FixtureRequest:
+        addfinalizer = staticmethod(finalizers.append)
+
+    original_fixture_server = _fixture_server
+    original_thread_start = threading.Thread.start
+
+    def record_server(server, request):
+        servers.append(server)
+        return original_fixture_server(server, request)
+
+    def start_thread(thread):
+        server = getattr(thread._target, "__self__", None)
+        if server in servers:
+            threads.append(thread)
+            if failure == "console-start" and isinstance(
+                    server, gui_server._ConsoleServer):
+                raise RuntimeError("synthetic Console thread startup failure")
+        return original_thread_start(thread)
+
+    def startup_failure(*_args, **_kwargs):
+        raise RuntimeError("synthetic certificate fixture startup failure")
+
+    monkeypatch.setitem(globals(), "_fixture_server", record_server)
+    monkeypatch.setattr(threading.Thread, "start", start_thread)
+    if failure == "certificate-fetch":
+        monkeypatch.setattr(gui_server, "fetch_console_certificate", startup_failure)
+    elif failure == "console-construction":
+        monkeypatch.setattr(gui_server, "make_server", startup_failure)
+    elif failure == "first-get":
+        problem = {"type": api_problem.TYPE_BASE + "management-api-unavailable"}
+        monkeypatch.setitem(globals(), "_request", lambda *_args, **_kwargs:
+                            (503, {}, json.dumps(problem).encode()))
+    try:
+        with pytest.raises(AssertionError if failure == "first-get" else RuntimeError):
+            test_remote_console_reports_and_reloads_its_own_certificate(
+                tmp_path, monkeypatch, "console-first", console_transport_failures,
+                FixtureRequest())
+        assert len(finalizers) == (1 if failure in (
+            "certificate-fetch", "console-construction") else 2)
+    finally:
+        for finalize in reversed(finalizers):
+            finalize()
+    assert all(server.socket.fileno() == -1 for server in servers)
+    assert all(not thread.is_alive() for thread in threads)
 
 
 def test_console_certificate_does_not_mask_authenticated_bad_response(
@@ -582,7 +1084,7 @@ def test_console_certificate_does_not_mask_authenticated_bad_response(
     try:
         with pytest.raises(gui_server.ConsoleConfigurationError):
             gui_server.fetch_console_certificate(
-                "https://localhost:%d" % backend.server_address[1],
+                https_fixture_url(backend),
                 str(token), str(cert), str(output),
                 default_certfile=str(cert), default_keyfile=str(key))
         assert not output.exists()
@@ -978,7 +1480,7 @@ def test_role_qos_routes_map_both_tiers(method, suffix):
 
 
 @pytest.fixture
-def policy_tiers(tmp_path, monkeypatch, request):
+def policy_tiers(tmp_path, monkeypatch, request, console_transport_failures):
     import gui_app
     import gui_fleet
     import peer_policy
@@ -996,21 +1498,11 @@ def policy_tiers(tmp_path, monkeypatch, request):
     management = management_api.make_server(
         "127.0.0.1", 0, app, fleet=fleet, catalog=store, certfile=str(cert),
         keyfile=str(key), management_token_file=str(token))
-    management_thread = _thread(management)
-
-    def stop_server(server, thread):
-        try:
-            server.shutdown()
-        finally:
-            server.server_close()
-            thread.join(timeout=3)
-
-    request.addfinalizer(lambda: stop_server(management, management_thread))
+    _fixture_server(management, request)
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     console = gui_server.make_server("127.0.0.1", 0,
-        "https://localhost:%d" % management.server_address[1], str(token), str(cert))
-    console_thread = _thread(console)
-    request.addfinalizer(lambda: stop_server(console, console_thread))
+        https_fixture_url(management), str(token), str(cert))
+    _fixture_server(console, request)
     headers = {}
     def request(tier, method, suffix, body=None, duplicates=False,
                 authorized=True, declared_length=None, match=True,
@@ -1043,7 +1535,8 @@ def policy_tiers(tmp_path, monkeypatch, request):
         return result
     status, response_headers, login = request("console", "POST", "/login",
         {"username": "admin", "password": "pw"})
-    assert status == 200, {"status": status, "problem": login}
+    assert status == 200, json.dumps(_certificate_http_diagnostic(
+        status, json.dumps(login).encode(), console_transport_failures))
     headers.update(Cookie=response_headers["Set-Cookie"].split(";", 1)[0])
     headers["X-CSRF-Token"] = login["csrf"]
     yield request, fleet, store
@@ -1057,16 +1550,33 @@ def test_peer_interval_roundtrip_over_both_authenticated_tiers(policy_tiers, tie
     assert request(tier, "POST", path, {"interval_s": 10}, authorized=False)[0] == 401
     assert request(tier, "POST", path, {"interval_s": 10}, match=False)[0] == 428
     for interval in (10, 60):
+        revision = request(tier, "GET", "/peer-policy")[2]["revision"]
         status, _, preview = request(tier, "POST", path + "?dry_run=1", {"interval_s": interval})
         assert status == 200
         status, _, saved = request(tier, "POST", path, {"interval_s": interval,
             "confirm_token": preview["confirm_token"]})
         assert status == 200 and saved["requested_interval_s"] == interval
+        # Check the shipped map's validators against actual authenticated
+        # server replies, not a hand-invented browser fixture.
+        model = (Path(__file__).resolve().parents[1] /
+                 "console-ui/src/swarm-map-model.mjs").as_uri()
+        script = f"import {{intervalReply}} from {json.dumps(model)};\n" + (
+            "import assert from 'node:assert/strict';"
+            "import {readFileSync} from 'node:fs';"
+            "const x=JSON.parse(readFileSync(0,'utf8'));"
+            "assert.equal(intervalReply(x.preview,{device_id:'d1'},x.interval,x.revision,true),true);"
+            "assert.equal(intervalReply(x.saved,{device_id:'d1'},x.interval,x.revision,false),true);")
+        subprocess.run(["node", "--input-type=module", "-e", script], input=json.dumps({
+            "preview": preview, "saved": saved, "interval": interval,
+            "revision": revision}), text=True, check=True, capture_output=True)
+        status, _, effective = request(tier, "GET", "/devices/d1/effective-qos")
+        assert status == 200 and effective["device_id"] == "d1"
+        assert effective["qos"]["peer_telemetry_interval_s"]["value"] == interval
 
 
 @pytest.mark.parametrize("failure", ["console-construction", "login-upstream"])
 def test_policy_tiers_setup_failure_closes_started_servers(
-        tmp_path, monkeypatch, failure):
+        tmp_path, monkeypatch, failure, console_transport_failures):
     """Setup failures retain their diagnosis without leaking listener threads."""
     finalizers = []
     started = []
@@ -1074,14 +1584,14 @@ def test_policy_tiers_setup_failure_closes_started_servers(
     class FixtureRequest:
         addfinalizer = staticmethod(finalizers.append)
 
-    original_thread = _thread
+    original_fixture_server = _fixture_server
 
-    def record_thread(server):
-        thread = original_thread(server)
+    def record_thread(server, request):
+        thread = original_fixture_server(server, request)
         started.append((server, thread))
         return thread
 
-    monkeypatch.setitem(globals(), "_thread", record_thread)
+    monkeypatch.setitem(globals(), "_fixture_server", record_thread)
     if failure == "console-construction":
         def unavailable_console(*args, **kwargs):
             raise gui_server.ConsoleConfigurationError("fixture console unavailable")
@@ -1094,7 +1604,8 @@ def test_policy_tiers_setup_failure_closes_started_servers(
         monkeypatch.setattr(gui_server, "_management_request", unavailable_upstream)
         expected = AssertionError
         message = "management-api-unavailable"
-    fixture = policy_tiers.__wrapped__(tmp_path, monkeypatch, FixtureRequest())
+    fixture = policy_tiers.__wrapped__(
+        tmp_path, monkeypatch, FixtureRequest(), console_transport_failures)
     try:
         with pytest.raises(expected, match=message):
             next(fixture)
@@ -1468,8 +1979,6 @@ def _state_qos_legacy_rows():
     result = {key: {"value": value, "source": "builtin"} for key, value in values}
     result["numwant"].update(effective_ceiling=50, runtime_request_zero="disabled",
                              constraint_source="pinned-aria2-client")
-    result["announce_min_interval_s"].update(
-        peerless_leecher_floor_s=120, constraint_source="pinned-aria2-client")
     result["catalog_tick_s"].update(offline_horizon_s=600, heartbeat_always=True)
     return result
 
@@ -1499,9 +2008,6 @@ def test_tracker_state_effective_qos_expands_legacy_response_and_closes_query(
     def queried(device_id, scalar, state, interval, interval_source, numwant, source):
         expected = copy.deepcopy(scalar)
         interval_row = {"value": interval, "source": interval_source}
-        if state == "leecher":
-            interval_row.update(peerless_leecher_floor_s=120,
-                                constraint_source="pinned-aria2-client")
         expected.update(tracker_state=state, tracker_qos={
             "announce_min_interval_s": interval_row,
             "numwant": {"value": numwant, "source": source,
@@ -1513,7 +2019,8 @@ def test_tracker_state_effective_qos_expands_legacy_response_and_closes_query(
         assert status == 200, payload
         assert payload == expected
         assert headers["ETag"] == '"iris-peer-policy-%d"' % expected["revision"]
-        assert payload["qos"]["announce_min_interval_s"]["peerless_leecher_floor_s"] == 120
+        assert set(payload["qos"]["announce_min_interval_s"]) == {"value", "source"}
+        assert set(payload["tracker_qos"]["announce_min_interval_s"]) == {"value", "source"}
 
     builtin = legacy("d1", _state_qos_legacy_rows())
     for state in ("seeder", "leecher"):

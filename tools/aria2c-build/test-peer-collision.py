@@ -51,16 +51,24 @@ def certificates(root):
             'ec_paramgen_curve:prime256v1', '-nodes', '-days', '1',
             '-subj', '/CN=collision-test-ca', '-keyout', root/'ca.key',
             '-out', root/'ca.crt')
-    (root/'ext').write_text('basicConstraints=critical,CA:FALSE\n'
-                           'keyUsage=critical,digitalSignature\n'
-                           'extendedKeyUsage=serverAuth,clientAuth\n')
     for name in ('seed', 'leech'):
+        identity = hashlib.sha256(name.encode()).hexdigest()
+        (root/'ext').write_text('basicConstraints=critical,CA:FALSE\n'
+                               'keyUsage=critical,digitalSignature\n'
+                               'extendedKeyUsage=serverAuth,clientAuth\n'
+                               'subjectAltName=URI:urn:iris:device:' + identity + '\n')
         openssl('req', '-new', '-newkey', 'ec', '-pkeyopt',
                 'ec_paramgen_curve:prime256v1', '-nodes', '-subj', '/CN='+name,
                 '-keyout', root/(name+'.key'), '-out', root/(name+'.csr'))
         openssl('x509', '-req', '-in', root/(name+'.csr'), '-CA', root/'ca.crt',
                 '-CAkey', root/'ca.key', '-CAcreateserial', '-days', '1',
                 '-extfile', root/'ext', '-out', root/(name+'.crt'))
+    authority = hashlib.sha256(subprocess.check_output(
+        ['openssl', 'x509', '-in', str(root/'ca.crt'), '-outform', 'DER'])).hexdigest()
+    now = int(time.time())
+    (root/'revocations').write_text(
+        f'IRIS-PEER-REVOCATIONS-1\n{authority}\n0\n{now}\n{now+300}\n')
+    (root/'revocations').chmod(0o600)
 
 
 def run(args, root):
@@ -166,7 +174,8 @@ def run(args, root):
                      '--dir='+str(directory), '--log='+str(directory/'trace.log'), '--log-level=debug']
             if args.tls:
                 flags += ['--bt-peer-tls=required', '--bt-peer-tls-cert='+str(root/(name+'.crt')),
-                          '--bt-peer-tls-key='+str(root/(name+'.key')), '--bt-peer-tls-ca='+str(root/'ca.crt')]
+                          '--bt-peer-tls-key='+str(root/(name+'.key')), '--bt-peer-tls-ca='+str(root/'ca.crt'),
+                          '--bt-peer-tls-revocations='+str(root/'revocations')]
             with (directory/'console.log').open('w') as log:
                 processes.append(subprocess.Popen(flags+[str(torrent)], stdout=log, stderr=log))
         started = time.monotonic()

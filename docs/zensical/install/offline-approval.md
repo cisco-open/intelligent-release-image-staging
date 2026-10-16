@@ -6,6 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Create keys and approve signing requests
 
+Use this advanced workflow for separate key holders and later local approvals.
+For automatic key creation and initial approval without typing key passphrases,
+use [local setup](managed-package.md#guided-local-setup). Choose `--key-mode manual`
+there when using existing manual keys; automatic setup does not unlock them.
+
 Run `iris-key-setup` in a terminal on the private key holder's machine.
 It asks for the files it needs, checks them and tells you what to transfer.
 The installer package includes the script. Use your approved process to bring
@@ -19,10 +24,25 @@ Choose a task from the menu. You can run the same script again to continue.
 On the server, `irisctl install` creates the deployment's online keys and
 certificates. The steps below handle the keys that stay with their holders.
 
+## Use keys kept on the deployment host
+
+For renewal, replacement or root confirmation with locally held keys, run:
+
+```bash
+iris-key-setup --local
+```
+
+Choose a task, then confirm **LOCAL KEY HOLDER** when asked. If you provide command
+arguments, put `--local` before the task, such as `iris-key-setup --local approve`.
+Keep each root in its own protected folder. Private keys stay on that host;
+only public approval files return to the Console. A compromised deployment host
+can also expose locally stored keys. The normal command keeps the separate-holder
+checks. Private-key operations are refused inside containers in both modes.
+
 ## Create your root
 
 1. Choose **Create my signing key**. Enter `root-a` or `root-b` and a private
-   folder. Each holder uses a separate offline machine.
+   folder. With separate holders, each uses a separate offline machine.
 2. Enter a passphrase when asked, then repeat it. Store it safely, separate
    from the private key.
 3. Record the public fingerprint. Choose **Copy public file** to copy the
@@ -42,10 +62,12 @@ signing machines offline; use a transfer machine or removable storage instead.
 
 1. Get the public request from the installer or Console. Obtain its
    SHA256 value independently from the person requesting approval.
-2. Choose **Approve server request**. Select the request, your private signing
-   key and a new output file. Choose signing approval or a retirement list.
+2. Choose **Approve server request**, then **Server signing key** or **Key
+   retirement list**. Select the request, your private signing key and a new
+   output file.
 3. Compare the displayed SHA256 value with the independent record. Confirm
-   the full value when asked, then enter your private key's passphrase.
+   the full value when asked. Automatically managed keys use their saved passphrase;
+   manually managed keys ask you to enter theirs.
 4. Use **Copy public file** to return only the saved public approval. Apply it
    with `irisctl resume` during installation, or upload it to the matching
    request in the Console.
@@ -68,8 +90,8 @@ To replace a recovery key in an existing deployment, follow
 
     The native age identity file has no passphrase. Protect its storage and
     transfer. It is a different key from the offline instruction signing roots.
-    Private roots stay on their holders' machines. Never upload a private root
-    or its passphrase to the Console or copy it to the server.
+    Private roots stay on their holders' machines in this workflow. Never upload
+    a private root or its passphrase to the Console.
 
 ## If approval stops
 

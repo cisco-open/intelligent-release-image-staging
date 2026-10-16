@@ -917,86 +917,19 @@ def test_swarm_snapshot_legacy_peer_is_unattributed_no_identity_join():
     assert "peer_policy" not in peer
 
 
+def _swarmmap_source(name="swarm-map.jsx"):
+    """Architecture guards target modules actually bundled for the React map."""
+    from pathlib import Path
+    frontend = Path(__file__).resolve().parents[1] / "console-ui"
+    return (frontend / "src" / name).read_text(encoding="utf-8")
+
+
 def _swarmmap_html():
-    """Return the content of swarmmap.html for static analysis."""
-    import os
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "swarmmap.html")
-    with open(path) as f:
-        return f.read()
+    """Build and serving tests prove this template becomes served dist HTML."""
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "console-ui" / "templates" /
+            "swarmmap.html").read_text(encoding="utf-8")
 
-
-def test_swarmmap_has_escape_helper():
-    # The escapeHtml helper must be defined and must cover the five HTML-special
-    # characters: & < > " '
-    html = _swarmmap_html()
-    assert "function escapeHtml" in html or "const escapeHtml" in html or \
-           "const esc=" in html or "function esc(" in html, \
-        "no escapeHtml / esc helper found in swarmmap.html"
-
-
-def test_swarmmap_device_fields_not_raw_in_innerhtml():
-    # Device-supplied strings (p.ip, p.port, p.model, p._img, im.image,
-    # DATA.host) must NOT be interpolated directly into innerHTML — they must
-    # be wrapped in the escape helper.  We check two things:
-    # (a) raw unescaped patterns that actually appeared in the pre-fix code
-    #     are absent, and
-    # (b) the device-supplied fields go through escapeHtml() in the current code.
-    html = _swarmmap_html()
-
-    # (a) Patterns that existed in the old (unescaped) code must be absent.
-    # These are the actual forms that were present before the XSS fix:
-    #   p.port appeared as ${p.port||""} or ${p.port||"—"} (unescaped template)
-    #   DATA.host appeared as "+DATA.host+" (string-concat into innerHTML)
-    # We test the minimal distinguishing substrings — if these literal forms
-    # reappear without escapeHtml() wrapping, the fix has regressed.
-    forbidden = [
-        "${p.ip}",
-        "${p.model}",
-        "${p._img}",
-        "${im.image}",
-        # Real pre-fix forms for port and DATA.host:
-        '${p.port||""}',        # was inserted raw into tip innerHTML
-        '"+DATA.host+"',        # was concatenated raw into innerHTML strings
-    ]
-    for pat in forbidden:
-        assert pat not in html, (
-            f"raw device field {pat!r} still interpolated into innerHTML "
-            f"in swarmmap.html — XSS not fixed"
-        )
-
-    assert "esc(p.ip" in html and "esc(server().host" in html
-
-
-def test_swarmmap_historical_participation_is_escaped_and_bytes_free():
-    # link.rtt_ms_median is device-supplied. It is semantically a number, so
-    html = _swarmmap_html()
-    body = html.split("function reportRows")[1].split("async function refreshDrawerReport")[0]
-    assert "esc(" in body and "rx_bytes" not in body and "tx_bytes" not in body
-
-
-def test_swarmmap_dense_layout_is_multi_ring_and_suppresses_labels():
-    html = _swarmmap_html()
-    assert "DENSE_LABEL_THRESHOLD" in html and "function position(" in html
-    assert "if(!dense)" in html
-
-
-def test_swarmmap_no_dead_stale_branch():
-    # swarm_snapshot never emits a 'stale' field, so the p.stale colour branch
-    # and its legend entry are dead. They must be removed.
-    html = _swarmmap_html()
-    assert "p.stale" not in html, \
-        "dead stale peer colour branch still present in swarmmap.html"
-    assert "idle / stale" not in html, \
-        "dead stale legend entry still present in swarmmap.html"
-
-
-# ---------------------------------------------------------------------------
-# Telemetry (#13): swarm-map console mode — config placeholder, report drawer,
-# pull flow, hub sent-bytes table, iframe embed. Same HTML-source guard style
-# as the escapeHtml tests above: assert on the file's code shapes, not on a
-# rendered DOM.
-# ---------------------------------------------------------------------------
 
 def _index_html():
     p = os.path.join(os.path.dirname(_THIS_DIR), "webroot", "index.html")
@@ -1010,165 +943,166 @@ def _app_js():
         return f.read()
 
 
+def test_swarmmap_uses_react_text_escaping_not_a_parallel_html_renderer():
+    source = _swarmmap_source()
+    assert "createRoot(root).render(" in source
+    assert "dangerouslySetInnerHTML" not in source and ".innerHTML" not in source
+    assert "<dd>{shown(value)}</dd>" in source
+
+
+def test_swarmmap_device_fields_not_raw_in_innerhtml():
+    # Actual malicious device fields are also exercised in the built browser.
+    source = _swarmmap_source()
+    assert ".innerHTML" not in source and "dangerouslySetInnerHTML" not in source
+    assert "Announce IP: {p.ip}" in source
+    assert "<h2>{data.server?.host || 'Origin server'}</h2>" in source
+
+
+def test_swarmmap_historical_participation_is_escaped_and_bytes_free():
+    body = _swarmmap_source().split("function HistoricalReports")[1].split("function Graph")[0]
+    assert "shown(row.ip || 'unknown participant')" in body
+    assert "rx_bytes" not in body and "tx_bytes" not in body
+
+
+def test_swarmmap_dense_layout_is_multi_ring_and_suppresses_labels():
+    graph = _swarmmap_source("swarm-map-graph.mjs")
+    assert "function position(" in graph and "Math.sqrt" in graph
+    assert "!dense &&" in _swarmmap_source()
+
+
+def test_swarmmap_no_dead_stale_branch():
+    source = _swarmmap_source() + _swarmmap_source("swarm-map-model.mjs")
+    assert "peer.stale" not in source and "p.stale" not in source
+    assert "idle / stale" not in source
+
+
 def test_swarmmap_map_cfg_placeholder_exactly_once():
     html = _swarmmap_html()
-    # Task 7's server-side substitution targets this exact line; a second
-    # occurrence (or a reworded one) silently breaks console mode.
     assert html.count("window.IRIS_MAP_CFG = null;") == 1
-    assert 'const MAP=window.IRIS_MAP_CFG||{swarmUrl:"/swarm",pull:false}' in html
-    # the poll must go through the config, never a hardcoded path
-    assert "fetch(MAP.swarmUrl" in html
-    assert 'fetch("/swarm"' not in html
+    assert 'id="iris-swarm-map-root"' in html
+    source = _swarmmap_source()
+    assert "window.IRIS_MAP_CFG || {swarmUrl: '/swarm', pull: false}" in source
+    controller = _swarmmap_source("swarm-map-controller.mjs")
+    assert "this.request(this.config.swarmUrl" in controller
 
 
 def test_swarmmap_script_and_style_tags_stay_attribute_free():
-    # Task 7 nonces the tags by string-replacing '<script>' / '<style>' —
-    # adding attributes to either open tag would silently skip the nonce and
-    # the CSP would then block the page.
+    # Python serves the bundled template by noncing exactly these tags.
     html = _swarmmap_html()
     assert html.count("<script>") == 1 and "<script " not in html
     assert html.count("<style>") == 1 and "<style " not in html
 
 
 def test_swarmmap_csrf_comes_from_session_not_cfg():
-    html = _swarmmap_html()
-    assert '"/api/v1/session"' in html       # versioned console bootstrap
-    assert "X-CSRF-Token" in html            # header sent on the pull POST
-    assert "csrf" not in _swarmmap_html().split("window.IRIS_MAP_CFG = null;")[0], \
-        "no csrf material may ride above/inside the injected CFG line"
+    controller = _swarmmap_source("swarm-map-controller.mjs")
+    assert "'/api/v1/session'" in controller and "'X-CSRF-Token'" in controller
+    assert "csrf" not in _swarmmap_html()
+    assert "this.state.sessionReady" in controller
 
 
 def test_swarmmap_pull_ui_gated_and_null_device_handled():
-    html = _swarmmap_html()
-    assert "MAP.pull" in html
-    assert "request-report" in html
-    assert "Pull fresh data from device" in html
-    # a peer with no device_id (no heartbeat join) gets a disabled note, not a
-    # broken POST to /api/devices/null/...
-    assert "no device identity" in html.lower()
+    source = _swarmmap_source()
+    assert "config.pull && isDevice" in source
+    assert "Pull fresh data from device" in source
+    assert "No device identity; fresh report pull is unavailable." in source
+    assert "request-report" in _swarmmap_source("swarm-map-controller.mjs")
 
 
-def test_swarmmap_pull_arrival_uses_server_clock():
-    # The arrived-check must compare the SERVER-stamped received_at (same
-    # clock domain as requested_at) — the device-stamped ts is fallback only.
-    html = _swarmmap_html()
-    body = html.split("async function requestPull")[1]
-    assert "latest.received_at" in body
+def test_swarmmap_pull_arrival_uses_exact_request_identity():
+    source = _swarmmap_source("swarm-map-model.mjs")
+    body = source.split("function matchingPull")[1].split("function participantRows")[0]
+    assert "report.report_request_id === request.request_id" in body
+    assert "report.event === 'pull'" in body
+    assert "received_at" not in body
 
 
 def test_swarmmap_historical_object_without_ip_is_safe():
-    html = _swarmmap_html()
-    assert 'x.ip||"unknown participant"' in html
+    assert "shown(row.ip || 'unknown participant')" in _swarmmap_source()
 
 
 def test_swarmmap_hub_uses_observed_global_rates():
-    html = _swarmmap_html()
-    body = html.split("function hubDetails")[1].split("function openHub")[0]
-    assert "g.send_bps" in body and "g.receive_bps" in body
+    body = _swarmmap_source().split("function HubDetails")[1].split("function HistoricalReports")[0]
+    assert "global.send_bps" in body and "global.receive_bps" in body
+    assert "data.server?.server_observation" in body
 
-
-# ---------------------------------------------------------------------------
-# Telemetry (#18): swarm-map leads with the CONSOLE device IP (device_id),
-# participation-only per-peer drawer table (who was connected, no bytes),
-# wider drawer panel.
-# Same HTML-source guard style as the escapeHtml tests above.
-# ---------------------------------------------------------------------------
 
 def test_swarmmap_typed_label_and_secondary_ip():
-    # A single helper decides the leading identity: the console device IP
-    # (device_id) when known, else the raw announce/guest ip. It must be
-    # referenced by the ring node label (render), the tooltip (showTip) and the
-    # drawer title (openDrawer) so all three read one consistent identity.
-    html = _swarmmap_html()
-    assert "(p.device_id||\"Unknown participant\")" in html
-    assert "Announce IP:" in html
+    model = _swarmmap_source("swarm-map-model.mjs")
+    assert "peer.device_id || 'Unknown participant'" in model
+    assert "peer.ip !== name" in model
+    source = _swarmmap_source()
+    assert "peerCaption(node.peer)" in source and "peerRowLabel(row)" in source
+    assert "Announce IP:" in source
 
 
 def test_swarmmap_pull_fetches_full_reports():
-    html = _swarmmap_html()
-    assert '"/reports"' in html and "refreshDrawerReport" in html
+    source = _swarmmap_source("swarm-map-controller.mjs")
+    assert "'/reports'" in source and "readReports(false)" in source
+    assert "reportsReply(body, peer.device_id)" in source
 
 
 def test_swarmmap_per_peer_table_is_participation_only():
-    # Byte columns are gone BY DESIGN: per-peer rx/tx/avg were derived, not
-    # measured (aria2 has no per-peer byte counters; the even-split fallback
-    # fired on every multi-peer lab transfer). The drawer must not read any
-    # per-peer byte field, and must render the exact peers_total count
-    # number-gated (same stored-XSS discipline as rtt_ms_median).
-    html = _swarmmap_html()
-    body = html.split("function reportRows")[1].split("async function refreshDrawerReport")[0]
-    assert "row.rx_bytes" not in body and "row.tx_bytes" not in body \
-        and "row.avg_bps" not in body, \
-        "per-peer byte fields are not measured and must not be rendered"
+    # Native aria2 does not measure per-peer byte counts; do not invent them.
+    body = _swarmmap_source().split("function HistoricalReports")[1].split("function Graph")[0]
+    for field in ("rx_bytes", "tx_bytes", "avg_bps"):
+        assert field not in body
     assert "Historical participation" in body
+    assert "participation only, not bytes or transfer direction" in body
 
 
 def test_index_html_embeds_swarmmap_iframe_lazily():
     idx = _index_html()
-    assert '<iframe id="swarm-frame"' in idx
-    assert 'src="/swarmmap"' not in idx, \
-        "iframe src must be set lazily by app.js (avoid polling while hidden)"
-    js = _app_js()
-    assert "swarm-frame" in js and "'/swarmmap'" in js
+    assert 'id="iris-swarm-root"' in idx
+    assert 'src="/swarmmap"' not in idx
+    jsx = _swarmmap_source("swarm-view.jsx")
+    assert 'state.started && <iframe id="swarm-frame"' in jsx
+    assert 'src="/swarmmap"' in jsx
+    assert "controller.syncVisibility()" in jsx
 
 
 def test_swarmmap_has_no_inline_event_handlers():
-    # The console serves this page under a nonce-only CSP: inline on*=
-    # attributes are blocked even inside the nonce'd script, so they must
-    # not exist anywhere in the file (including innerHTML template strings).
     html = _swarmmap_html()
-    assert "onclick=" not in html
-    for h in ("onload=", "onerror=", "onmouseover="):
-        assert h not in html
+    for handler in ("onclick=", "onload=", "onerror=", "onmouseover="):
+        assert handler not in html
+    source = _swarmmap_source()
+    assert ".innerHTML" not in source and "dangerouslySetInnerHTML" not in source
 
 
 def test_swarmmap_task26_canonical_topology_structure():
-    """Static guards only; browser interaction remains a Task30 manual check."""
-    html = _swarmmap_html()
-    for canonical in ("DATA?.server", "server_observation?.peer", "tracker?.role",
-                      "tracker?.participant_class", "device_observation",
-                      "latest_report", "peer_policy", "peer_enforcement"):
-        assert canonical in html
-    for retired in ("server_sent_bytes", "server_up_bps", "DATA.host",
-                    "DATA.seeder", "is_seeder", "~sent"):
-        assert retired not in html
-    assert "not a measured transfer path" in html
-    assert "fresh measured server → peer" in html
-    assert "marker-end" in html and "server_observation?.peer" in html
-    assert "device_id" in html and "Legacy unattributed peer" in html
-    assert "no per-device quarantine" in html
-    assert "o.blocked===true" in html
-    assert "conflict" in html
+    source = _swarmmap_source() + _swarmmap_source("swarm-map-model.mjs")
+    for canonical in ("server_observation?.peer", "device_observation", "latest_report",
+                      "peer_policy", "peer_enforcement", "principal_type"):
+        assert canonical in source
+    for retired in ("server_sent_bytes", "server_up_bps", "DATA.host", "DATA.seeder", "is_seeder", "~sent"):
+        assert retired not in source
+    for label in ("not a measured transfer path", "fresh measured server → peer",
+                  "Legacy unattributed peer", "no per-device quarantine", "THIS PEER BLOCKED"):
+        assert label in source
+    assert "markerEnd=" in source and "conflict" in source
 
 
 def test_swarmmap_measured_edge_uses_canonical_producer_timestamp_fallback():
-    # A peer observation may omit observed_at while it is produced in the same
-    # server poll. In that case the canonical server observation timestamp is
-    # the valid freshness clock; a peer timestamp still wins when supplied.
-    html = _swarmmap_html()
-    body = html.split("function freshServerPeer")[1].split("function position")[0]
-    assert "x?.observed_at??obs().observed_at" in body
-    assert "Number(x.send_bps)>0" in body
-    assert "MEASURED_RATE_FRESH_S" in body
+    body = _swarmmap_source("swarm-map-model.mjs").split("function freshServerPeer")[1].split("function freshPeerEdges")[0]
+    assert "measured?.observed_at ?? data?.server?.server_observation?.observed_at" in body
+    assert "measured.send_bps > 0" in body and "MEASURED_RATE_FRESH_S" in body
 
 
 def test_swarmmap_task26_accessibility_polling_and_empty_states():
-    html = _swarmmap_html()
+    source = _swarmmap_source()
     for heading in ("Tracker", "Server observation", "Device observation",
                     "Latest report", "Policy intent", "Enforcement"):
-        assert 'section("' + heading + '"' in html
-    for marker in ('role:\"button\"', "tabindex:\"0\"", "Current filtered tracker participants",
-                   "prefers-reduced-motion", "document.addEventListener(\"visibilitychange\"",
-                   "document.hidden", "AbortController", "inflight", "backoff",
-                   "if(!r.ok)", "Initial loading…", "No active tracker participants.",
-                   "No participants match the current filter.", "Unavailable/retrying",
-                    "RPC unavailable; tracker peers may remain.", "Paused."):
-        assert marker in html
-    for marker in ('role="status"', 'aria-live="polite"', 'role="dialog"',
-                   'aria-modal="true"', 'drawer.addEventListener("keydown"',
-                   'MAP_PAUSE', 'MAP_RESUME', 'DENSE_LABEL_THRESHOLD',
-                   'function position(', 'global||{}', 'g.send_bps', 'g.receive_bps'):
-        assert marker in html
+        assert 'title="' + heading + '"' in source
+    for marker in ('role="button"', "tabIndex={0}", "Current filtered tracker participants",
+                   "visibilitychange", "document.hidden", "Initial loading…",
+                   "No active tracker participants.", "No participants match the current filter.",
+                   "Unavailable/retrying", "RPC unavailable; tracker peers may remain.", "Paused.",
+                   'role="status"', 'aria-live="polite"', 'role="dialog"', 'aria-modal="true"',
+                   "drawerKey", "MAP_PAUSE", "MAP_RESUME"):
+        assert marker in source
+    assert "prefers-reduced-motion" in _swarmmap_source("swarm-map.css")
+    controller = _swarmmap_source("swarm-map-controller.mjs")
+    for marker in ("AbortController", "backoff", "reply.status === 200", "controlsVisible()"):
+        assert marker in controller
 
 
 def test_swarm_snapshot_includes_host_under_server_source(monkeypatch):

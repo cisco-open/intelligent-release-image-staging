@@ -135,15 +135,13 @@ def rotate_announce(store, now):
     ``expires_at`` of ``now + secrets_store.SEEDER_PREV_TTL``), then mint a
     fresh current ``announce_token``. Returns the new current value.
 
-    Every pass first RETIRES previous records that are revoked or past their
-    expiry: the overlap is a bounded recovery window for a device that did not
-    receive the new token, not a second permanent credential, and no shipped
-    command retires one by hand.
+    Every pass first retires previous records that are revoked or past their
+    expiry. This is a bounded recovery window, not a second permanent
+    credential. No shipped command retires a previous credential by hand.
 
     Refuses (RotationError) any rotation that would leave more than
-    ``SEEDER_PREV_CAP`` still-valid previous records — the operator must revoke
-    an old previous (P1) first, or wait for it to expire, so a credential a
-    device still relies on is never silently dropped."""
+    ``SEEDER_PREV_CAP`` still-valid previous records. Wait for a previous
+    credential to expire; rotation never silently drops a valid one."""
     seeder = store.setdefault("seeder", {})
     if not isinstance(seeder, dict):
         raise RotationError("invalid seeder credential state")
@@ -163,8 +161,8 @@ def rotate_announce(store, now):
     valid_prev = [r for r in prev if secrets_store.valid(r, now, 0)]
     if len(valid_prev) >= SEEDER_PREV_CAP:
         raise RotationError(
-            "cannot rotate: %d valid previous credentials already exist "
-            "(revoke one first)" % len(valid_prev))
+            "cannot rotate: %d previous credentials are still valid; "
+            "wait for one to expire" % len(valid_prev))
 
     current = seeder.get("announce_token")
     if current is not None and not isinstance(current, dict):
@@ -771,9 +769,9 @@ def discover_targets(state, env, rpc, skipped=None):
     A quarantined image is not a target: its quarantine force-removed the
     torrent from the seeder on purpose, so it can never be "uniquely active",
     and refusing the whole rotation for it would make two security controls
-    mutually exclusive. Its canonical file keeps the rotated-out announce;
-    the release path (catalog.release_quarantine -> publish.resume_torrent_rpc)
-    re-syncs it to the then-current credential before re-adding it. When
+    mutually exclusive. The release path
+    (catalog.release_quarantine -> publish.resume_torrent_rpc) re-adds it with
+    the token-free tracker URL and the current credential in a header. When
     *skipped* is a list, each skipped image id is appended to it.
     """
     try:

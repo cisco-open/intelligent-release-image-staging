@@ -57,8 +57,12 @@ point the server LoadBalancer at it, and set `IRIS_CONSOLE_URL` to the Console's
 browser address. IRIS writes `IRIS_HOST_IP` into the catalog certificate, the
 tracker announce URL and the seeder endpoint, so keep it.
 
-The server Service publishes 6969, 8443, 8000, 6881 and 9101 through one
-LoadBalancer; the Console publishes 8080 through another. Keep
+Set `IRIS_ORIGIN_EGRESS_IPS` or `--origin-egress-ip ADDRESS` for separate egress.
+Confirm the source address and keep it stable across pod placement changes.
+See [Origin egress addresses](../reference/server-configuration.md#origin-egress-addresses).
+
+The server Service exposes 6969, 8443, 8000, 6881 and 9101; the Console exposes
+8080. Each uses a LoadBalancer. Keep
 `externalTrafficPolicy: Local` on the server Service, so the tracker sees each
 device's real source address, and restrict the source ranges at your firewall.
 See [Open the required ports](open-ports.md).

@@ -152,6 +152,89 @@ def approve_recovery(install, tx):
     return replacement, public
 
 
+@pytest.mark.parametrize('candidate', ['missing', 'wrong-operation'])
+def test_recovery_admission_refuses_missing_or_wrong_candidate_before_server_probe(crypto, candidate):
+    install, tx, _, _ = crypto
+    if candidate == 'wrong-operation':
+        approve_recovery(install, tx)
+        path = install.base / 'recovery-candidate.json'
+        value = json.loads(path.read_bytes()); value['operation_id'] = str(uuid.uuid4())
+        atomic_write(path, json.dumps(value).encode())
+    with pytest.raises(InstallError, match='matching'):
+        cm._credential_preflight(install, 'age-recovery', tx.id)
+    assert install.calls == []
+    assert not (tx.directory / 'write-plan.json').exists()
+
+
+@pytest.mark.parametrize('pinned_record', [True, False])
+def test_recovery_admission_pins_actual_crypto_candidate_and_allows_approved_resume(crypto, pinned_record):
+    install, tx, plain, _ = crypto
+    replacement, public = approve_recovery(install, tx)
+    approval = cm._credential_preflight(install, tx.kind, tx.id)
+    assert approval == {'candidate_sha256': cm.digest(install.base / 'recovery-candidate.json'),
+                        'identity_sha256': cm.digest(replacement),
+                        'service_recipient': install.command(['age-keygen', '-y', install.base / 'age.txt'], capture=True).decode().strip()}
+    if pinned_record:
+        tx.record['recovery_candidate_approval'] = approval
+    cm._credential_pre_apply_check(install, tx.kind, tx.id)
+    service = (install.base / 'age.txt').read_bytes()
+    cm._recovery_apply(install, tx.kind, tx.id)
+    cm._recovery_apply(install, tx.kind, tx.id)  # Same-ID approved recovery, not a new candidate.
+    assert (install.base / 'age.txt').read_bytes() == service
+    assert tx.record.get('recovery_candidate_approval') == (approval if pinned_record else None)
+    assert install.config['recovery_recipient'] == public
+    assert cm._decrypt(install, (tx.sources['volume-iris-config'] / 'secrets.json.age').read_bytes(), replacement) == plain
+
+
+def test_changed_but_individually_valid_recipient_refuses_after_initial_admission(crypto):
+    install, tx, _, _ = crypto
+    replacement, _ = approve_recovery(install, tx)
+    tx.record['recovery_candidate_approval'] = cm._credential_preflight(install, tx.kind, tx.id)
+    atomic_write(replacement, install.command(['age-keygen'], capture=True))
+    path = install.base / 'recovery-candidate.json'
+    candidate = json.loads(path.read_bytes())
+    candidate['recipient'] = install.command(['age-keygen', '-y', replacement], capture=True).decode().strip()
+    atomic_write(path, json.dumps(candidate).encode())
+    with pytest.raises(InstallError, match='changed after admission'):
+        cm._credential_pre_apply_check(install, tx.kind, tx.id)
+    assert not (tx.directory / 'write-plan.json').exists()
+    assert 'replacement_identity_path' not in tx.record
+
+
+@pytest.mark.parametrize('stage', ['admission', 'saved-operation'])
+def test_recipient_public_derivation_cannot_adopt_a_pathname_aba_key(crypto, monkeypatch, stage):
+    install, tx, _, _ = crypto
+    replacement, _ = approve_recovery(install, tx)
+    original = replacement.read_bytes()
+    other = install.command(['age-keygen'], capture=True)
+    other_public = install.command(['age-keygen', '-y'], input=other, capture=True).decode().strip()
+    path = install.base / 'recovery-candidate.json'
+    candidate = json.loads(path.read_bytes()); candidate['recipient'] = other_public
+    atomic_write(path, json.dumps(candidate).encode())
+    if stage == 'saved-operation':
+        tx.record.update(replacement_identity_path=str(replacement), recovery_recipient_after=other_public,
+                         recovery_candidate_approval={'candidate_sha256': cm.digest(path),
+                             'identity_sha256': cm.digest(replacement),
+                             'service_recipient': install.command(['age-keygen', '-y', install.base / 'age.txt'], capture=True).decode().strip()})
+    command = install.command
+    def aba(args, **kwargs):
+        if list(args) == ['age-keygen', '-y', replacement]:
+            atomic_write(replacement, other)
+            try:
+                return command(args, **kwargs)
+            finally:
+                atomic_write(replacement, original)
+        return command(args, **kwargs)
+    monkeypatch.setattr(install, 'command', aba)
+    with pytest.raises(InstallError, match='recovery identity'):
+        if stage == 'admission':
+            cm._credential_preflight(install, tx.kind, tx.id)
+        else:
+            cm._replacement_identity(install)
+    assert replacement.read_bytes() == original
+    assert not (tx.directory / 'write-plan.json').exists()
+
+
 def test_recovery_recipient_preserves_service_identity_and_old_backup_custody(crypto):
     install, tx, plain, old_recipients = crypto
     replacement, public = approve_recovery(install, tx)
@@ -467,6 +550,50 @@ def test_seeder_admission_failure_creates_no_intent_or_downtime(orchestrator):
     assert not (tx.directory / 'record.json').exists()
     assert not tx.pointer.exists()
     assert events == []
+
+
+@pytest.mark.parametrize('candidate', ['missing', 'wrong-operation'])
+def test_missing_recovery_candidate_creates_no_intent_backup_or_downtime(orchestrator, candidate):
+    tx, events = orchestrator
+    tx.kind = 'age-recovery'
+    if candidate == 'wrong-operation':
+        atomic_write(tx.base / 'recovery-candidate.json', json.dumps({'operation_id': str(uuid.uuid4()),
+            'identity_path': str(tx.base / 'unused.age'), 'recipient': 'age1' + 'q' * 58}).encode())
+    with pytest.raises(InstallError, match='matching'):
+        tx.run(cm._recovery_apply, cm._finish, preflight=cm._credential_preflight,
+               pre_apply_check=cm._credential_pre_apply_check)
+    assert events == []
+    assert not tx.directory.exists() and not tx.pointer.exists()
+
+
+def test_recovery_candidate_changed_during_stop_resumes_original_consumers(orchestrator, monkeypatch):
+    tx, events = orchestrator
+    tx.kind = 'age-recovery'
+    replacement = tx.base / 'replacement.age'
+    atomic_write(replacement, b'first protected fixture identity')
+    atomic_write(tx.base / 'age.txt', b'unchanged service fixture identity')
+    candidate_path = tx.base / 'recovery-candidate.json'
+    recipient = 'age1' + 'q' * 58
+    candidate = {'operation_id': tx.id, 'identity_path': str(replacement), 'recipient': recipient}
+    atomic_write(candidate_path, json.dumps(candidate).encode())
+    original_command = cm.DockerInstall.command
+    def command(self, args, **kwargs):
+        return (json.loads(candidate_path.read_bytes())['recipient'].encode()
+                if args[-1] == replacement or kwargs.get('input') in (
+                    b'first protected fixture identity', b'different protected fixture identity')
+                else original_command(self, args, **kwargs))
+    monkeypatch.setattr(cm.DockerInstall, 'command', command)
+    def stopped(*_args, **_kwargs):
+        events.append('clean-stop-proof')
+        atomic_write(replacement, b'different protected fixture identity')
+        atomic_write(candidate_path, json.dumps(dict(candidate, recipient='age1' + 'p' * 58)).encode())
+    monkeypatch.setattr(cm, '_stop', stopped)
+    with pytest.raises(InstallError, match='original services verified and resumed'):
+        tx.run(lambda *_args: pytest.fail('No changed candidate may reach apply'), lambda *_args: {},
+               preflight=cm._credential_preflight, pre_apply_check=cm._credential_pre_apply_check)
+    assert tx.record['phase'] == 'refused' and tx.record['mutations_admitted'] is False
+    assert events[-3:] == ['compose:up:iris', 'compose:up:console', 'consumer-proof']
+    assert not (tx.directory / 'write-plan.json').exists()
 
 
 def test_explicit_repair_can_admit_stopped_failed_restart_but_not_live_writer():

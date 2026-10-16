@@ -26,7 +26,7 @@ Check your device's app-hosting support before selecting it.
 | Device family | Delivery path | Staging target | When to choose it | What you must build |
 | --- | --- | --- | --- | --- |
 | Catalyst 9000 series switches | Guest Shell | `flash:` | Your default on these switches. | The Guest Shell agent bundle, `iris-agent.tgz`. |
-| Catalyst 9000 series switches | IOx | Chosen by the live writable-media policy, normally `flash:` through the SSD share | The switch has app-hosting storage and you run IOx apps. | The amd64 IOx package, `iris-amd64.tar`. |
+| Catalyst 9000 series switches | IOx | Chosen by the live writable-media policy, normally `flash:` through the SSD share | The switch has an app-hosting SSD and the required IRIS share. | The amd64 IOx package, `iris-amd64.tar`. |
 | Industrial Ethernet switches with app hosting | IOx | Chosen by the live writable-media policy, normally `sdflash:` | The one path for this family. | The arm64 IOx package, `iris-arm64.tar`. |
 | Catalyst 8000 series routers | Guest Shell | `bootflash:` | The agent runs on a VirtualPortGroup that IRIS manages. | The Guest Shell agent bundle, `iris-agent.tgz`. |
 | Catalyst 8000 series routers | IOx | `bootflash:` | You run IOx apps. The app attaches to the same VirtualPortGroup. | The amd64 IOx package, `iris-amd64.tar`. |
@@ -43,18 +43,19 @@ build the IOx and IOS-XR packages yourself, with
 ## Choose between IOx and Guest Shell
 
 On Catalyst 9000 series switches the agent runs in Guest Shell; the IOx app is
-the alternative on switches with supported app-hosting storage.
+the alternative on switches with an app-hosting SSD and a writable shared folder.
 [Cisco's app-hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html)
-requires supported external storage for third-party applications. Confirm the
-IRIS share and staging path on the exact switch and software release before
-using IOx. Both paths run the same agent. On Catalyst 8000 series routers both paths
+describes the platform's supported external storage. IRIS's Catalyst IOx profile
+requires the [SSD share](device-requirements.md#2-size-the-storage-root) for
+image placement, even if the platform can host other apps without it.
+Both paths run the same agent. On Catalyst 8000 series routers both paths
 attach the agent to the same VirtualPortGroup.
 
 - On Guest Shell an Embedded Event Manager (EEM) applet starts the agent on a
   timer inside IOS. On IOx and IOS-XR the container's supervisor runs it. See
   [How an image reaches a device](../architecture/data-path.md).
-- Agent upgrades differ by path. See
-  [Upgrade to a new release](../admin-guide/upgrade.md).
+- Replace agents through undeploy and onboarding. See
+  [Deploy a new release](../admin-guide/upgrade.md).
 - For an unsigned IOx install, IRIS temporarily disables device-global signature
   verification when it was enabled, then restores that state before activation.
   An initially disabled setting stays disabled. Read

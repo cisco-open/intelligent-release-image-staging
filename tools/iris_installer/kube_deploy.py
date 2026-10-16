@@ -26,7 +26,7 @@ import time
 from types import SimpleNamespace
 import uuid
 
-from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, WAITING_APPROVAL, digest, run
+from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, WAITING_APPROVAL, digest, run, observability_enabled
 from .state import InstallError, atomic_write, regular_bytes
 
 
@@ -65,7 +65,13 @@ def _container_incarnation(pod, name):
 
 
 def validate_config(config):
-    from .deploy import validate_config as docker_validate
+    from .deploy import validate_config as docker_validate, origin_egress_ips
+    if isinstance(config, dict) and 'origin_egress_ips' in config:
+        origin_egress_ips(config)
+        config = {key: value for key, value in config.items() if key != 'origin_egress_ips'}
+    if isinstance(config, dict) and 'observability' in config:
+        observability_enabled(config)
+        config = {key: value for key, value in config.items() if key != 'observability'}
     if not isinstance(config, dict) or set(config) != COMMON | FIELDS or config.get("target") != "kubernetes":
         raise InstallError("Kubernetes installation configuration is incomplete")
     docker_validate(dict({k: config[k] for k in COMMON}, target="docker"))
@@ -464,7 +470,11 @@ class KubeInstall(DockerInstall):
             if line.strip() and not line.startswith("#"):
                 key, value = line.split("=", 1)
                 server_env[key] = value
-        server_env.update(IRIS_HOST_IP=self.config["host"], IRIS_AGE_RECIPIENTS=recipient + "," + self.config["recovery_recipient"],
+        from .deploy import origin_egress_ips
+        server_env.update(IRIS_HOST_IP=self.config["host"],
+                          IRIS_ORIGIN_EGRESS_IPS=",".join(origin_egress_ips(self.config)),
+                          IRIS_AGE_RECIPIENTS=recipient + "," + self.config["recovery_recipient"],
+                          IRIS_OBSERVABILITY="1" if observability_enabled(self.config) else "",
                           IRIS_PEER_TLS_MODE=self.config["peer_tls"], IRIS_AGE_KEY_FILE="/run/secrets/age/identity",
                           IRIS_MANAGEMENT_API_TOKEN_FILE="/data/config/tier/current.json", IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE="/data/config/tier/previous.json",
                           IRIS_MANAGEMENT_API_CERT="/run/secrets/management/tls.crt", IRIS_MANAGEMENT_API_KEY="/run/secrets/management/tls.key",
@@ -637,12 +647,7 @@ class KubeInstall(DockerInstall):
         return self.kube("exec", "-i", self._pod("console"), "-c", "console", "--", *args, **kwargs)
 
     def packages(self):
-        if "packages" not in self.journal.document["completed"]:
-            self.command(["bash", self.source / "tools/get-ioxclient.sh", self.base / "bin"])
-            for arch in ("arm64", "amd64"):
-                self.command(["bash", self.source / "tools/stage-iox-package.sh", "--arch", arch, "--artifacts-dir", self.base / "artifacts"])
-            self.command(["bash", self.source / "tools/build-xr-package.sh", "--out", self.base / "artifacts"])
-            self.journal.checkpoint("packages", {p.name: digest(p) for name in ("iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm") for p in (self.base / "artifacts" / name, self.base / "artifacts" / (name + ".manifest"))})
+        self.acquire_packages()
         for name, expected in self.journal.document["completed"]["packages"].items():
             if not re.fullmatch(r"iris-(?:amd64\.tar|arm64\.tar|xr\.rpm)(?:\.manifest)?", name) or not re.fullmatch(r"[0-9a-f]{64}", expected):
                 raise InstallError("Native package checkpoint contains an unsupported artifact")
@@ -778,8 +783,9 @@ except Exception:
                 raise InstallError("Recover the approved credential operation before resuming installation")
         self.verify_inputs()
         from . import ubuntu
-        ubuntu.provision(self.command)
-        ubuntu.provision_kubernetes_client(self.command)
+        self.provision_host()
+        if not self.prebuilt():
+            ubuntu.provision_kubernetes_client(self.command)
         self.verify_resource_ownership()
         self.command(["bash", self.source / "tools/check-host-time.sh"], timeout=30)
         self.prepare()
@@ -832,6 +838,10 @@ print(json.dumps(proof))
         images = self.journal.document["completed"].get("kube-images", {})
         if set(images) != {"iris", "console"} or any(not re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", value) for value in images.values()):
             raise InstallError("Kubernetes lifecycle requires immutable image pins")
+
+    def prepare_restore_runtime(self, transaction, verified):
+        from .kube_restore_images import prepare
+        prepare(self, transaction, verified)
 
     def _recover_object_update(self):
         path = self.base / "kube-update.json"
@@ -950,6 +960,8 @@ print(json.dumps(proof))
         if getattr(self, "credential_recovery", False):
             self._recover_object_update()
         self.pin_runtime()
+        from .kube_restore_images import protect_runtime
+        protect_runtime(self)
         proof = self.journal.document["completed"].get("kube-clean-stop")
         server = self.get("deployment", SERVICES["iris"])
         transaction = getattr(self, "credential_transaction", None)
@@ -1134,7 +1146,7 @@ print(json.dumps(proof))
     def restart_writer(self, container):
         self.maintenance_close()
         service = container["service"]
-        self.scale(service, 1 if service == "iris" else self.config["kube_console_replicas"])
+        self.scale(service, container.get('replicas', 1 if service == "iris" else self.config["kube_console_replicas"]))
         self.kube("rollout", "status", "deployment/" + SERVICES[service], "--timeout=300s", timeout=330)
 
     def seeder_maintenance_start(self, operation_id):
@@ -1209,9 +1221,73 @@ print(json.dumps(proof))
         containers = []
         for service in ("console", "iris"):
             current = self.get("deployment", SERVICES[service])
-            containers.append({"id": current["metadata"]["uid"], "service": service, "running": current["spec"].get("replicas", 0) > 0})
+            containers.append({"id": current["metadata"]["uid"], "service": service,
+                               "replicas": current["spec"].get("replicas", 0),
+                               "running": current["spec"].get("replicas", 0) > 0})
         pvc = self.get("persistentvolumeclaim", "iris-data")
         return sources, {"iris-data": pvc["metadata"]["uid"]}, containers
+
+    def capture_recovery_authority(self, containers, volumes):
+        isolation = self._object('NetworkPolicy', 'iris-maintenance-isolation', spec={
+            'podSelector': {'matchLabels': {LABEL: self.journal.document['id'], 'iris.cisco.com/maintenance': 'true'}},
+            'policyTypes': ['Ingress', 'Egress'], 'ingress': [], 'egress': []})
+        manifests = {}
+        for resource in self.manifests():
+            key = resource['kind'] + '/' + resource['metadata']['name']
+            if key == 'NetworkPolicy/iris-maintenance-isolation':
+                if resource != isolation:
+                    raise InstallError('Maintenance isolation differs from owned capture policy')
+                continue
+            manifests[key] = self._capture_resource_digest(resource)
+        return {'resources': {key: value['uid'] for key, value in
+                              self.journal.document['completed']['kube-resources'].items()
+                              if key != 'NetworkPolicy/iris-maintenance-isolation'}, 'manifests': manifests}
+
+    @staticmethod
+    def _capture_resource_digest(resource):
+        resource = copy.deepcopy(resource)
+        if resource['kind'] == 'Deployment' and resource['metadata']['name'] in SERVICES.values():
+            resource['spec'].pop('replicas', None)
+            annotations = resource['metadata'].get('annotations', {})
+            annotations.pop(INTENT, None)
+            if not annotations:
+                resource['metadata'].pop('annotations', None)
+        return hashlib.sha256(_canonical(resource)).hexdigest()
+
+    def capture_recovery_inventory(self, authority):
+        pending = self.base / 'kube-update.json'
+        if pending.exists() or pending.is_symlink():
+            update = json.loads(regular_bytes(pending, 8 * 1024 * 1024))
+            for name in ('before', 'after'):
+                resource = copy.deepcopy(update[name])
+                key = resource['kind'] + '/' + resource['metadata']['name']
+                if resource['kind'] != 'Deployment' or resource['metadata']['name'] not in SERVICES.values():
+                    raise InstallError('Pending Kubernetes change is not this capture stop/start')
+                if self._capture_resource_digest(resource) != authority['manifests'].get(key):
+                    raise InstallError('Pending Kubernetes change differs from original capture authority')
+        self._recover_object_update()
+        self.verify_inputs()
+        self.pin_runtime()
+        if self.capture_recovery_authority([], {}) != authority:
+            raise InstallError('Kubernetes capture ownership or deployment specification changed')
+        containers = []
+        for service in ('console', 'iris'):
+            current = self.get('deployment', SERVICES[service])
+            replicas = current['spec'].get('replicas', 0)
+            containers.append({'id': current['metadata']['uid'], 'service': service,
+                               'replicas': replicas, 'running': replicas > 0})
+        pvc = self.get('persistentvolumeclaim', 'iris-data')
+        return {'iris-data': pvc['metadata']['uid']}, containers
+
+    def capture_recovery_health(self, container):
+        current = self.get('deployment', SERVICES[container['service']])
+        if (current['metadata']['uid'] != container['id']
+                or current['spec'].get('replicas', 0) != container['replicas']):
+            raise InstallError('Original Kubernetes replica state changed')
+        self.maintenance_close()
+        self.kube('rollout', 'status', 'deployment/' + SERVICES[container['service']], '--timeout=300s', timeout=330)
+        if container['service'] == 'console':
+            self.lifecycle_consumer_proof()
 
     def capture_backup_extras(self, sources):
         from .topology_lifecycle import snapshot_tree

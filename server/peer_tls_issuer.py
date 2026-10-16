@@ -17,6 +17,7 @@ import tempfile
 
 import secretfs
 import peer_tls_settings
+import peer_tls_revocations
 
 DAY = 86400
 
@@ -26,6 +27,10 @@ class PeerTLSError(Exception):
 
 
 class InvalidCSR(PeerTLSError):
+    pass
+
+
+class CertificateRevoked(PeerTLSError):
     pass
 
 
@@ -58,6 +63,7 @@ class Issuer:
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             if directory.stat().st_mode & 0o077:
                 raise PeerTLSError('unsafe issuer directory permissions')
+        peer_tls_revocations.Ledger(self.config.parent).initialize()
         # The deployment-owned parents are not writable by device principals.
         with (self.config / 'issuer.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -108,7 +114,17 @@ class Issuer:
         if b'ASN1 OID: prime256v1' not in description:
             raise InvalidCSR('P-256 node key required')
         bundle = self.prepare()
-        identity = hashlib.sha256(device_id.encode('utf-8')).hexdigest()
+        ledger = peer_tls_revocations.Ledger(self.config.parent)
+        # Keep this cross-process lock through signing: a concurrent withdrawal
+        # either follows this issuance or prevents it, never races past it.
+        with ledger.locked() as revocations:
+            try:
+                identity = ledger.allowed_identity(revocations, device_id)
+            except peer_tls_revocations.RevokedIdentity:
+                raise CertificateRevoked('This device certificate has been revoked') from None
+            return self._issue_identity(bundle, identity, data)
+
+    def _issue_identity(self, bundle, identity, data):
         with tempfile.TemporaryDirectory(dir=str(self.runtime)) as tmp:
             extensions = Path(tmp) / 'extensions'
             extensions.write_text('basicConstraints=critical,CA:FALSE\n'
@@ -121,4 +137,13 @@ class Issuer:
                             '-extfile', extensions, data=data)
         ca = _openssl('x509', '-in', bundle, '-outform', 'PEM')
         return {'mode': 'required', 'certificate': cert.decode('ascii'),
-                'ca': ca.decode('ascii'), 'renew_before_seconds': 21600}
+                'ca': ca.decode('ascii'), 'renew_before_seconds': 21600,
+                'identity_sha256': identity}
+
+    def revocation_snapshot(self, nonce):
+        if not isinstance(nonce, str) or peer_tls_revocations.NONCE.fullmatch(nonce) is None:
+            raise ValueError('Invalid revocation snapshot nonce')
+        bundle = self.prepare()
+        ca = _openssl('x509', '-in', bundle, '-outform', 'DER')
+        return peer_tls_revocations.Ledger(self.config.parent).snapshot(
+            hashlib.sha256(ca).hexdigest(), nonce)

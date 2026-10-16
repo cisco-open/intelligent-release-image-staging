@@ -1,16 +1,12 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Source guards for the console UI of the KGV / Cisco Bulk Hash reconciler
-(spec Task 5): the Settings > Image verification pane (schedule, Refresh
-now, offline upload), the Images page verdict badges + image-detail drawer
-(release / typed-confirm override), and the multi-image picker's quarantine
-blocking. Client-side only -- app.js/index.html have no JS test harness in
-this repo, so these assert the markup/wiring stays intact (the SOURCE TEXT
-of the function bodies), the same idiom as test_tls_page_ux.py /
-test_onboard_feedback_ux.py / the picker tests in test_gui_server.py. The
-HTTP endpoints these panes call are already covered end-to-end by
-test_gui_server_bulkhash.py (Task 4); nothing here re-tests the server."""
+"""Console image verification ownership and executable workflow guards.
+
+Native HTTP, signed-feed parsing and quarantine remain covered separately.
+This suite runs the shipped React controller's exact-result, scheduling,
+bounded raw upload and stale/unknown request regression tests.
+"""
 import os
 
 import management_api as gui_server
@@ -25,214 +21,96 @@ def _slice(container, start_marker, end_marker):
     return container.split(start_marker, 1)[1].split(end_marker, 1)[0]
 
 
-# --- Settings sub-menu / sub-page registration -----------------------------
-
-def test_settings_submenu_has_image_verification_entry():
-    """React navigation keeps the operational verification page reachable."""
-    source = os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui", "src", "settings-navigation.jsx")
-    with open(source, encoding="utf-8") as stream:
-        shell = stream.read()
-    assert "['bulkhash', 'Image verification'," in shell
-    assert 'href={`#settings/${id}`}' in shell
-    assert 'id="settings-pane-bulkhash"' in _read("index.html")
+def _verification_source(name):
+    with open(os.path.join(os.path.dirname(gui_server.WEBROOT),
+                           "console-ui", "src", name), encoding="utf-8") as f:
+        return f.read()
 
 
-def test_app_js_registers_the_bulkhash_settings_sub_via_push_not_the_pinned_literal():
-    """House rule: the original SETTINGS_SUBS trio stays a literal (a
-    different source guard pins it exactly); every pane added since is
-    appended with its own SETTINGS_SUBS.push(...) call, never by editing
-    that array. This pane follows the same convention as 'audit'/'setup'."""
-    js = _read("app.js")
-    assert re_pinned_trio_intact(js)
-    assert "SETTINGS_SUBS.push('bulkhash')" in js
-
-
-def re_pinned_trio_intact(js):
-    import re
-    return bool(re.search(
-        r"SETTINGS_SUBS\s*=\s*\[\s*'general'\s*,\s*'tls'\s*,\s*'telemetry'\s*\]", js))
-
-
-# --- Settings > Image verification pane: markup -----------------------------
-
-def _bulkhash_pane(html):
-    return _slice(html, 'id="settings-pane-bulkhash" hidden>', "</section>")
-
-
-def test_pane_present_and_hidden_by_default():
+def test_image_verification_navigation_and_single_react_mount():
+    nav = _verification_source("settings-navigation.jsx")
+    assert "['bulkhash', 'Image verification'," in nav
+    assert 'href={`#settings/${id}`}' in nav
     html = _read("index.html")
+    assert html.count('id="iris-image-verification-root"') == 1
     assert 'id="settings-pane-bulkhash" hidden' in html
+    assert 'id="iv-content"' not in html
+    assert "mountImageVerification" in _verification_source("main.jsx")
 
 
-def test_schedule_controls_have_the_binding_copy():
-    """UI copy decisions (binding): the weekly option must name its Monday
-    UTC anchor, the daily option must say UTC, and the hour is 00:00-23:00
-    UTC."""
-    pane = _bulkhash_pane(_read("index.html"))
-    assert 'id="iv-mode"' in pane
-    mode = _slice(pane, 'id="iv-mode"', "</select>")
-    assert '<option value="off">Off</option>' in mode
-    assert '<option value="daily">Daily (UTC)</option>' in mode
-    assert '<option value="weekly">Weekly (Mondays, UTC)</option>' in mode
-    assert 'id="iv-hour"' in pane
-
-
-def test_hour_select_is_built_client_side_for_00_00_through_23_00_utc():
+def test_react_owns_both_settings_and_wizard_with_authenticated_adapter():
     js = _read("app.js")
-    assert "getElementById('iv-hour')" in js
-    assert "for (var h = 0; h < 24; h++)" in js
-    assert ":00</option>" in js
+    assert "SETTINGS_SUBS.push('bulkhash')" in js
+    assert "var imageVerification = window.irisImageVerification;" in js
+    assert "fetch: fetch, headers: csrfHdr, formatDate: fmtDate" in js
+    assert "imageVerification.select(hostId)" in js
+    assert "imageVerification.refresh()" in js
+    assert "imageVerification.select(null)" in js
+    adapter = _slice(js, "var imageVerification =", "// React owns certificate inventory")
+    assert "refreshImages().catch" in adapter
+    assert "refreshDevices().catch" in adapter
+    assert "assignments.services.publishImages(assignments.acceptImages({ok: false}, assignments.beginImageRead()))" in adapter
+    for removed in ("function uploadOfflineTar(", "function renderIvStatusFields(",
+                    "function fmtBulkhashLastRun(", "function wireDropzone("):
+        assert removed not in js
 
 
-def test_refresh_now_button_and_last_run_line_present():
-    pane = _bulkhash_pane(_read("index.html"))
-    assert 'id="iv-refresh"' in pane
-    btn = _slice(pane, 'id="iv-refresh"', "</button>")
-    assert "Refresh now" in btn
-    assert 'id="iv-last-run"' in pane
+def test_schedule_keeps_utc_anchor_and_accessible_native_controls():
+    component = _verification_source("image-verification.jsx")
+    assert '<option value="off">Off</option>' in component
+    assert '<option value="daily">Daily (UTC)</option>' in component
+    assert '<option value="weekly">Weekly (Mondays, UTC)</option>' in component
+    assert "Array.from({length: 24}" in component
+    assert "padStart(2, '0')}:00" in component
+    assert 'htmlFor="iv-mode"' in component
+    assert 'htmlFor="iv-hour"' in component
+    assert 'id="iv-refresh"' in component
+    assert 'id="iv-last-run" role="status" aria-live="polite"' in component
+    assert 'id="iv-offline-dropzone" tabIndex={0} role="button" aria-disabled={!canWrite}' in component
+    assert 'aria-label="Choose or drop a Cisco Bulk Hash feed tar file"' in component
+    assert 'id="iv-offline-dropzone-input"' in component
+    assert "event.target.value = ''" in component
+    assert "Upload sent. Waiting for signature verification and catalog results." in component
 
 
-def test_offline_dropzone_present_and_accessible():
-    pane = _bulkhash_pane(_read("index.html"))
-    assert 'id="iv-offline-dropzone"' in pane
-    open_tag = _slice(pane, 'id="iv-offline-dropzone"', ">")
-    assert 'tabindex="0"' in open_tag
-    assert 'role="button"' in open_tag
-    assert 'aria-label="' in open_tag
-    zone = _slice(pane, 'id="iv-offline-dropzone"', "</div>")
-    assert 'id="iv-offline-dropzone-input"' in zone
-    assert 'type="file"' in zone
+def test_offline_archive_stays_raw_and_never_treated_as_verified_at_upload_completion():
+    controller = _verification_source("image-verification-controller.mjs")
+    model = _verification_source("image-verification-model.mjs")
+    assert "xhr.open('POST', verificationPaths.offline)" in controller
+    assert "Object.entries(this.services.headers({}))" in controller
+    assert "xhr.send(file)" in controller
+    assert "FormData" not in controller
+    assert "256 * 1024 * 1024" in model
+    assert "body.outcome === 'ok'" in model
+    assert "body.outcome === 'already_running'" in model
+    assert "body.outcome === 'fail'" in model
+    assert "run.outcome.startsWith('fail: ')" in model
 
 
-# --- Settings > Image verification pane: app.js wiring ----------------------
-
-def test_app_js_wires_the_dropzone_via_the_shared_wireDropzone_helper():
-    """Drag-drop pattern mirrored from the TLS pane, per the brief."""
-    js = _read("app.js")
-    assert "wireDropzone(document.getElementById('iv-offline-dropzone')" in js
-    assert "function uploadOfflineTar(file)" in js
-
-
-def test_offline_upload_is_a_raw_body_post_not_multipart():
-    """Endpoint contract (Task 4): raw binary POST, not RFC 2046 multipart
-    and not form-encoded -- mirrors the PUT /api/v1/images/upload/<name> XHR
-    idiom (xhr.send(file) sends the raw File body)."""
-    js = _read("app.js")
-    fn = js.split("function uploadOfflineTar(file) {", 1)[1].split(
-        "\n  wireDropzone(document.getElementById('iv-offline-dropzone')", 1)[0]
-    assert "'/api/v1/image-verification/offline'" in fn
-    assert "xhr.open('POST'" in fn
-    assert "setRequestHeader('X-CSRF-Token'" in fn
-    assert "xhr.send(file)" in fn
-    assert "FormData" not in fn
-    assert "multipart" not in fn.lower()
-
-
-def test_refresh_now_disables_while_in_flight_and_handles_already_running():
-    js = _read("app.js")
-    fn = js.split(
-        "document.getElementById('iv-refresh').addEventListener('click'", 1)[1][:1600]
-    assert "btn.disabled = true" in fn
-    assert "btn.disabled = false" in fn
-    assert "r.status === 409" in fn
-    assert "already in progress" in fn
-    assert "'/api/v1/image-verification/refresh'" in fn
-
-
-def test_failed_status_get_shows_could_not_load_not_stale_never_run():
-    """Setup pane's never-render-stale-as-healthy pattern (setupShowUnknown
-    in this same file): a failed GET must not silently leave whatever text
-    was already in #iv-last-run standing in as current -- neither the
-    static "Never run." markup index.html ships on first load, nor a stale
-    prior successful render."""
-    js = _read("app.js")
-    fn = js.split(
-        "async function refreshImageVerificationSettings() {", 1)[1].split(
-        "\n  // Hour select is built once here", 1)[0]
-    assert fn.count("Could not load status.") == 2   # !r.ok AND catch(e)
-    assert "catch (e)" in fn
-
-
-def test_success_messages_render_in_the_ok_color_outside_inline_form():
-    """Important 2 fix: #iv-refresh-msg and #iv-offline-msg sit outside any
-    .inline-form (unlike every other -msg span in this pane), so the
-    pre-existing '.inline-form .err.ok' scoped rule never matched them --
-    classList.add('ok') was a silent no-op and "Refresh complete: ..."
-    painted in the error red (#c0362c). The fix must be a rule that matches
-    .err.ok regardless of ancestor."""
-    html = _read("index.html")
-    pane = _bulkhash_pane(html)
-    form = _slice(pane, '<form class="inline-form" id="iv-schedule-form">', "</form>")
-    assert "iv-refresh-msg" not in form
-    assert "iv-offline-msg" not in form
-
-
-def test_success_message_css_wins_the_cascade_both_inside_and_outside_forms():
-    """Important 2, round 2: a global `.err.ok` rule alone is not enough --
-    `.inline-form .err` and `.err.ok` are BOTH two-class selectors (equal
-    0-2-0 specificity), and same-specificity ties resolve by SOURCE ORDER,
-    not by which selector reads as more specific to a human. A `.err.ok`
-    declared BEFORE `.inline-form .err` loses that tie: the plain `.err`
-    (red) rule wins inside every form, repainting eight previously-working
-    success messages (ae-msg, ca-msg, cert-msg, iv-schedule-msg, pw-msg,
-    sh-msg, td-msg, trust-msg) red on success. `.err.ok` must appear
-    strictly AFTER the last `.inline-form .err` rule in the stylesheet.
-    Outside a form this ordering doesn't matter -- `.err.ok` (0-2-0)
-    already outranks the bare `.err` (0-1-0) by specificity alone -- so
-    this pins the case that actually depends on order."""
+def test_success_message_css_wins_inside_and_outside_forms():
     css = _read("styles.css")
-    assert ".err.ok {" in css
-    inline_form_err_idx = css.rindex(".inline-form .err {")
-    err_ok_idx = css.index(".err.ok {")
-    assert err_ok_idx > inline_form_err_idx, (
-        ".err.ok must be declared textually AFTER .inline-form .err -- "
-        "equal specificity means source order decides which one wins "
-        "inside a form")
+    assert css.index(".err.ok {") > css.rindex(".inline-form .err {")
 
 
-def test_refresh_now_and_offline_upload_also_refresh_the_devices_view():
-    """Adjacent fix (e): imageQuarantined -- the picker's block list -- is
-    populated by refreshDevices(), not refreshImages(). Without also
-    calling refreshDevices() after a run, a freshly-quarantined image
-    stayed pickable until the next periodic devices-view poll interval."""
-    js = _read("app.js")
-    refresh_fn = js.split(
-        "document.getElementById('iv-refresh').addEventListener('click'", 1)[1].split(
-        "\n  });\n  // Offline upload:", 1)[0]
-    assert "refreshDevices().catch" in refresh_fn
-    finish_fn = js.split("function finish(text, ok) {", 1)[1].split("\n    }", 1)[0]
-    assert "refreshDevices().catch" in finish_fn
-
-
-def test_last_run_rendering_never_equals_fail_it_checks_the_prefix():
-    """Binding rule from the endpoint contract: last_run.outcome is "ok" or
-    "fail: <detail>" -- an equality check against the literal "fail" would
-    never match, so this must be a startswith-style prefix check."""
-    js = _read("app.js")
-    fn = js.split("function bulkhashOutcomeFailed(outcome) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "slice(0, 4) === 'fail'" in fn
-    assert "=== 'fail'" not in js.split(
-        "function fmtBulkhashLastRun(lr) {", 1)[1].split("\n  }", 1)[0], \
-        "the last-run renderer must route failure detection through the " \
-        "prefix helper, never a bare equality check"
-
-
-def test_schedule_form_posts_mode_and_hour_utc():
-    js = _read("app.js")
-    fn = js.split(
-        "document.getElementById('iv-schedule-form').addEventListener('submit'", 1)[1][:900]
-    assert "'/api/v1/settings/image-verification'" in fn
-    assert "mode: mode" in fn
-    assert "hour_utc: hour" in fn
+def test_image_verification_controller_executes_race_and_result_contracts():
+    import shutil
+    import subprocess
+    import pytest
+    if not shutil.which("node"):
+        pytest.skip("Node is required for the image verification controller tests")
+    path = os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui",
+                        "tests", "image-verification.test.mjs")
+    result = subprocess.run(["node", "--test", path], capture_output=True,
+                            text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # --- Images page: verdict badges --------------------------------------------
 
 def test_images_table_has_a_verification_column():
-    html = _read("index.html")
-    images_section = _slice(html, 'id="images">', "</table>")
-    assert "<th>Verification</th>" in images_section
+    component = _images_source("images.jsx")
+    images_section = _slice(component, 'id="images">', "</table>")
+    assert '<th scope="col">Verification</th>' in images_section
 
 
 def test_verdict_badge_texts_match_the_binding_copy():
@@ -305,28 +183,23 @@ def test_deferral_warning_is_additive_to_whatever_state_is_shown():
 
 
 def test_images_row_renders_the_pill_and_an_info_button():
-    """Task 7: the catalog row renderer moved out of refreshImages() (now
-    fetch-only) into renderImageRows(), a pure client-side render off
-    LAST_IMAGES shared with the new "Needs attention only" toggle -- same
-    split applyDeviceFilters()/renderDevices() already use for Devices."""
-    js = _read("app.js")
-    fn = js.split("function renderImageRows() {", 1)[1].split(
-        "\n  document.getElementById('images-filter-attention')", 1)[0]
-    assert "bulkhashVerdictPillHTML(i.hash_verification, i.quarantined)" in fn
-    assert "img-info" in fn
+    """The React-owned row keeps its verification pill and details action."""
+    component = _images_source("images.jsx")
+    assert "imageVerdicts(image.hash_verification, image.quarantined)" in component
+    assert '<Verdict image={item} />' in component
+    assert 'img-info' in component
 
 
 # --- Image picker: quarantined ids visibly blocked --------------------------
 
-def _picker_body(js):
-    return js.split("function openImagePicker(currentIds, onApply) {", 1)[1].split(
-        "\n  function closeImagePicker", 1)[0]
+def _picker_source(name):
+    with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui", "src", name)) as stream:
+        return stream.read()
 
 
 def test_picker_marks_quarantined_rows_with_a_badge():
-    js = _read("app.js")
-    picker = _picker_body(js)
-    assert "imageQuarantined[id]" in picker
+    picker = _picker_source('assignments.jsx')
+    assert "image.quarantined" in picker
     assert "quarantined</span>" in picker
 
 
@@ -334,13 +207,12 @@ def test_picker_disables_a_quarantined_id_only_when_not_already_assigned():
     """Blocks NEW selection (disabled + badge, per the brief) without
     trapping an operator who needs to uncheck an image that was assigned
     before it became quarantined -- that removal must stay possible."""
-    js = _read("app.js")
-    picker = _picker_body(js)
-    assert "var quarantined = !!imageQuarantined[id]" in picker
-    assert "var blocked = quarantined && !checkedSet[id]" in picker
-    assert "data-blocked=\"1\"" in picker
+    picker = _picker_source('assignments-model.mjs')
+    assert "quarantined: !!image?.quarantined" in picker
+    assert "(!checked && (unknown || image?.quarantined || state.chosen.length >= 10))" in picker
+    assert "data-blocked={image.quarantined ? '1' : undefined}" in _picker_source('assignments.jsx')
     # the pinned "unknown" disabling stays intact, untouched by this addition
-    assert "unknown ? ' disabled' : ''" in picker
+    assert "const retained = unknown && state.original?.includes(id)" in picker
 
 
 def test_picker_tags_every_quarantined_row_not_just_ones_blocked_at_render_time():
@@ -356,10 +228,9 @@ def test_picker_tags_every_quarantined_row_not_just_ones_blocked_at_render_time(
     must be unconditional on `quarantined` alone, so updateCount's sweep
     (input:not(:checked) -> disabled) catches it the instant it is
     unchecked."""
-    js = _read("app.js")
-    picker = _picker_body(js)
-    assert "(blocked && !unknown ? ' disabled' : '')" in picker
-    assert "(quarantined ? ' data-blocked=\"1\"' : '')" in picker
+    picker = _picker_source('assignments.jsx')
+    assert "disabled={image.disabled}" in picker
+    assert "data-blocked={image.quarantined ? '1' : undefined}" in picker
     # the regression this guards: data-blocked gated on `blocked` (render-
     # time-unchecked-only) instead of `quarantined` (every quarantined row)
     assert "blocked ? ' data-blocked" not in picker
@@ -372,108 +243,45 @@ def test_picker_cap_logic_never_re_enables_a_blocked_checkbox():
     quarantine block just because the count dropped, and it is what must
     disable a quarantined row the moment it is unchecked (see the
     render-time-tagging test above)."""
-    js = _read("app.js")
-    picker = _picker_body(js)
-    fn = picker.split("function updateCount() {", 1)[1].split("\n    }", 1)[0]
-    assert "cb.disabled = n >= 10 || cb.dataset.blocked === '1'" in fn
-    assert "input:not(:checked)" in fn
+    picker = _picker_source('assignments-model.mjs')
+    assert "(!checked && (unknown || image?.quarantined || state.chosen.length >= 10))" in picker
+    assert "disabled: state.busy || !state.ready || !state.imagesOk || retained" in picker
 
 
 def test_images_list_populates_the_quarantine_map_alongside_imageIds():
     js = _read("app.js")
-    fn = js.split("async function refreshDevices() {", 1)[1].split(
-        "\n  function syncDeviceFilterOptions() {", 1)[0]
-    assert "imageQuarantined[i.id] = !!i.quarantined" in fn
+    fn = js.split("publish: function (state, policyTicket) {", 1)[1].split(
+        "selectionChanged: updateSelBar", 1)[0]
+    assert "imageQuarantined[image.id] = !!image.quarantined" in fn
+    assert "imageListOk = state.imagesOk" in fn
 
 
 # --- Image detail drawer: release + typed-confirm override ------------------
 
+def _images_source(name):
+    with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui", "src", name)) as stream:
+        return stream.read()
+
+
 def test_drawer_present_with_release_and_override_controls():
-    html = _read("index.html")
-    assert 'id="img-info-panel" class="drawer" hidden' in html
-    drawer = _slice(html, 'id="img-info-panel" class="drawer" hidden', "</div>\n      </section>")
-    assert 'id="ii-release"' in drawer
-    assert 'id="ii-confirm-text"' in drawer
-    assert 'id="ii-release-override"' in drawer
-    assert 'id="ii-override-block" hidden' in drawer
+    component = _images_source("images.jsx")
+    assert 'id="img-info-panel" className="drawer" hidden={!details} role="dialog"' in component
+    for identifier in ("ii-release", "ii-confirm-text", "ii-release-override"):
+        assert 'id="%s"' % identifier in component
+    assert 'id="ii-override-block" hidden={!details?.override}' in component
+    assert 'id="ii-release-block" hidden={!image.quarantined}' in component
+    assert "onClick={() => controller.release(false)}" in component
+    assert "onClick={() => controller.release(true)}" in component
+    assert "details.confirmText !== image.filename" in component
 
 
-def test_release_block_hidden_unless_the_image_is_actually_quarantined():
-    js = _read("app.js")
-    fn = js.split("function openImageInfo(id) {", 1)[1].split(
-        "\n  function closeImageInfo", 1)[0]
-    assert "getElementById('ii-release-block').hidden = !img.quarantined" in fn
-
-
-def test_normal_release_first_then_override_path_on_409_still_mismatching():
-    """Endpoint contract (Task 4): override=False first; a 409 body carries
-    error 'quarantine_still_mismatched', which is when the typed-confirm
-    override path (override=true + confirm_text) is offered."""
-    js = _read("app.js")
-    fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
-        "\n  document.getElementById('ii-release')", 1)[0]
-    assert "'/api/v1/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine'" in fn
-    assert "override: override" in fn
-    assert "confirm_text: confirmText" in fn
-    assert "r.status === 409" in fn
-    assert "quarantine_still_mismatched" in fn
-    # every other failure surfaces the API's own message, not a made-up one
-    assert "body.error ||" in fn
-
-
-def test_successful_release_also_refreshes_devices():
-    """Same reason as the Refresh now / offline upload handlers
-    (refreshDevices().catch(...) alongside refreshImages()): without it,
-    imageQuarantined (the picker's block list) lagged a successful release
-    by up to one periodic devices-view poll interval, during which the
-    just-released image stayed unpickable."""
-    js = _read("app.js")
-    fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
-        "\n  document.getElementById('ii-release')", 1)[0]
-    ok_block = fn.split("if (r.ok) {", 1)[1].split("}", 1)[0]
-    assert "closeImageInfo()" in ok_block
-    assert "refreshImages()" in ok_block
-    assert "refreshDevices().catch(" in ok_block
-
-
-def test_release_button_sends_no_override_the_override_button_sends_the_typed_text():
-    js = _read("app.js")
-    normal = js.split(
-        "document.getElementById('ii-release').addEventListener('click'", 1)[1][:200]
-    assert "attemptReleaseQuarantine(false, '')" in normal
-    override = js.split(
-        "document.getElementById('ii-release-override').addEventListener('click'", 1)[1][:250]
-    assert "attemptReleaseQuarantine(true, document.getElementById('ii-confirm-text').value)" in override
-
-
-def test_release_disables_its_buttons_in_flight_and_surfaces_network_failure():
-    """Adjacent fix (a): mirrors the Refresh now handler's try/finally shape
-    -- both release buttons are disabled for the duration of the request
-    (re-enabled in a finally, so a thrown/network failure never leaves them
-    stuck disabled) and a thrown fetch/json error surfaces a message rather
-    than becoming a silent unhandled rejection."""
-    js = _read("app.js")
-    fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
-        "\n  document.getElementById('ii-release')", 1)[0]
-    assert "releaseBtn.disabled = true" in fn
-    assert "overrideBtn.disabled = true" in fn
-    assert "try {" in fn
-    assert "catch (e) {" in fn
-    finally_block = fn.split("} finally {", 1)[1]
-    assert "releaseBtn.disabled = false" in finally_block
-    assert "overrideBtn.disabled = false" in finally_block
-    catch_block = fn.split("} catch (e) {", 1)[1].split("} finally {", 1)[0]
-    assert "msg.textContent" in catch_block
-
-
-def test_confirm_text_input_is_never_prefilled_with_the_filename():
-    """Typed-confirm means the OPERATOR types it -- pre-filling the input
-    with the expected value would defeat the point of the confirmation."""
-    js = _read("app.js")
-    fn = js.split("function openImageInfo(id) {", 1)[1].split(
-        "\n  function closeImageInfo", 1)[0]
-    assert "getElementById('ii-confirm-text').value = ''" in fn
-    # the bug this guards against: prefilling the confirm box with the
-    # expected answer defeats the point of a TYPED confirmation
-    assert "ii-confirm-text').value = img.filename" not in js
-    assert "ii-confirm-text').value = img" not in js
+def test_images_controller_executes_quarantine_upload_import_and_race_contracts():
+    """Run behavior tests for the migrated workflow, not removed DOM strings."""
+    import shutil
+    import subprocess
+    import pytest
+    if not shutil.which("node"):
+        pytest.skip("Node is required for the Images controller tests")
+    path = os.path.join(os.path.dirname(gui_server.WEBROOT), "console-ui", "tests", "images-controller.test.mjs")
+    result = subprocess.run(["node", "--test", path], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

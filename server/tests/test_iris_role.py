@@ -107,7 +107,7 @@ def test_iris_role_export_import_round_trip_final_wire_units(tmp_path):
         _policy(tmp_path).document["roles"]["defs"]
 
 
-def test_iris_role_export_omits_state_and_define_replacement_clears_it(
+def test_iris_role_export_keeps_state_and_define_replacement_clears_it(
         tmp_path):
     auth = str(tmp_path / "peer-policy.json")
     lkg = str(tmp_path / "peer-policy.lkg.json")
@@ -124,6 +124,19 @@ def test_iris_role_export_omits_state_and_define_replacement_clears_it(
     assert len(rows) == 1
     assert rows[0]["role"] == "boat"
     assert rows[0]["announce_min_interval_s"] == "60"
+    assert rows[0]["seeder_numwant"] == "8"
+
+    restored = tmp_path / "restored-state"
+    restored.mkdir()
+    path = restored / "roles.csv"
+    path.write_text(exported.stdout)
+    imported_preview = _run(restored, "import", str(path), "--dry-run")
+    assert imported_preview.returncode == 0, imported_preview.stderr
+    imported = _run(restored, "import", str(path), "--confirm",
+                    json.loads(imported_preview.stdout)["confirm_token"])
+    assert imported.returncode == 0, imported.stderr
+    assert _policy(restored).document["roles"]["defs"]["boat"]["qos_state"] == {
+        "seeder": {"numwant": 8}}
 
     preview = _run(
         tmp_path, "define", "boat", "--restricted",
@@ -166,7 +179,9 @@ def test_iris_role_import_replacement_clears_all_omitted_state(tmp_path):
     assert exported.returncode == 0, exported.stderr
     assert "qos_state" not in exported.stdout
     source = tmp_path / "roles.csv"
-    source.write_text(exported.stdout)
+    # A deliberately minimal replacement still clears omitted state. Exported
+    # files now carry it, so an unchanged export/import is safe to round-trip.
+    source.write_text("role,restricted\nboat,false\nfiber,false\n")
 
     preview = _run(tmp_path, "import", str(source), "--dry-run")
     assert preview.returncode == 0, preview.stderr

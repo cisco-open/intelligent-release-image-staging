@@ -8,15 +8,21 @@ Production roots are always supplied as public keys. This module never creates
 offline private roots or an administrator, and never contacts inventory devices.
 """
 
+from contextlib import ExitStack
+import fcntl
 import hashlib
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
+import stat
 import subprocess
+import tempfile
+import uuid
 
 from . import ubuntu
 from .state import InstallError, Journal, atomic_write, regular_bytes
@@ -26,6 +32,11 @@ WAITING_APPROVAL = 20
 OWNER_CLAIM = 21
 PRODUCTION_REVIEW = 22
 BASE_CONFIG_KEYS = {"target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls"}
+NATIVE_PACKAGES = ("iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm")
+NATIVE_FILES = frozenset(name + suffix for name in NATIVE_PACKAGES for suffix in ("", ".manifest"))
+FAILURE_TAIL_BYTES = 128 * 1024
+FAILURE_LOG_COUNT = 8
+FAILURE_LOG_BYTES = 2 * FAILURE_TAIL_BYTES + 2048
 
 
 def digest(path):
@@ -34,6 +45,90 @@ def digest(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             value.update(block)
     return value.hexdigest()
+
+
+def _native_hash(path):
+    """Hash bounded immutable regular output without following links."""
+    from . import device_finalize as f
+    path = f._path(path)
+    maximum = 65536 if path.name.endswith(".manifest") else f.MAX_ARCHIVE
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
+            raise InstallError("Native package must be a bounded nonempty regular file")
+        actual, size = f._copy(stream, None, maximum)
+        if size != before.st_size or f._fingerprint(before) != f._fingerprint(os.fstat(stream.fileno())):
+            raise InstallError("Native package changed during verification")
+    f._unchanged(path, before)
+    return actual
+
+
+def _finalized_package_hashes(directory, receipt, finalization_sha256):
+    """Bind all six wrapper files to the selected finalized runtime."""
+    hashes = {name: _native_hash(directory / name) for name in NATIVE_FILES}
+    for name in NATIVE_PACKAGES:
+        raw = regular_bytes(directory / (name + ".manifest"), 65536)
+        if hashlib.sha256(raw).hexdigest() != hashes[name + ".manifest"]:
+            raise InstallError("Native package provenance changed during verification")
+        try:
+            lines = raw.decode("ascii").splitlines()
+            rows = [line.split("=", 1) for line in lines]
+            values = dict(rows)
+        except (UnicodeError, ValueError):
+            raise InstallError("Native package provenance is invalid") from None
+        expected = {"format": "iris-device-wrapper-v2", "wrapper_kind": "xr-appmgr" if name.endswith(".rpm") else "iox",
+                    "wrapper_file": name, "wrapper_sha256": hashes[name],
+                    "platform": "linux/arm64" if name == "iris-arm64.tar" else "linux/amd64",
+                    "canonical_index_digest": receipt["index_digest"],
+                    "canonical_archive_sha256": receipt["archive_sha256"],
+                    "canonical_neutral_source_sha256": receipt["neutral_source_sha256"],
+                    "canonical_finalization_sha256": finalization_sha256}
+        if len(rows) != len(expected) or values != expected:
+            raise InstallError("Native package provenance differs from the selected finalized runtime")
+    return hashes
+
+
+def _publish_prebuilt_packages(source, destination, hashes, *, predecessor=None):
+    """Finish an interrupted publication without replacing existing artifacts."""
+    from . import device_finalize as f
+    destination = f._path(destination)
+    parent = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        held = os.fstat(parent)
+        for name in sorted(NATIVE_FILES):
+            path = destination / name
+            replacing = None
+            if path.exists() or path.is_symlink():
+                before = path.lstat()
+                actual = _native_hash(path)
+                f._unchanged(path, before)
+                if actual == hashes[name]:
+                    continue
+                if predecessor is None or actual != predecessor[name]:
+                    raise InstallError("An existing native artifact differs; preserve it before resuming")
+                replacing = before
+            elif predecessor is not None:
+                raise InstallError("A previous native artifact is missing; preserve the root transition")
+            with tempfile.TemporaryDirectory(prefix=".iris-native-", dir=Path('/proc/self/fd') / str(parent)) as temporary:
+                snapshot = Path(temporary) / name
+                actual, _, _ = f._snapshot(source / name, snapshot, f.MAX_ARCHIVE)
+                if actual != hashes[name]:
+                    raise InstallError("Native package changed before publication")
+                snapshot.chmod(0o444)
+                with snapshot.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                current = destination.lstat()
+                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                    raise InstallError("Native artifacts directory changed during publication")
+                if replacing is None:
+                    f._publish(parent, Path(temporary).name + "/" + name, name)
+                else:
+                    f._unchanged(path, replacing)
+                    os.replace(Path(temporary).name + "/" + name, name, src_dir_fd=parent, dst_dir_fd=parent)
+                    os.fsync(parent)
+    finally:
+        os.close(parent)
 
 
 def clean_env():
@@ -45,30 +140,140 @@ def clean_env():
             "DOCKER_HOST": "unix:///var/run/docker.sock"}
 
 
-def run(command, *, env=None, input=None, timeout=7200, capture=False):
+def _failure_diagnostics(directory, label, stdout, stderr, *, returncode=None, timed_out=False):
+    """Save bounded private evidence without replacing or pruning earlier failures.
+
+    subprocess.run's capture behavior is unchanged: these bounds apply to saved
+    evidence, not the child's in-memory output. Never record argv, env or stdin.
+    """
+    if directory is None:
+        return ""
+    unavailable = "; private diagnostics unavailable (unsafe storage, quota or write failure)"
+    try:
+        path = Path(directory)
+        if os.geteuid() != 0 or not path.is_absolute() or path == Path('/') or '..' in path.parts:
+            return unavailable
+        with ExitStack() as stack:
+            def opened(name, parent=None):
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                stack.callback(os.close, fd)
+                info = os.fstat(fd)
+                if info.st_uid != 0 or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+                    raise InstallError('Unsafe private diagnostics parent')
+                return fd
+
+            parent = opened('/')
+            for part in path.parts[1:]:
+                parent = opened(part, parent)
+            if stat.S_IMODE(os.fstat(parent).st_mode) != 0o700:
+                return unavailable
+            try:
+                os.mkdir('command-failures', mode=0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+            logs = opened('command-failures', parent)
+            if stat.S_IMODE(os.fstat(logs).st_mode) != 0o700:
+                return unavailable
+            fcntl.flock(logs, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            entries = os.listdir(logs)
+            if len(entries) >= FAILURE_LOG_COUNT:
+                return unavailable
+            for name in entries:
+                info = os.stat(name, dir_fd=logs, follow_symlinks=False)
+                if (not re.fullmatch(r'failure-[a-f0-9]{32}\.log', name)
+                        or not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > FAILURE_LOG_BYTES):
+                    return unavailable
+            stdout, stderr = stdout or b'', stderr or b''
+            header = {'command': label, 'returncode': returncode, 'timed_out': timed_out,
+                      'stdout_bytes': len(stdout), 'stderr_bytes': len(stderr),
+                      'stdout_tail_truncated': len(stdout) > FAILURE_TAIL_BYTES,
+                      'stderr_tail_truncated': len(stderr) > FAILURE_TAIL_BYTES}
+            data = (b'SENSITIVE: command output may contain credentials. Do not publish this file.\n'
+                    + json.dumps(header, sort_keys=True).encode() + b'\n--- stdout tail ---\n'
+                    + stdout[-FAILURE_TAIL_BYTES:] + b'\n--- stderr tail ---\n' + stderr[-FAILURE_TAIL_BYTES:])
+            if len(data) > FAILURE_LOG_BYTES:
+                return unavailable
+            name = 'failure-' + uuid.uuid4().hex + '.log'
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=logs)
+            with os.fdopen(fd, 'wb') as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
+                    raise InstallError('Unsafe private diagnostics file')
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(logs)
+            os.fsync(parent)
+        # JSON quoting prevents terminal control characters in a custom state path.
+        location = json.dumps(str(path / 'command-failures' / name), ensure_ascii=True)
+        return '; private diagnostics: ' + location + ' (sensitive; root only; do not publish)'
+    except (OSError, InstallError):
+        return unavailable
+
+
+def run(command, *, env=None, input=None, timeout=7200, capture=False, diagnostics_dir=None):
     label = Path(command[0]).name
+    if label not in {'docker', 'bash', 'kubectl', 'k3s', 'skopeo', 'apt-get', 'dpkg-query',
+                     'ssh', 'ssh-keygen', 'openssl', 'age-keygen', 'ip', 'systemctl'}:
+        label = 'installer command'
     if label == "docker":
         actions = ("compose", "container", "volume", "network", "image", "build", "run", "up", "exec", "inspect", "ls", "config")
         label += " " + " ".join(part for part in command[1:] if part in actions)
-    elif label == "bash" and len(command) > 1:
-        label += " " + Path(command[1]).name
     print(">> " + label, flush=True)
     try:
         result = subprocess.run(command, input=input, env=env or clean_env(),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
-        raise InstallError("Command timed out; installation state was retained for resume") from exc
-    except OSError as exc:
-        raise InstallError("Required command is unavailable: " + command[0]) from exc
+        evidence = _failure_diagnostics(diagnostics_dir, label, exc.stdout, exc.stderr, timed_out=True)
+        raise InstallError("Command timed out; installation state was retained for resume" + evidence) from None
+    except OSError:
+        raise InstallError("Required command is unavailable: " + label) from None
     if result.returncode:
         # Bootstrap/build tools can print tokens and private paths. Do not copy
         # their unrestricted output into a journal or terminal support log.
-        raise InstallError("Command failed: " + label + " (exit " + str(result.returncode) + "); state retained, no reset performed")
+        evidence = _failure_diagnostics(diagnostics_dir, label, result.stdout, result.stderr,
+                                        returncode=result.returncode)
+        raise InstallError("Command failed: " + label + " (exit " + str(result.returncode)
+                           + "); state retained, no reset performed" + evidence)
     return result.stdout if capture else b""
 
 
+def observability_enabled(config):
+    """Old journals omit this opt-in; never coerce a stored string or integer."""
+    value = config.get('observability', False)
+    if type(value) is not bool:
+        raise InstallError('Observability must be an explicit boolean')
+    return value
+
+
+def origin_egress_ips(config):
+    """Retain the explicit outbound addresses across maintenance and resume."""
+    values = config.get('origin_egress_ips', [])
+    if (not isinstance(values, list) or len(values) > 8
+            or any(not isinstance(value, str) for value in values)
+            or len(set(values)) != len(values)):
+        raise InstallError('Origin egress needs up to eight distinct IPv4 addresses')
+    for value in values:
+        try:
+            address = ipaddress.IPv4Address(value)
+        except (ValueError, TypeError):
+            raise InstallError('Origin egress must be a concrete IPv4 address') from None
+        if (str(address) != value or address.is_unspecified or address.is_multicast
+                or address.is_loopback or address.is_link_local or address.is_reserved):
+            raise InstallError('Origin egress must be a routable unicast IPv4 address')
+    return list(values)
+
+
 def validate_config(config):
+    if isinstance(config, dict) and 'origin_egress_ips' in config:
+        origin_egress_ips(config)
+        config = {key: value for key, value in config.items() if key != 'origin_egress_ips'}
+    if isinstance(config, dict) and 'observability' in config:
+        observability_enabled(config)
+        config = {key: value for key, value in config.items() if key != 'observability'}
     if isinstance(config, dict) and 'image_root' in config:
         from .image_storage import validate_name
         validate_name(config['image_root'])
@@ -131,15 +336,24 @@ def read_roots(directory):
     return roots
 
 
+def check_tcp_endpoint(host, port):
+    """Permit a service restart through TIME_WAIT, but never replace a listener."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+            # Bind alone can succeed beside another reusable bound socket.
+            # Probe the operation the new service actually needs as well.
+            sock.listen(1)
+        except OSError as exc:
+            raise InstallError(f"Address unavailable or port occupied: {host}:{port}; nothing will be replaced") from exc
+
+
 def port_preflight(config):
     endpoints = [(config["host"], port) for port in (6969, 8443, 8000, 6881, 9101)]
     endpoints.append((config["console_bind"], config["console_port"]))
     for host, port in endpoints:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind((host, port))
-            except OSError as exc:
-                raise InstallError(f"Address unavailable or port occupied: {host}:{port}; nothing will be replaced") from exc
+        check_tcp_endpoint(host, port)
 
 
 class DockerInstall:
@@ -161,7 +375,10 @@ class DockerInstall:
                         IOXCLIENT=str(self.base / "bin/ioxclient"))
 
     def command(self, command, **kwargs):
-        return self.runner([str(arg) for arg in command], env=self.env, **kwargs)
+        if self.runner is run:
+            kwargs['diagnostics_dir'] = self.base
+        kwargs.setdefault('env', self.env)
+        return self.runner([str(arg) for arg in command], **kwargs)
 
     def compose(self, *args, **kwargs):
         return self.command(["docker", "compose", "-p", self.config["instance"],
@@ -173,6 +390,17 @@ class DockerInstall:
     def python(self, code, *args):
         code = "import sys; sys.path.insert(0,'/opt/iris/server'); " + code
         return self.execute("python3", "-I", "-B", "-c", code, *args, capture=True)
+
+    def prebuilt(self):
+        from .prebuilt_install import selected
+        return selected(self.journal.document)
+
+    def provision_host(self):
+        if self.prebuilt():
+            from .prebuilt_dependencies import provision
+            provision(self.journal, self._verified_kit, runner=self.command)
+        else:
+            ubuntu.provision(self.command)
 
     def verify_inputs(self):
         manifest = self.journal.document["source_manifest"]
@@ -189,6 +417,15 @@ class DockerInstall:
                   for name, data in read_roots(self.base / "roots").items()}
         if actual != expected:
             raise InstallError("Deployment root fingerprints changed; refusing to resume")
+        from .prebuilt_install import bind_source, validate_packaging_tool, verify_selected
+        self._verified_kit = verify_selected(self.journal)
+        if self._verified_kit is not None:
+            bind_source(self._verified_kit, manifest, self.base)
+            from .guest_inputs import verify_guest_inputs
+            verify_guest_inputs(self._verified_kit, self.source, manifest)
+            if 'prebuilt-package-generated' not in self.journal.document['completed']:
+                validate_packaging_tool(self._verified_kit,
+                                        self.journal.document.get('prebuilt_ioxclient'), self.base)
 
     def prepare(self):
         from .image_storage import image_root
@@ -225,17 +462,19 @@ class DockerInstall:
         os.chown(identity, 10001, 10001)
         settings = {
             "IRIS_HOST_IP": self.config["host"],
+            "IRIS_ORIGIN_EGRESS_IPS": ",".join(origin_egress_ips(self.config)),
             "IRIS_AGE_KEY_FILE_HOST": str(identity),
             "IRIS_AGE_RECIPIENTS": public + "," + self.config["recovery_recipient"],
             "IRIS_GUI_PUBLISH": str(self.config["console_port"]),
             "IRIS_CONSOLE_URL": f'https://{self.config["console_bind"]}:{self.config["console_port"]}/',
             "IRIS_PEER_TLS_MODE": self.config["peer_tls"],
+            "IRIS_OBSERVABILITY": "1" if observability_enabled(self.config) else "",
             "IRIS_IMAGE_ROOT": str(import_root),
             "IRIS_ARTIFACTS_HOST_DIR": str(self.base / "artifacts"),
         }
         # Empty explicit env file prevents automatic discovery of server/.env.
         atomic_write(self.base / "compose.env", b"# managed by irisctl\n")
-        data = self.runner(["docker", "compose", "--env-file", str(self.base / "compose.env"),
+        data = self.command(["docker", "compose", "--env-file", str(self.base / "compose.env"),
                             "-p", self.config["instance"], "-f", str(self.source / "server/docker-compose.yml"),
                             "config", "--format", "json"], env=dict(self.env, **settings), capture=True)
         compose = json.loads(data)
@@ -252,6 +491,11 @@ class DockerInstall:
                 IRIS_RUNTIME_LAYOUT=self.config["target"],
                 IRIS_RUNTIME_NAME=spec["container_name"], IRIS_RUNTIME_HOST=self.config["host"])
             spec["image"] = "iris-installer/" + self.config["instance"] + "-" + suffix + ":" + self.journal.document["id"]
+            if self.prebuilt():
+                from .prebuilt_install import image_tag
+                spec['image'] = image_tag(self, service)
+                spec.pop('build', None)
+                spec['pull_policy'] = 'never'
             spec.setdefault("labels", {})["com.cisco.iris.installer"] = self.journal.document["id"]
             for port in spec.get("ports", []):
                 port["host_ip"] = self.config["host"] if service == "iris" else self.config["console_bind"]
@@ -275,6 +519,10 @@ class DockerInstall:
                         raise InstallError("Existing resource is not owned by this installation; refusing adoption")
 
     def build(self):
+        if self.prebuilt():
+            from .prebuilt_install import acquire_images
+            acquire_images(self, json.loads(regular_bytes(self.compose_file))['services'])
+            return
         saved = self.journal.document["completed"].get("images")
         if saved:
             for image, expected in saved.items():
@@ -338,7 +586,10 @@ class DockerInstall:
         self.journal.checkpoint("signing", True)
         return True
 
-    def packages(self):
+    def acquire_packages(self):
+        """Acquire local native wrappers; each topology retains runtime checks."""
+        if self.prebuilt():
+            return self._acquire_prebuilt_packages()
         if "packages" not in self.journal.document["completed"]:
             self.command(["bash", self.source / "tools/get-ioxclient.sh", self.base / "bin"])
             for arch in ("arm64", "amd64"):
@@ -348,6 +599,138 @@ class DockerInstall:
             self.journal.checkpoint("packages", {
                 path.name: digest(path) for name in ("iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm")
                 for path in (self.base / "artifacts" / name, self.base / "artifacts" / (name + ".manifest"))})
+
+    def _acquire_prebuilt_packages(self):
+        from . import device_context as context, device_finalize as f
+        from .prebuilt_device import prepare_runtime
+        from .prebuilt_install import _kit
+        from .prebuilt_trust import predecessor_packages
+        tool = self.journal.document.get("prebuilt_ioxclient")
+        if (not isinstance(tool, str) or not Path(tool).is_absolute()
+                or any(ord(char) < 32 for char in tool)):
+            raise InstallError("Prebuilt packaging requires the explicitly supplied local ioxclient path")
+        from .packaging_inputs import prepare_packaging_inputs
+        kit = _kit(self)
+        completed = self.journal.document["completed"]
+        artifacts = self.base / "artifacts"
+        predecessor = predecessor_packages(self)
+        with ExitStack() as scope:
+            inputs_fd = os.open(self.base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            scope.callback(os.close, inputs_fd)
+            temporary = scope.enter_context(tempfile.TemporaryDirectory(prefix="prebuilt-package-inputs-",
+                dir=Path("/proc/self/fd") / str(inputs_fd)))
+            scratch = Path(temporary).resolve()
+            inputs = prepare_packaging_inputs(kit, scratch / "tools")
+            if inputs.kit_receipt != kit.receipt():
+                raise InstallError("Packaging inputs differ from the selected authenticated kit")
+            runtime, finalization_sha256 = prepare_runtime(self)
+            raw = regular_bytes(runtime / context.RECEIPT, f.MAX_JSON)
+            if hashlib.sha256(raw).hexdigest() != finalization_sha256:
+                raise InstallError("Finalized runtime receipt changed before packaging")
+            receipt = context.validate_receipt(f._load(raw))
+            intent = {"schema": 1, "kit": kit.receipt(), "finalization_sha256": finalization_sha256,
+                      "appmgr_sha256": inputs.appmgr_sha256, "appmgr_revision": inputs.appmgr_revision,
+                      "ioxclient_sha256": inputs.ioxclient_sha256}
+            previous = completed.get("prebuilt-package-intent")
+            if previous is not None and previous != intent:
+                raise InstallError("Recorded native packaging inputs changed; preserve the journal")
+            if previous is None:
+                if ("packages" in completed or "prebuilt-package-generated" in completed
+                        or (predecessor is None and any((artifacts / name).exists() or (artifacts / name).is_symlink()
+                                                      for name in NATIVE_FILES))):
+                    raise InstallError("Unrecorded native artifacts exist; refusing to replace or adopt them")
+                if predecessor is not None and {name: _native_hash(artifacts / name) for name in NATIVE_FILES} != predecessor:
+                    raise InstallError("Published native artifacts differ from the retained root predecessor")
+                # Verify the licensed local program before recording build intent.
+                local_tool = context.prepare_ioxclient(tool, scratch / "ioxclient", expected_sha256=inputs.ioxclient_sha256)
+                self.journal.checkpoint("prebuilt-package-intent", intent)
+            else:
+                local_tool = None
+            generated = completed.get("prebuilt-package-generated")
+            if "prebuilt-package-generated" not in completed:
+                if "packages" in completed:
+                    raise InstallError("Recorded native package generation is missing; refusing to rebuild")
+                if local_tool is None:
+                    local_tool = context.prepare_ioxclient(tool, scratch / "ioxclient", expected_sha256=inputs.ioxclient_sha256)
+                environment = dict(self.env, IOXCLIENT=str(local_tool))
+                for key in ("IRIS_INSTRUCTION_ROOTS_DIR", "IOXCLIENT_HOME", "APPMGR_BUILD_CMD"):
+                    environment.pop(key, None)
+                def command(arguments):
+                    return self.command(arguments, env=environment)
+                # Pin generated bytes before serving them. An unrecorded
+                # interrupted directory is never adopted: a later attempt
+                # generates fresh bytes in a different private directory.
+                base_fd = os.open(self.base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                anchored_output, retain = None, False
+                try:
+                    held = os.fstat(base_fd)
+                    anchored_output = Path(tempfile.mkdtemp(prefix="prebuilt-native-packages-",
+                        dir=Path("/proc/self/fd") / str(base_fd)))
+                    output = anchored_output.resolve()
+                    finalized = ["--finalized-dir", runtime, "--finalization-sha256", finalization_sha256]
+                    for arch in ("arm64", "amd64"):
+                        command(["bash", self.source / "tools/stage-iox-package.sh", "--arch", arch,
+                                 "--artifacts-dir", output, *finalized, "--ioxclient-sha256", inputs.ioxclient_sha256])
+                    command(["bash", self.source / "tools/build-xr-package.sh", "--out", output, *finalized,
+                             "--appmgr-archive", inputs.appmgr_archive, "--appmgr-sha256", inputs.appmgr_sha256,
+                             "--appmgr-revision", inputs.appmgr_revision])
+                    if set(path.name for path in output.iterdir()) != NATIVE_FILES:
+                        raise InstallError("Generated native package directory contains unexpected files")
+                    hashes = _finalized_package_hashes(output, receipt, finalization_sha256)
+                    for path in output.iterdir():
+                        path.chmod(0o444)
+                        with path.open("rb") as stream:
+                            os.fsync(stream.fileno())
+                    _sync_directory(output)
+                    os.fsync(base_fd)
+                    current = self.base.lstat()
+                    if (self.base.resolve() != self.base
+                            or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)):
+                        raise InstallError("Installation directory changed during native packaging")
+                    generated = {"schema": 1, "directory": output.name, "hashes": hashes}
+                    # A checkpoint can persist and then raise. Preserve its
+                    # input directory in either case; only its journal record
+                    # can authorize reuse on resume.
+                    retain = True
+                    self.journal.checkpoint("prebuilt-package-generated", generated)
+                finally:
+                    if anchored_output is not None and not retain:
+                        shutil.rmtree(anchored_output)
+                    os.close(base_fd)
+            if (not isinstance(generated, dict) or set(generated) != {"schema", "directory", "hashes"}
+                    or type(generated["schema"]) is not int or generated["schema"] != 1
+                    or not isinstance(generated["directory"], str)
+                    or not re.fullmatch(r"prebuilt-native-packages-[a-z0-9_]{8}", generated["directory"])
+                    or not isinstance(generated["hashes"], dict) or set(generated["hashes"]) != NATIVE_FILES
+                    or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                           for value in generated["hashes"].values())):
+                raise InstallError("Recorded native package generation is invalid")
+            cache = self.base / generated["directory"]
+            if not cache.exists() and not cache.is_symlink():
+                raise InstallError("Recorded native package cache is missing; refusing to rebuild")
+            info = cache.lstat()
+            if (cache.resolve() != cache or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700 or set(path.name for path in cache.iterdir()) != NATIVE_FILES):
+                raise InstallError("Native package cache contains unexpected files or permissions")
+            hashes = _finalized_package_hashes(cache, receipt, finalization_sha256)
+            if generated["hashes"] != hashes:
+                raise InstallError("Recorded native package cache changed; refusing to reuse it")
+            if "packages" in completed:
+                if completed["packages"] != hashes or _finalized_package_hashes(artifacts, receipt, finalization_sha256) != hashes:
+                    raise InstallError("Published native package checkpoint changed")
+                return
+            if predecessor is None:
+                _publish_prebuilt_packages(cache, artifacts, hashes)
+            else:
+                if predecessor_packages(self) != predecessor:
+                    raise InstallError("Retained native predecessor changed before publication")
+                _publish_prebuilt_packages(cache, artifacts, hashes, predecessor=predecessor)
+            if _finalized_package_hashes(artifacts, receipt, finalization_sha256) != hashes:
+                raise InstallError("Published native packages changed during verification")
+            self.journal.checkpoint("packages", hashes)
+
+    def packages(self):
+        self.acquire_packages()
         for name, expected in self.journal.document["completed"]["packages"].items():
             if digest(self.base / "artifacts" / name) != expected:
                 raise InstallError("Published package changed; refusing to report installation complete")
@@ -392,18 +775,22 @@ class DockerInstall:
         assert_no_pending_restore(self.journal)
         operation = self.base / 'credential-operation.json'
         if operation.exists() or operation.is_symlink():
+            command = 'sudo irisctl maintenance --state-dir ' + shlex.quote(str(self.base))
+            recovery_hint = (
+                f' Run `{command} status`, then select the recorded operation with '
+                f'`{command} recover --job-id <operation-id> --allow-downtime`.')
             try:
                 authority = json.loads(regular_bytes(operation))
             except (OSError, ValueError, InstallError):
-                raise InstallError('Credential maintenance authority is unreadable; preserve it and use the host maintenance UI') from None
+                raise InstallError('Credential maintenance authority is unreadable; preserve the journal.' + recovery_hint) from None
             terminal = isinstance(authority, dict) and (
                 authority.get('phase') == 'rotated' or (
                     authority.get('phase') == 'refused' and authority.get('mutations_admitted') is False))
             if (not terminal
                     or authority.get('instance_id') != self.journal.document['id']):
-                raise InstallError('Recover the approved credential operation in the host maintenance UI before resuming installation')
+                raise InstallError('Recover the approved credential operation before resuming installation.' + recovery_hint)
         self.verify_inputs()
-        ubuntu.provision(self.command)
+        self.provision_host()
         self.verify_resource_ownership()
         self.command(["bash", self.source / "tools/check-host-time.sh"], timeout=30)
         self.prepare()
@@ -415,8 +802,8 @@ class DockerInstall:
         return self.finish()
 
 
-def snapshot(source, destination):
-    """Copy only declared distribution inputs, never an operator's dirty tree."""
+def source_inventory(source):
+    """Validate the declared distribution inventory before reserving inputs."""
     source = Path(source).resolve()
     manifest_path = source / "INSTALLER-SOURCE.json"
     if not manifest_path.is_file():
@@ -424,27 +811,177 @@ def snapshot(source, destination):
     manifest = json.loads(regular_bytes(manifest_path, 8 * 1024 * 1024))
     if not isinstance(manifest, dict) or not manifest:
         raise InstallError("Invalid source inventory")
-    destination.mkdir(mode=0o755)
-    destination.chmod(0o755)
     for name, expected in manifest.items():
+        if not isinstance(name, str) or not isinstance(expected, str):
+            raise InstallError("Unsafe source inventory entry")
         relative = Path(name)
-        if (relative.is_absolute() or ".." in relative.parts or str(relative) != name
+        if (relative.is_absolute() or not relative.parts or ".." in relative.parts or str(relative) != name
                 or not re.fullmatch(r"[0-9a-f]{64}", expected)):
             raise InstallError("Unsafe source inventory entry")
-        path = source / relative
-        if path.resolve() != path or not path.is_file() or digest(path) != expected:
-            raise InstallError("Source inventory mismatch: " + name)
-        output = destination / relative
-        output.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        directory = output.parent
-        while directory != destination:
-            directory.chmod(0o755)
-            directory = directory.parent
-        shutil.copyfile(path, output)
-        output.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
-        if digest(output) != expected:
-            raise InstallError("Source changed during snapshot")
     return manifest
+
+
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _public_directory(path):
+    path = Path(path)
+    if path.resolve() != path:
+        raise InstallError("Installation inputs must not traverse symlinks")
+    path.mkdir(mode=0o755, exist_ok=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise InstallError("Installation input directory has changed ownership")
+    path.chmod(0o755)
+    _sync_directory(path)
+    _sync_directory(path.parent)
+
+
+def _input_buffer(path):
+    """Open only the caller-owned scratch file reserved by initialization."""
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        os.close(fd)
+        raise InstallError("Unsafe initialization buffer; preserve it for inspection")
+    return os.fdopen(fd, 'r+b')
+
+
+def _publish_input(source, output, expected, mode, buffer):
+    """Verify before rename so an interrupted copy never leaves a partial input."""
+    if output.exists() or output.is_symlink():
+        if (output.resolve() != output or not output.is_file()
+                or output.stat().st_uid != os.geteuid()
+                or output.stat().st_nlink != 1 or digest(output) != expected):
+            raise InstallError("Completed installation input changed; preserve it: " + str(output))
+    else:
+        with _input_buffer(buffer) as temporary:
+            temporary.seek(0)
+            temporary.truncate()
+            shutil.copyfileobj(source, temporary)
+            temporary.flush()
+            if digest(buffer) != expected:
+                raise InstallError("Source changed during snapshot")
+            os.fsync(temporary.fileno())
+        os.replace(buffer, output)
+    output.chmod(mode)
+    with output.open('rb') as published:
+        os.fsync(published.fileno())
+    for directory in {output.parent, Path(buffer).parent}:
+        _sync_directory(directory)
+
+
+def snapshot(source, destination, *, expected_manifest=None, buffer=None):
+    """Copy verified inputs; a pinned initialization may resume complete files."""
+    source = Path(source).resolve()
+    destination = Path(destination).absolute()
+    manifest = source_inventory(source)
+    if expected_manifest is not None and manifest != expected_manifest:
+        raise InstallError("Installer source inventory changed; use the original source package")
+    if expected_manifest is None:
+        destination.mkdir(mode=0o755)
+    _public_directory(destination)
+    expected_dirs = {str(parent) for name in manifest for parent in Path(name).parents}
+    for path in destination.rglob('*'):
+        name = str(path.relative_to(destination))
+        if path.is_symlink() or (name not in manifest and not (path.is_dir() and name in expected_dirs)):
+            raise InstallError("Unexpected snapshot input; preserve it: " + name)
+    owned_buffer = buffer is None
+    if owned_buffer:
+        fd, buffer = tempfile.mkstemp(prefix='.snapshot-', dir=destination.parent)
+        os.close(fd)
+    try:
+        for name, expected in manifest.items():
+            relative = Path(name)
+            path = source / relative
+            if path.resolve() != path or not path.is_file() or digest(path) != expected:
+                raise InstallError("Source inventory mismatch: " + name)
+            output = destination / relative
+            for parent in reversed(relative.parents):
+                if str(parent) != '.':
+                    _public_directory(destination / parent)
+            mode = 0o755 if path.stat().st_mode & 0o111 else 0o644
+            with path.open('rb') as data:
+                _publish_input(data, output, expected, mode, buffer)
+    finally:
+        if owned_buffer and Path(buffer).exists():
+            Path(buffer).unlink()
+    return manifest
+
+
+def _initialization_inputs(journal):
+    """Validate reserved public identities before dependency or snapshot writes."""
+    record = journal.document.get('initialization')
+    if record is None:
+        if journal.document.get('state') == 'INITIALIZING':
+            raise InstallError('Initialization intent is missing; preserve the journal')
+        return None
+    if (journal.document.get('state') != 'INITIALIZING' or journal.document['completed']
+            or not isinstance(record, dict) or set(record) != {'source', 'public_roots'}
+            or not isinstance(record['source'], str) or not Path(record['source']).is_absolute()
+            or not isinstance(record['public_roots'], dict) or len(record['public_roots']) != 2
+            or not isinstance(journal.document.get('source_manifest'), dict)
+            or not journal.document['source_manifest']):
+        raise InstallError('Invalid initialization intent; preserve the journal')
+    roots = record['public_roots']
+    if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+\.pub', name)
+           or not isinstance(data, str) or not data.startswith('ssh-ed25519 ')
+           for name, data in roots.items()):
+        raise InstallError('Invalid public roots in initialization intent')
+    try:
+        root_bytes = {name: data.encode('ascii') for name, data in roots.items()}
+    except UnicodeEncodeError:
+        raise InstallError('Invalid public roots in initialization intent') from None
+    expected_roots = {name: hashlib.sha256(data).hexdigest() for name, data in root_bytes.items()}
+    if expected_roots != journal.document.get('root_digests'):
+        raise InstallError('Initialization root fingerprints changed; preserve the journal')
+    return record, root_bytes, expected_roots
+
+
+def complete_initialization(journal):
+    """Resume only inputs explicitly reserved before the first snapshot write."""
+    import io
+    inputs = _initialization_inputs(journal)
+    if inputs is None:
+        return
+    record, root_bytes, expected_roots = inputs
+    buffer = journal.directory / '.initial-input-buffer'
+    snapshot(record['source'], journal.directory / 'source',
+             expected_manifest=journal.document['source_manifest'], buffer=buffer)
+    directory = journal.directory / 'roots'
+    _public_directory(directory)
+    if any(path.name not in root_bytes for path in directory.iterdir()):
+        raise InstallError('Unexpected roots input; preserve it for inspection')
+    for name, data in root_bytes.items():
+        _publish_input(io.BytesIO(data), directory / name, expected_roots[name], 0o644, buffer)
+        run(['ssh-keygen', '-lf', str(directory / name)], capture=True)
+    read_roots(directory)
+    if buffer.exists() or buffer.is_symlink():
+        with _input_buffer(buffer):
+            pass
+        buffer.unlink()
+    journal.document.pop('initialization')
+    journal.document['state'] = 'INITIALIZED'
+    journal.save()
+
+
+def _verify_initialization_source(journal):
+    """Check reserved bytes before packages change, even before snapshot exists."""
+    record, _, _ = _initialization_inputs(journal)
+    source = Path(record['source'])
+    manifest = journal.document['source_manifest']
+    if source.resolve() != source or source_inventory(source) != manifest:
+        raise InstallError('Reserved initialization source changed before dependency provisioning')
+    for name, expected in manifest.items():
+        path = source / name
+        if path.resolve() != path or not path.is_file() or digest(path) != expected:
+            raise InstallError('Reserved initialization source bytes changed before dependency provisioning')
 
 
 def installation(journal, runner=None):
@@ -460,12 +997,38 @@ def installation(journal, runner=None):
     return DockerInstall(journal) if runner is None else DockerInstall(journal, runner=runner)
 
 
+def _new_host_preflight(config, prebuilt, roots):
+    """Repeat ownership and public-key checks until initialization completes."""
+    if config['target'] == 'docker-split':
+        from .split_deploy import preflight
+        preflight(config, runner=run)
+    elif config['target'] == 'kubernetes':
+        from .kube_deploy import preflight
+        if not prebuilt:
+            ubuntu.provision_kubernetes_client(run)
+        preflight(config, runner=run)
+    else:
+        port_preflight(config)
+    for kind in ('container', 'volume', 'network'):
+        command = ['docker', kind, 'ls', '-q']
+        if kind == 'container':
+            command.append('-a')
+        matches = run([*command, '--filter', 'label=com.docker.compose.project=' + config['instance']], capture=True)
+        if matches.strip():
+            raise InstallError('Compose instance already has resources; adoption is not implemented')
+    for data in roots.values():
+        run(['ssh-keygen', '-lf', '-'], input=data, capture=True)
+
+
 def start(args):
     if os.geteuid() != 0:
         raise InstallError("Run the installer with sudo; dependency and service setup require root")
     ubuntu.check_platform()
     config = {name: getattr(args, name) for name in (
         "target", "instance", "host", "console_bind", "console_port", "recovery_recipient", "peer_tls")}
+    config['observability'] = getattr(args, 'observability', False)
+    if getattr(args, 'origin_egress_ip', []):
+        config['origin_egress_ips'] = list(args.origin_egress_ip)
     if getattr(args, 'image_root', None) is not None:
         config['image_root'] = str(args.image_root)
     if args.target == 'docker-split':
@@ -488,36 +1051,39 @@ def start(args):
             raise InstallError("An installation journal exists; use irisctl resume, not install")
         if any(p.name != "lock" for p in journal.directory.iterdir()):
             raise InstallError("State directory is not empty; refusing to adopt or overwrite it")
-        ubuntu.provision(run)
-        if config['target'] == 'docker-split':
-            from .split_deploy import preflight
-            preflight(config, runner=run)
-        elif config['target'] == 'kubernetes':
-            from .kube_deploy import preflight
-            ubuntu.provision_kubernetes_client(run)
-            preflight(config, runner=run)
-        else:
-            port_preflight(config)
-        # Refuse adoption, even if an old project's containers are stopped.
-        for kind in ("container", "volume", "network"):
-            command = ["docker", kind, "ls", "-q"]
-            if kind == "container":
-                command.append("-a")
-            matches = run([*command, "--filter", "label=com.docker.compose.project=" + config["instance"]], capture=True)
-            if matches.strip():
-                raise InstallError("Compose instance already has resources; adoption is not implemented")
-        manifest = snapshot(args.source, journal.directory / "source")
-        (journal.directory / "roots").mkdir(mode=0o755)
-        (journal.directory / "roots").chmod(0o755)
-        for name, data in roots.items():
-            atomic_write(journal.directory / "roots" / name, data, 0o644)
-            run(["ssh-keygen", "-lf", str(journal.directory / "roots" / name)], capture=True)
+        from .prebuilt_install import prepare_selection, selected
+        manifest = source_inventory(args.source)
+        inputs = prepare_selection(args, manifest, journal.directory)
+        prebuilt = selected(inputs)
+        dependencies = prebuilt and inputs['input_selection']['kit']['profile'] == 'ubuntu-dependencies'
         import uuid
         journal.document = {"schema": 1, "id": str(uuid.uuid4()), "config": config,
+                            **inputs,
                             "source_manifest": manifest,
                             "root_digests": {name: hashlib.sha256(data).hexdigest() for name, data in roots.items()},
-                            "completed": {}, "state": "INITIALIZED"}
-        journal.save()
+                            "completed": {}, "state": "INITIALIZING",
+                            "initialization": {"source": str(Path(args.source).resolve()),
+                                               "public_roots": {name: data.decode('ascii') for name, data in roots.items()}}}
+        if dependencies:
+            # Reserve original identities and authority before an accepted
+            # dependency plan can mutate the host.
+            journal.document['dependency_changes_accepted'] = True
+            journal.save()
+            _verify_initialization_source(journal)
+            from .prebuilt_install import verify_selected
+            from .prebuilt_dependencies import provision
+            provision(journal, verify_selected(journal), accept_changes=True, runner=run)
+        elif prebuilt:
+            client = journal.document.get('prebuilt_kubectl')
+            if config['target'] == 'kubernetes' and client is not None:
+                ubuntu.provision_kubernetes_client(run, local_source=client)
+            ubuntu.preflight_prebuilt(config['target'])
+        else:
+            ubuntu.provision(run)
+        _new_host_preflight(config, prebuilt, roots)
+        if not dependencies:
+            journal.save()
+        complete_initialization(journal)
         return installation(journal).resume()
 
 
@@ -529,4 +1095,20 @@ def resume(args):
             raise InstallError("No installation journal exists")
         from .restore import assert_no_pending_restore
         assert_no_pending_restore(journal)
+        validate_config(journal.document['config'])
+        if journal.document.get('state') == 'INITIALIZING':
+            from .prebuilt_install import bind_source, validate_packaging_tool, verify_selected
+            reserved = _initialization_inputs(journal)
+            kit = verify_selected(journal)
+            if kit is not None:
+                bind_source(kit, journal.document['source_manifest'], journal.directory)
+                from .guest_inputs import verify_guest_inputs
+                verify_guest_inputs(kit, Path(reserved[0]['source']), journal.document['source_manifest'])
+                validate_packaging_tool(kit, journal.document.get('prebuilt_ioxclient'), journal.directory)
+                if kit.profile == 'ubuntu-dependencies':
+                    from .prebuilt_dependencies import provision
+                    _verify_initialization_source(journal)
+                    provision(journal, kit, runner=run)
+                    _new_host_preflight(journal.document['config'], True, reserved[1])
+        complete_initialization(journal)
         return installation(journal).resume(args.certificate)

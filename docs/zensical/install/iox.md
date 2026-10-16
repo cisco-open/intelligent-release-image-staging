@@ -8,8 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Use this page for a device that runs the device agent as an IOx application:
 Industrial Ethernet switches with app hosting, Catalyst 8000 series routers, and
-Catalyst 9000 series switches with app-hosting storage. On Catalyst 9000 series
-switches the agent normally runs in [Guest Shell](guest-shell.md), and
+Catalyst 9000 series switches with an app-hosting SSD and shared folder. On
+Catalyst 9000 series switches the agent normally runs in [Guest Shell](guest-shell.md), and
 [Supported devices and platforms](supported-devices.md) says which path each
 series takes.
 
@@ -29,13 +29,17 @@ series takes.
 
 ## Native package signing
 
+For Industrial Ethernet switches on IOS XE 17.15.x, package verification accepts
+only Cisco-signed applications. See [Cisco's release notes](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_15/17-15-x-release-notes-ie3x00-ess3300.html).
+Your own certificates and IRIS instruction keys cannot replace the Cisco
+package signature.
+
 Both IOx builds produce unsigned packages with SHA512 entries in `package.mf`.
-For native Polaris signing, send these completed packages to your authorized
+For native Polaris signing, send these completed packages to your authorized Cisco
 signing service. It signs the exact `package.mf` bytes and adds `package.sign`.
 The manifest excludes itself, `package.sign` and `package.cert`. Keep signed
 packages unchanged, refresh their provenance sidecars after signing, and verify
-them on the target device with package verification enabled. IRIS instruction
-keys are separate from native package signing.
+them on the target device with package verification enabled.
 
 ## Signature verification is a device-wide setting { #device-global-package-verification }
 

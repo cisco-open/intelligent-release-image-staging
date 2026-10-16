@@ -1171,7 +1171,7 @@ def _initialize_if_absent(auth_path, lkg_path):
             roles=compile_roles(document))
 
 
-def load_policy(auth_path, lkg_path):
+def load_policy(auth_path, lkg_path, *, initialize_missing=True):
     """Resolve the active :class:`PolicyResult` honoring read precedence.
 
     - Neither file exists -> materialize the validated base to both (open
@@ -1180,10 +1180,14 @@ def load_policy(auth_path, lkg_path):
     - Valid authoritative -> use it, not degraded.
     - Corrupt authoritative + valid LKG -> use LKG, ``degraded=True``.
     - Both corrupt while a file exists -> ``fail_closed=True`` (no candidates).
+
+    Callers already holding the policy umbrella lock must pass
+    ``initialize_missing=False``. Missing state then reads fail-closed without
+    trying to reacquire the non-reentrant file lock.
     """
     auth_exists = os.path.exists(auth_path)
     lkg_exists = os.path.exists(lkg_path)
-    if not auth_exists and not lkg_exists:
+    if not auth_exists and not lkg_exists and initialize_missing:
         initialized = _initialize_if_absent(auth_path, lkg_path)
         if initialized is not None:
             return initialized

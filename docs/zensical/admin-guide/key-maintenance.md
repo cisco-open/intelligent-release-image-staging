@@ -14,11 +14,11 @@ The management service checks due work every 30 seconds.
 
 | Key family | Scheduled action | Your next step |
 | --- | --- | --- |
-| Online instruction signer | Prepare a replacement public key | Complete [offline approval and retirement](signer-rotation.md). |
+| Online instruction signer | Prepare a replacement public key | Get a root key holder's approval, then [switch keys and retire the old one](signer-rotation.md). |
 | Device instruction encryption key | Replace one enrolled device's key and publish fresh instructions | Confirm that the device accepts the new instructions. |
 | Console management credential | Replace the credential and retain the previous value | Verify every Console, then retire the previous credential. |
 | Browser, management and device TLS | Create a review reminder | Follow [Rotate credentials and certificates](rotations.md). |
-| Private swarm issuing CA and offline signing roots | Create a review reminder | Plan the trust rollout before replacing any root. |
+| Private swarm issuing CA and root signing keys | Create a review reminder | Plan the trust rollout before replacing any root. |
 | Encryption-at-rest identity and recipients | Create a review reminder | Back up, stop writers and follow the [recipient procedure](rotations.md#rotate-the-age-recipients). |
 | Seeder, metrics and outbound telemetry credentials | Create a review reminder | Follow the credential's [rotation procedure](rotations.md). |
 
@@ -26,9 +26,9 @@ Review reminders leave credentials unchanged. **Acknowledge review** records
 that you reviewed the procedure, not that a rotation succeeded.
 For browser TLS, metrics tokens and collector authentication, complete the
 [guided Console workflow](console-credentials.md) separately from the reminder.
-For deployment trust, seeder credentials and encryption custody, use
+For deployment trust, seeder credentials and server encryption keys, use
 [deployment maintenance](deployment-rotation.md). Its explicit downtime and
-offline approvals are not started by acknowledging a reminder.
+key-holder approvals are not started by acknowledging a reminder.
 Device agents already renew their private-swarm leaf certificates six hours
 before their one-day validity ends. Replacing the issuing CA is a separate task.
 
@@ -47,14 +47,17 @@ the deployment supports up to 32 schedules.
 
 Select an existing schedule to change it or clear **Enable schedule**.
 You can disable an active schedule; finish its operation before other edits.
-Disabling leaves an active transition available for recovery. Saving with an
-outdated revision is rejected; refresh and review the current settings.
+Disabling leaves an active transition available for recovery. A saved schedule
+shows its revision. If settings change while you edit, your draft stays visible.
+Choose **Reload saved schedule**, review the UTC window, then save again.
+For an uncertain save, use **Refresh maintenance** and check the saved schedule
+before retrying. Returning to the page does not repeat the request.
 
 ## Complete the operation
 
 | State | Action |
 | --- | --- |
-| Approval required | Use the signer controls above the schedule to download the public key and complete offline approval. |
+| Approval required | Under **Replace signing key**, download the public key and get a root key holder's approval. |
 | Verification required | Update and verify every Console, then choose **Retire previous credential**. |
 | Review required | Follow the relevant procedure, then acknowledge the review. |
 | Intervention required | Check the credential files and rotation state before using the recovery control. |
@@ -69,7 +72,7 @@ Keep manual maintenance separate from scheduled work.
 ### On one Docker host
 
 The server and Console share their management credential files. After a scheduled
-replacement, load **Devices** and verify other Console instances, if present.
+replacement, open **Inventory** and verify other Console instances, if present.
 Retirement requires your confirmation and an API request authenticated with
 the replacement credential. An old credential cannot authorize its own removal.
 
@@ -101,7 +104,7 @@ enabling that family's automated rotation.
 The scheduler records its intent before changing a credential. After a restart,
 an interrupted operation needs explicit review. It does not retry automatically.
 
-For device keys, **Retry after custody review** reuses an already committed key
+For device keys, **Retry after key review** reuses an already committed key
 and retries instruction publication. For signer preparation, it reuses the same
 operation ID. Check the active signer before retrying.
 
@@ -126,4 +129,4 @@ restore accurate time before maintenance resumes.
 
 Missed windows advance to the next future interval. They never cause a burst
 of delayed rotations. Review certificate deadlines even when a schedule exists:
-offline approval and consumer rollout can take longer than the planned window.
+key-holder approval and consumer rollout can take longer than the planned window.

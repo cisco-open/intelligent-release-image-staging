@@ -58,6 +58,8 @@ def _sync_roots(install, record):
         raise InstallError('Host root IDs differ from the approved transition')
     if install.journal.document['root_digests'] not in (transition['before'], transition['after']):
         raise InstallError('Installer root authority changed outside this transition')
+    from .prebuilt_trust import reserve
+    reserve(install, record['request_id'], transition)
     for name, public in replacement.items():
         path = install.base / 'roots' / name
         current = hashlib.sha256(regular_bytes(path)).hexdigest()
@@ -68,7 +70,8 @@ def _sync_roots(install, record):
     install.journal.document['root_digests'] = digests
     # capture_plan requires the historical installed-package checkpoint even
     # when a failed rebuild removed it. Preserve this stopped ownership input;
-    # finish always invalidates it before rebuilding or exposing the Console.
+    # finish invalidates the predecessor before rebuilding; an already proved
+    # successor keeps its package checkpoint on same-ID recovery.
     install.journal.document['completed'].setdefault('packages', transition['packages_before'])
     install.journal.save()
     sync = getattr(install, 'sync_public_roots', None)
@@ -130,7 +133,9 @@ def finish(install, kind, operation_id):
         # recovery selects the same path; never force past source/hash checks.
         install.env['IRIS_DEVICE_IMAGE_OCI'] = str(
             install.base / 'artifacts' / ('device-roots-' + operation_id + '.oci.tar'))
-        install.journal.document['completed'].pop('packages', None)
+        from .prebuilt_trust import publication_complete
+        if not publication_complete(install):
+            install.journal.document['completed'].pop('packages', None)
         install.journal.document['completed'].pop('guestshell', None)
         install.journal.save()
     install.packages()

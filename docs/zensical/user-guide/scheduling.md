@@ -20,18 +20,32 @@ every device it reached.
 1. Open **Inventory**, then **Schedules** in the table's action bar. Each row
    shows the target, the next run in the schedule's own time zone, the state,
    and how the last run went.
-2. Set the **Inventory** filter to the devices you want.
-3. Choose **Schedule…** in the bulk bar. The modal shows how many devices the
-   filter matches now.
+2. Set the **Inventory** filter and select at least one device to open the bulk
+   actions. Selection alone does not change the schedule's filter target.
+3. Choose **More actions → Schedule…**. Check **Reviewed target**: use the
+   captured filter or choose **Only the reviewed devices** for the captured
+   selection. Later table changes do not change this dialog's target.
 4. Pick the **Action**: **Assign images** to stage images on devices that
    already have the agent, or **Onboard new devices** to deploy it. For an
    assign schedule, pick the images to assign and the assignment mode, merge
    or replace.
-5. Name the schedule, set the time, and save. The row shows the next run.
+5. Name the schedule, set the time and window length, then choose **Create
+   schedule**. The row shows the next run, calculated by the server in the
+   schedule's time zone.
 
 The target is the current Inventory filter, re-resolved at each run; the modal
 also offers the selected devices as a fixed list. Edit windows, wave gates and
 payloads with the API.
+
+An unknown creation result means the response was lost or incomplete. Choose
+**Refresh schedules before retrying** and check for the named schedule. Closing
+the dialog leaves a submitted request running.
+
+If the creator's account no longer exists, **Re-affirm** transfers ownership to
+your account. A revision conflict requires a refresh and another review. An
+unavailable list keeps the last known rows visible but disables this action.
+History is read for the first 25 rows per refresh; other rows remain visible
+with **run history unavailable**, not **no run yet**.
 
 ## With the API
 

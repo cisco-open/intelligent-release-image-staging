@@ -19,6 +19,8 @@ Routes, fields and refusal codes for roles and QoS. See [Security model and trus
 | `POST /api/v1/peer-policy/roles/import-csv` | Replaces every role definition in one revision from an uploaded CSV file, up to 8 MiB. A role a device or a schedule still uses cannot be dropped; refuses with `role_in_use`. A CSV grammar problem refuses with `invalid_roles_csv`, naming the row or field. |
 | `DELETE /api/v1/peer-policy/roles/<name>` | Deletes an unused role after preview. The preview returns 200 JSON with the candidate revision and ETag; the committed DELETE returns 204 with an empty body and the committed ETag. A role with members, or another role that still permits it, refuses with `role_in_use`. |
 | `PUT /api/v1/peer-policy/qos` | Replaces global QoS, or one role's QoS, or the `qos_state` tracker overlay, or both together. See [QoS keys](#qos-keys). |
+| `GET /api/v1/peer-policy/origin-enforcement` | Returns reviewed distribution-access settings, proposed counts and current application proof, with a separate control ETag. |
+| `PUT /api/v1/peer-policy/origin-enforcement` | Previews or commits a bounded, exact set of origin restrictions. See [Reviewed distribution access](#reviewed-distribution-access). |
 | `POST /api/v1/devices/<id>/role` | Sets or clears one device's role. |
 | `POST /api/v1/devices/bulk-role` | Applies one role change to a batch of devices as one policy revision, with a request body up to 2 MiB. |
 | `GET /api/v1/devices/<id>/effective-qos` | Returns the QoS values that apply to one device, with their source. Add `tracker_state=seeder` or `tracker_state=leecher` to also get paired `tracker_state`/`tracker_qos` values for that state. Invalid or unknown query input refuses with `422 invalid_policy_request`; an unknown device refuses with `404 device_not_found`. `delivery_state: pre-instructions` is a deprecated legacy value. |
@@ -42,12 +44,12 @@ Role names match `^[a-z0-9][a-z0-9._-]{0,31}$`, and at most 256 roles may exist.
 | Field | Default / bound | Meaning |
 | --- | --- | --- |
 | `restricted` | `false` | When true, the server compiles a virtual access list for this role; false keeps open, implicit permit. |
-| `peers` | the role itself; at most 64 | Permitted role names. The list must contain the role itself. A link between two restricted roles must be symmetric; the server normalizes the reciprocal side for you. |
+| `peers` | the role itself; at most 64 | Permitted role names. The list must contain the role itself. Creating or updating a role adds or removes the matching link in each other role's list in the same commit. |
 | `origin` | `true` | Whether the tracker may introduce the server's own seeder to this restricted role. |
 | `nets` | empty | Optional IPv4 subnet hints for role management. |
-| `on_stale` | `keep` for restricted roles, `defaults` otherwise | What happens to QoS when the policy goes stale: keep the last verified values, or fall back to defaults. |
+| `on_stale` | `keep` for restricted roles, `defaults` otherwise, unless overridden globally | After the last verified instruction expires, retain its transfer settings or use built-in device settings. See [Choose behavior when instructions expire](../user-guide/roles.md#choose-behavior-when-instructions-expire). |
 | `qos` | empty | Overrides the global QoS values for this role, for the keys that allow a role scope. |
-| `qos_state` | omitted | The seeder and leecher tracker cadence overlay for this role. Tracker-only, and set only through the API. |
+| `qos_state` | omitted | The seeder and leecher tracker cadence overlay for this role. Tracker-only; editable through the API or role CSV. |
 
 Allow-list membership always falls back to tracker-only, independent of `on_stale`. `peers` must be a non-null array of unique role names. The role schema sets no per-role member cap, but the devices in one role still cannot exceed the devices in your inventory. A restricted role with `origin: false` is valid. `origin_unreachable` is an advisory the server returns when neither this role nor a permitted role can reach the origin. Every role and QoS object is closed and typed: an unknown key is refused.
 
@@ -66,16 +68,16 @@ Values are integers. Rate keys are bytes per second, and `0` means unlimited; a 
 | `fanout` | 1 | 1–1,000, and no greater than `max_peers` | global, role, device | Modeling input for derived per-torrent rates. |
 | `seed_up_bps`, `seed_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Device rate while seeding; unlimited by default. |
 | `leech_up_bps`, `leech_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Device rate while leeching; unlimited by default. |
-| `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Device-wide rate across all transfers; unlimited by default. |
+| `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Device-wide image rate across all transfers; unlimited by default. Tracker announcements remain responsive when the download limit is saturated. |
 | `max_concurrent` | 100 | 1–1,000 | global, role, device | Concurrent torrents a device runs. |
 | `request_peer_speed_limit_bps` | 51,200 | 0 or 8,192–1,000,000,000 | global, role | Per-peer request rate a device applies. |
-| `announce_min_interval_s` | 30 s | 10–300 s | global, role, state overlay | The tracker applies one bounded jitter of plus or minus 10% to the interval it issues; a peerless leecher still gets a 120 s floor. |
+| `announce_min_interval_s` | 30 s | 10–300 s | global, role, state overlay | The tracker applies one bounded jitter of plus or minus 10% to the interval it issues. |
 | `numwant` | 50 | 4–200 | global, role, state overlay | Ceiling on peers returned per announce; a client that asks for `numwant=0` gets none. |
 | `handout_budget` | 0 (off) | 0–1,000 | global, role | Per-window handout limit accepted by the API. |
 | `catalog_tick_s` | 60 s | 60–900 s, multiple of 60 | global, role, device | Catalog and staging cadence. For a restricted device, the effective value may not exceed effective `endpoint_ttl()/3`; the endpoint TTL defaults to 900 s but is configurable. |
 | `telemetry_every_ticks` | 1 | 1–60 | global, role, device | Ticks between telemetry sends. |
 | `telemetry_pause` | `false` | boolean | global, role, device | Suspends telemetry sends without changing anything else. |
-| `on_stale` | `defaults` | `keep` or `defaults` | global or role definition | What happens to QoS when the policy goes stale. |
+| `on_stale` | `defaults` | `keep` or `defaults` | global or role definition | Retain verified transfer settings after expiry, or restore built-in device settings. |
 | `origin_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Origin-wide upload limit; unlimited by default. |
 | `origin_per_torrent_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Per-image origin upload limit; unlimited by default. |
 | `origin_max_peers` | 55 | 1–1,000 | global only | Origin per-torrent peer cap. |
@@ -84,26 +86,53 @@ Values are integers. Rate keys are bytes per second, and `0` means unlimited; a 
 
 A `PUT /api/v1/peer-policy/qos` write replaces the whole selected QoS object; `{}` clears that layer. Omitting `qos_state` preserves the stored state object. An explicit `qos_state: {}` removes only the selected state layer and preserves the rest of the scalar QoS unchanged. A full role-definition replacement, a `PUT .../roles/<name>` write, must include `qos_state` to retain it: that write is a complete replacement, not a merge.
 
-Zero is unlimited, so no rate key expresses **never upload**. Use role membership and access rules to keep a role off a swarm, and account for connections aria2 already holds. The Console edits role fields as typed fields; global or role QoS, including the `qos_state` overlay, is set only through `PUT /api/v1/peer-policy/qos`. There is no per-device QoS write route. Pair explanations come only from `GET /api/v1/peer-policy/explain`.
+Role CSV uses `seeder_numwant`, `leecher_numwant`, `seeder_announce_min_interval_s` and `leecher_announce_min_interval_s` for the corresponding `qos_state` values. The same bounds apply. Export includes these columns; import replaces the whole definition, so blank or omitted cells remove those overrides.
+
+Zero is unlimited, so no rate key expresses **never upload**. Use role membership and access rules to keep a role off a swarm, and account for connections aria2 already holds. The Console edits per-role QoS as typed fields and preserves tracker overlays. Global QoS uses `PUT /api/v1/peer-policy/qos`. There is no per-device QoS write route. Pair explanations come only from `GET /api/v1/peer-policy/explain`.
 
 Scalar QoS is the instruction intent the server sends to a device. `tracker_qos` explains the selected tracker state and its sources. `tracker_qos` is tracker-only: tracker state never enters instruction QoS or control, telemetry, semantic hashes, role artifacts, stamps, serials, envelopes, heartbeat, or device configuration.
 
 ## Response fields
 
-`GET /api/v1/peer-policy` is count-only: it never returns the raw deny list, peer addresses, aria2 option dictionaries, session IDs, or the device IDs behind the mutual-origin preflight (two devices that both hold a full copy of the same image). Role drift (the gap between a device's declared role and its compiled membership) is the one exception: up to ten device IDs return, flagged if the list was truncated.
+`GET /api/v1/peer-policy` is count-only: it never returns the raw deny list, peer addresses, aria2 option dictionaries, session IDs, or the device IDs behind the mutual-origin preflight. Role drift (the gap between a device's declared role and its compiled membership) is the one exception: up to ten device IDs return, flagged if the list was truncated.
 
 | Field | Meaning |
 | --- | --- |
 | `roles_supported`, `roles_present` | Whether this server build understands roles, and whether role state has ever existed in this policy. Presence is not proof of enforcement. |
 | `enforcement.state`, `applied_revision`, `stale` | The tracker's last reconciliation result and how fresh it is. A result older than five minutes is marked stale. |
-| `enforcement.mutual_origin.mode = preflight` | Mutual-origin blocking (two devices that both hold a full copy of the same image) is observation-only. `newly_denied_device_count` is `null` when unavailable, and `0` when a completed check found no newly denied device; neither adds a device to the active deny list. |
+| `enforcement.mutual_origin.mode = preflight` | The default observation-only mode. `newly_denied_device_count` is `null` when unavailable, and `0` when a completed check found no newly denied device; neither adds a device to the active deny list. |
+| `enforcement.mutual_origin.mode = enforce` | Reviewed restrictions are requested. Read the dedicated origin-enforcement route for current application proof; the old preflight count is `null`. |
 | `origin_qos.state`, `target_download_count`, `applied_download_count` | Whether the origin's rate limits reached every active download. These are counts, not per-role throughput. |
-| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | The current issued policy revision, nullable until the first issue, and accepted-device counts grouped by that policy revision. |
+| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | The highest policy revision among issued device instructions, or null when unavailable, and accepted-device counts grouped by revision. |
 | `fleet_rollup.states.pre-instructions` | Devices whose last heartbeat did not claim the instruction protocol. |
 | `GET /api/v1/devices/<id>/effective-qos` `delivery_state = pre-instructions` | A deprecated legacy sentinel; read the response's `instruction` object for current evidence instead. |
 
+Devices can report different accepted revisions. A policy edit that leaves a
+device's effective settings unchanged does not by itself issue a new instruction.
+
 !!! warning
     Never log or export an aria2 option dictionary, because tracker authorization data can be present among those options.
+
+## Reviewed distribution access
+
+The dedicated route has its own strong ETag, `"origin-enforcement-<revision>"`. Keep it separate from the sharing-policy ETag.
+
+1. Read `GET /api/v1/peer-policy/origin-enforcement`.
+2. Send a PUT with that ETag in `If-Match` and this JSON body:
+
+    ```json
+    {"mode":"enforce","max_new_ips":10,"max_new_devices":10,"if_policy_revision":1,"dry_run":true}
+    ```
+
+3. Check the counts and `blockers`. Send the unchanged request with `dry_run: false` and the returned `confirm_token` only after review.
+
+Use the returned `policy_revision`, not the example value above. `mode` is `preflight` (**Preview only** in the Console) or `enforce` (**Enforce reviewed blocks**). Both budgets are integers from 0 to 1,000 and default to 10 on a new installation. `new_ip_count` and `new_device_count` are additions to the retained approval; `retained_ip_count`, `proposed_ip_count` and `proposed_device_count` describe the full proposed set. Counts are `null` when the required evidence is unavailable.
+
+The confirmation binds exact device identities and addresses, not just their counts. Changed endpoints, policy, control revision or request fields require a new preview. Preview returns the proposed mode but does not apply it. Commit advances the control revision and returns `pending` with no applied proof.
+
+GET separates requested `mode` from actual `state`. The Console labels these **Saved mode** and **Transfer-service status at last refresh**. Only `enforced`, with non-null applied counts, `last_verified_at`, no `reason` and no blockers, confirms recent application. The Console shows **Blocks confirmed** for that state. Proof expires after 120 seconds. Select **Refresh status** for current confirmation. `review_required`, `degraded` or `unavailable` needs attention; never interpret **Approved for blocking** as **Confirmed at last refresh**. Shared-address conflicts cannot be fully enforced with an IP blocklist. Switching to `preflight` uses the same review procedure.
+
+Missing `If-Match` returns `428 precondition_required`; a stale control marker returns `412 precondition_failed`. A changed policy returns `409 policy_revision_conflict`, a stale confirmation `409 origin_review_stale`, and an unsafe apply `409 origin_enforcement_blocked`. Invalid input returns `422 invalid_origin_enforcement`; unreadable private state returns `503 origin_enforcement_unavailable`. After an uncertain commit, reread current state before starting another preview.
 
 ## Refusals
 

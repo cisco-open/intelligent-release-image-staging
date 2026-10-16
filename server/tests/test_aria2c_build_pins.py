@@ -2,10 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""tools/aria2c-build/ is the corresponding source IRIS publishes for the GPL
-aria2c binary it redistributes (GPLv2 section 3). Corresponding source that
-cannot be built is not corresponding source, so the pins in that Dockerfile
-have to keep resolving.
+"""Exact inputs for the aria2 client distributed with its matching GPLv3 source.
 
 Two failure modes, two kinds of test here:
 
@@ -17,28 +14,25 @@ Two failure modes, two kinds of test here:
 * Withdrawal. An Alpine release branch indexes only the newest `-rN` of each
   package, so a security bump deletes the version we pinned and `apk add`
   refuses the whole set. That is a hard, correct failure -- but it strands the
-  published source until someone bumps the pin. Nothing hermetic can see it:
-  the file is unchanged, the world moved. The opt-in test resolves every pin
-  against the live APKINDEX for the pinned Alpine branch, which is how
-  openssl-dev/openssl-libs-static=3.5.7-r0 (withdrawn from v3.24 in favour of
-  3.5.8-r0) was caught.
+  original index-based recipe. The retained-input helper instead acquires exact
+  checksum-locked APKs and uses the original source and compiler commands.
+  Opt-in tests download that complete lock, including transitive dependencies.
+  A changed dependency requires a deliberately matched binary/source release,
+  never a pin-only change to the published client's recipe.
 
 The opt-in test needs network, so it runs under the same IRIS_TEST_HOST_INTEGRATION=1
 gate as the real-`docker build` tests."""
-import io
+from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import os
+from pathlib import Path
 import re
-import tarfile
-import urllib.error
-import urllib.request
 
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCKERFILE = os.path.join(HERE, "..", "..", "tools", "aria2c-build", "Dockerfile")
 
-APKINDEX_URL = "https://dl-cdn.alpinelinux.org/alpine/v{branch}/{repo}/{arch}/APKINDEX.tar.gz"
-REPOS = ("main", "community")
 # build.sh drives both architectures; a pin must resolve for each.
 ARCHES = ("x86_64", "aarch64")
 
@@ -123,62 +117,38 @@ def test_openssl_dev_and_static_pins_move_together():
 
 
 # --------------------------------------------------------------------------
-# Opt-in: do the pins still exist upstream?
+# Opt-in: can the exact retained-input path still acquire every package?
 # --------------------------------------------------------------------------
 
-def _alpine_branch():
-    """`3.24` from a FROM of alpine:3.24.1@sha256:... -- the release branch
-    whose package index apk actually reads."""
-    ref = _from_ref()
-    m = re.match(r"^alpine:(\d+)\.(\d+)", ref)
-    assert m, "cannot read an Alpine release from %r" % ref
-    return "%s.%s" % (m.group(1), m.group(2))
+def _pinned_helper():
+    spec = importlib.util.spec_from_file_location("aria2_pinned_inputs",
+        Path(DOCKERFILE).with_name("rebuild-pinned.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def _index_versions(branch, arch):
-    """{package: {versions}} across the repositories apk is configured with."""
-    found = {}
-    for repo in REPOS:
-        url = APKINDEX_URL.format(branch=branch, repo=repo, arch=arch)
-        try:
-            raw = urllib.request.urlopen(url, timeout=60).read()
-        except urllib.error.URLError as exc:
-            pytest.skip("Alpine package index unreachable (%s): %s" % (url, exc))
-        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-            index = tar.extractfile("APKINDEX").read().decode("utf-8", "replace")
-        for block in index.split("\n\n"):
-            name = version = None
-            for line in block.splitlines():
-                if line.startswith("P:"):
-                    name = line[2:]
-                elif line.startswith("V:"):
-                    version = line[2:]
-            if name and version:
-                found.setdefault(name, set()).add(version)
-    return found
+def test_recorded_apk_lock_covers_each_original_recipe_pin():
+    lock = _pinned_helper().lock_data()
+    assert lock['base_image'] == _from_ref()
+    for architecture in ARCHES:
+        for name, version in _apk_pins():
+            assert name + '-' + version + '.apk' in lock['packages'][architecture]
 
 
 @pytest.mark.skipif(
     os.environ.get("IRIS_TEST_HOST_INTEGRATION") != "1",
-    reason="network test: set IRIS_TEST_HOST_INTEGRATION=1 to resolve the "
-           "aria2c build pins against the live Alpine index",
+    reason="network test: set IRIS_TEST_HOST_INTEGRATION=1 to download and verify "
+           "all checksum-locked aria2 build APKs",
 )
 @pytest.mark.parametrize("arch", ARCHES)
-def test_every_pin_still_resolves_in_the_pinned_alpine_branch(arch):
-    branch = _alpine_branch()
-    index = _index_versions(branch, arch)
-    stale = []
-    for name, version in _apk_pins():
-        available = index.get(name, set())
-        if version not in available:
-            stale.append("%s=%s (v%s/%s carries: %s)"
-                         % (name, version, branch, arch,
-                            ", ".join(sorted(available)) or "no such package"))
-    assert not stale, (
-        "tools/aria2c-build/Dockerfile pins packages Alpine v%s no longer "
-        "indexes, so the published corresponding source cannot be rebuilt:\n  %s\n"
-        "Bump the pin in the Dockerfile on purpose -- keep the =version."
-        % (branch, "\n  ".join(stale)))
+def test_every_locked_build_input_remains_available(arch, tmp_path):
+    helper = _pinned_helper()
+    lock = helper.lock_data()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        files = list(pool.map(lambda item: helper.cached_package(
+            tmp_path, arch, item[0], item[1], lock['mirrors']), lock['packages'][arch].items()))
+    assert len(files) == len(lock['packages'][arch])
 
 
 def test_size_gate_reads_a_byte_count_not_filesystem_stats():

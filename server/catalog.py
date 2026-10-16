@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import audit
 import auth
@@ -37,6 +37,7 @@ import bounded_pool
 import bulkhash
 import credential_cache
 import peer_tls_issuer as peer_tls
+import peer_tls_revocations
 import instruction_keys
 import instructions
 import keyed_state
@@ -2125,18 +2126,27 @@ class CatalogStore:
         """Flag *device_id* for a fresh report with a random 32-hex
         ``request_id`` (spec §10.2b). Returns False when a non-expired directive
         is already pending (one per device)."""
-        refused = []
+        return self.request_report_details(device_id, now) is not None
+
+    def request_report_details(self, device_id, now):
+        """Return this atomically created directive, or None if already pending.
+
+        Do not read it back after committing: an immediate device report may
+        clear it, and another operator may already have created a newer one.
+        """
+        created = []
 
         def arm(ent):
             if isinstance(ent, dict) and now < ent.get("expires_at", 0):
-                refused.append(True)
                 return None             # already pending; no write
-            return {"request_id": secrets.token_hex(16),
-                    "requested_at": now,
-                    "expires_at": now + self.PULL_TTL}
+            directive = {"request_id": secrets.token_hex(16),
+                         "requested_at": now,
+                         "expires_at": now + self.PULL_TTL}
+            created.append(directive)
+            return directive
 
         self._pulls.update(device_id, arm)
-        return not refused
+        return dict(created[0]) if created else None
 
     def pending_request(self, device_id, now):
         """The full non-expired pull directive dict for *device_id* (carrying
@@ -2256,8 +2266,12 @@ def _hb_peer_tls(value):
     source = value.get("runtime_source")
     if runtime not in ("disabled", "required") or source != "aria2_rpc":
         runtime, source = "unknown", "unknown"
-    return {"configured_mode": configured, "runtime_mode": runtime,
-            "runtime_source": source}
+    result = {"configured_mode": configured, "runtime_mode": runtime,
+              "runtime_source": source}
+    revocations = peer_tls_revocations.observation(value.get("revocations"))
+    if revocations is not None:
+        result["revocations"] = revocations
+    return result
 
 
 def sanitize_heartbeat(data, src_ip):
@@ -2670,6 +2684,20 @@ class Catalog:
                    tracker_auth="legacy-query"):
         parts = urlsplit(path).path.strip("/").split("/")
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
+                and parts[3] == "peer-tls-revocations":
+            query = parse_qs(urlsplit(path).query, keep_blank_values=True)
+            if set(query) != {"nonce"} or len(query["nonce"]) != 1:
+                return self._json(400, {"error": "Provide one revocation snapshot nonce"})
+            try:
+                if peer_tls.mode() != "required":
+                    return self._json(409, {"error": "peer TLS is not enabled"})
+                snapshot = peer_tls.Issuer().revocation_snapshot(query["nonce"][0])
+            except ValueError:
+                return self._json(400, {"error": "Invalid revocation snapshot nonce"})
+            except Exception:
+                return self._json(503, {"error": "Peer certificate revocations unavailable"})
+            return self._json(200, snapshot)
+        if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "policy":
             row = self.store.read_policy_row_snapshot(parts[2])
             view = self.store.device_policy_view_from_row(parts[2], row)
@@ -2960,6 +2988,8 @@ class Catalog:
                     response = peer_tls.Issuer().issue(parts[2], request['csr'])
                 except peer_tls.InvalidCSR:
                     return self._json(400, {"error": "invalid certificate request"})
+                except peer_tls.CertificateRevoked:
+                    return self._json(403, {"error": "This device certificate has been revoked"})
                 except Exception:
                     # Issuer/age errors must not disclose key paths or material.
                     return self._json(503, {"error": "peer certificate enrollment unavailable"})
@@ -3237,6 +3267,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 and parts[:2] == ["v1", "devices"]
                 and parts[3] in ("heartbeat", "token-refresh", "telemetry", "live-telemetry",
                                  "policy", "instructions", "peer-tls",
+                                 "peer-tls-revocations",
                                  "instruction-keylist")
             )
 
@@ -3484,7 +3515,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            if urlsplit(self.path).path.endswith(("/token-refresh", "/peer-tls")):
+            if urlsplit(self.path).path.endswith(("/token-refresh", "/peer-tls", "/peer-tls-revocations")):
                 # The response can carry three live credentials.  Never let a
                 # browser, proxy, or intermediary retain it beyond delivery.
                 self.send_header("Cache-Control", "private, no-store")

@@ -9,6 +9,7 @@ deployment completeness or safe producer recovery. Archive authentication uses
 an independently trusted OpenSSH backup signer, NOT a key supplied by the archive.
 """
 
+from contextlib import nullcontext
 import hashlib
 import io
 import json
@@ -149,7 +150,7 @@ def _capture(archive, parent_fd, name, member, records):
         os.close(fd)
 
 
-def create(sources, output, recipient, signing_key, *, metadata=None):
+def create(sources, output, recipient, signing_key, *, metadata=None, on_stage=None):
     """Publish a signed encrypted set into a NEW directory under a private parent."""
     output = Path(output).absolute()
     parent = private_directory(output.parent)
@@ -171,7 +172,21 @@ def create(sources, output, recipient, signing_key, *, metadata=None):
         source = Path(source).absolute()
         if source.resolve() != source or parent == source or source in parent.parents:
             raise InstallError("Backup destination must be outside the capture sources")
-    with tempfile.TemporaryDirectory(prefix='.iris-backup-', dir=parent) as temporary:
+    if on_stage is not None:
+        # Do not expose an unbound new stage to this worker's inventory between
+        # mkdir and the durable callback. Only allocation/admission is locked;
+        # encryption remains observable and never blocks status for its duration.
+        from .managed_worker import CAPTURE_PROCESS_LOCK
+        with CAPTURE_PROCESS_LOCK:
+            workspace = tempfile.TemporaryDirectory(prefix='.iris-backup-', dir=parent)
+            try:
+                on_stage(Path(workspace.name))
+            except BaseException:
+                workspace.cleanup()
+                raise
+    else:
+        workspace = tempfile.TemporaryDirectory(prefix='.iris-backup-', dir=parent)
+    with workspace as temporary:
         stage = Path(temporary)
         encrypted = stage / 'payload.tar.age'
         records = []
@@ -247,17 +262,28 @@ def authenticate(backup, trusted_public_key):
     public = regular_bytes(trusted_public_key, 4096).decode('ascii').strip().split()
     if len(public) < 2 or public[0] != 'ssh-ed25519' or '\n' in public[1]:
         raise InstallError("Expected an independently trusted Ed25519 backup public key")
-    with tempfile.TemporaryDirectory(prefix='.iris-verify-', dir=backup.parent) as temporary:
-        directory = Path(temporary)
-        atomic_write(directory / 'allowed', ('iris-backup namespaces="' + NAMESPACE + '" ' +
-                                           ' '.join(public[:2]) + '\n').encode())
-        atomic_write(directory / 'signature', signature)
-        try:
-            subprocess.run(['ssh-keygen', '-Y', 'verify', '-f', str(directory / 'allowed'),
-                            '-I', 'iris-backup', '-n', NAMESPACE, '-s', str(directory / 'signature')],
-                           input=raw, capture_output=True, timeout=30, check=True, env=clean_env())
-        except (OSError, subprocess.SubprocessError):
-            raise InstallError("Backup signature is not valid for the trusted signer") from None
+    # OpenSSH needs file inputs, but authentication must not create named
+    # archive-root output that can outlive a killed worker. TemporaryFile is
+    # anonymous (or unlinked before return on its POSIX fallback); use the
+    # system temporary directory, never the saved-backup parent.
+    try:
+        with tempfile.TemporaryFile(mode='w+b') as allowed, tempfile.TemporaryFile(mode='w+b') as signed:
+            for stream, data in ((allowed, ('iris-backup namespaces="' + NAMESPACE + '" ' +
+                                           ' '.join(public[:2]) + '\n').encode()), (signed, signature)):
+                os.fchmod(stream.fileno(), 0o600)
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 0):
+                    raise InstallError('Backup verification requires anonymous private metadata files')
+                stream.write(data)
+                stream.flush()
+                stream.seek(0)
+            subprocess.run(['ssh-keygen', '-Y', 'verify', '-f', '/proc/self/fd/' + str(allowed.fileno()),
+                            '-I', 'iris-backup', '-n', NAMESPACE, '-s', '/proc/self/fd/' + str(signed.fileno())],
+                           input=raw, capture_output=True, timeout=30, check=True, env=clean_env(),
+                           pass_fds=(allowed.fileno(), signed.fileno()))
+    except (OSError, subprocess.SubprocessError):
+        raise InstallError("Backup signature is not valid for the trusted signer") from None
     try:
         manifest = json.loads(raw)
         if (set(manifest) != {'schema', 'created_at', 'payload_sha256', 'payload_bytes', 'recipient'}
@@ -285,8 +311,9 @@ def read(backup, identity, trusted_public_key, *, destination=None, max_bytes=10
     if destination and (Path(destination).exists() or Path(destination).is_symlink()):
         raise InstallError("Restore destination must not exist")
     records, total, inventory = [], 0, None
-    with tempfile.TemporaryDirectory(prefix='.iris-restore-', dir=parent) as temporary:
-        stage = Path(temporary)
+    workspace = tempfile.TemporaryDirectory(prefix='.iris-restore-', dir=parent) if destination else nullcontext(None)
+    with workspace as temporary:
+        stage = Path(temporary) if destination else None
         # Use an opened descriptor, not a path age could reopen after validation.
         fd = os.open(backup / 'payload.tar.age', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, 'rb') as encrypted:
@@ -346,7 +373,7 @@ def read(backup, identity, trusted_public_key, *, destination=None, max_bytes=10
                         record = {'name': name, 'mode': header.mode, 'uid': header.uid,
                                   'gid': header.gid, 'size': header.size, 'sha256': None,
                                   'type': 'directory' if header.isdir() else 'file'}
-                        path = stage / name
+                        path = stage / name if destination else None
                         if '/' in name and str(PurePosixPath(name).parent) not in directories:
                             raise InstallError("Archive parent is missing or out of order")
                         if header.isdir():

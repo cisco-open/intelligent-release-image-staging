@@ -52,8 +52,8 @@ Console uploads remain in the separate uploads volume.
    Each file gets its own row with a progress bar, the publish state, and then
    the Bulk Hash result, the checksum Cisco publishes for an image.
 2. Watch the rows.
-   Finished rows fade out. A failed row stays, naming its error, until you
-   dismiss it.
+   Finished rows disappear after a short wait. A failed row stays, naming its
+   error, until you dismiss it.
 
 The cap is 4 GiB per file, and the browser refuses a larger one.
 
@@ -67,6 +67,9 @@ missing from the catalog.
    `image_import`, with `result=fail` and a reason for a rejection.
 2. Read the Bulk Hash result.
    An import runs the check at once, whatever the schedule says.
+
+You can start another import while one is running. The count shows how many
+are still running.
 
 A grayed-out file carries its reason. See
 [Why a file is not offered](#why-a-file-is-not-offered).
@@ -125,6 +128,11 @@ check runs, then `done`. `error` means the publish itself failed. A `done` job
 can still report a failed check, so read its verification outcome, image state,
 and message. Jobs are held in memory and disappear on a server restart.
 
+Online feed downloads have a ten-minute limit. An image can also wait up to
+eleven minutes behind another check before its own check starts. A timeout
+reports an incomplete check; the image remains published. Use **Refresh now**
+in *Settings → Image verification* to check again when the active run finishes.
+
 | Verdict | Meaning |
 | --- | --- |
 | `verified` | The image's `sha512` matches the feed row. |
@@ -151,6 +159,11 @@ in progress, the button and the API both say so instead of starting a second.
 A server with no internet access uploads the feed archive instead. The same
 pane takes a raw `.tar` of up to 256 MiB and runs the identical signature check
 and parse.
+
+The Console keeps one check or schedule save in progress at a time. Leaving
+the page does not cancel it. If its reply is lost, select **Review current
+status** before retrying. Review reloads the schedule and latest check, discarding
+unsaved schedule edits; it cannot prove the outcome of an earlier lost reply.
 
 The server retains a successfully verified offline archive for seven days
 after upload. Images published during that window automatically use it, even

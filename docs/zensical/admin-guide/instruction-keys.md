@@ -6,38 +6,39 @@ SPDX-License-Identifier: Apache-2.0
 
 # Replace or recover signing keys
 
-An instruction is the signed message the server sends a device saying which
-images to stage and how. A root key, also called a signing root, is one of the
-two offline keys that certify the online signer and sign revocation lists.
-Use this page to replace both roots, recover a lost root, answer a leaked key, publish a new Guest
-Shell agent bundle, or deliver a first instruction file by hand.
+Use this page for root replacement, key recovery, Guest Shell agent replacement
+and manual delivery of a first instruction file. See the glossary for
+[signing roots](../reference/glossary.md#root-key-signing-root) and [instructions](../reference/glossary.md#instruction).
 
-Run every server command in the shell of your deployment:
+Run server commands in your deployment shell:
 `docker compose -f server/docker-compose.yml exec iris sh`, the split-host
 server equivalent, or `kubectl -n iris exec -it deployment/iris-seed-server -c
 iris -- sh`.
 
 !!! warning
 
-    Keep private root keys on their offline stations. Never put one on the
-    server, in installer arguments, or in device configuration.
+    Keep private root keys in your chosen protected storage. Use separate
+    holders or guided local setup. Use `iris-key-setup --local` for host-held keys.
+    Never upload a root private key to the Console or put it in device configuration.
 
 ## In the Console
 
-Open **Policies → Advanced → Instruction delivery and key custody**. The panel
-shows signing status, certificate and keylist age, ceremony status, and
-attested roots; the terms it uses are in the next section.
+Open **Policies → Advanced → Instruction delivery and signing keys**. The panel
+shows signing status, certificate time remaining and revocation list age. **Action needed** lists required work.
+Root confirmations show how many roots were confirmed within the last 180 days.
 
 ## Renew the instruction signing certificate
 
-To change the key itself, use [Rotate the online signer](signer-rotation.md).
+Renew the existing key's 30-day certificate here. To change the key itself, use [Replace signing key](signer-rotation.md).
 
-1. Open **Settings → Certificates & keys**. Check the renewal date and the
-   **Signing stops** deadline, which is seven days before expiry.
+1. Open **Settings → Certificates & keys**, then **Renew signing certificate**.
+   The overview shows renewal and expiry dates. **Technical details: all public keys,
+   dates and fingerprints** shows the **New instruction signing stops** deadline,
+   seven days before expiry.
 2. Select **Download public renewal request**. Send `iris-online.pub` to the
-   offline key holder, who selects **Approve server request** in
+   root signing key holder, who selects **Approve server request** in
    [iris-key-setup](../install/offline-approval.md#approve-a-public-request).
-   To provide the filenames directly:
+   To provide filenames directly, use this command; add `--local` before `approve` for host-held keys:
 
    ```bash
    iris-key-setup approve --request iris-online.pub \
@@ -49,14 +50,18 @@ To change the key itself, use [Rotate the online signer](signer-rotation.md).
 4. Check the new expiry and signing cutoff. A changed online key or certificate
    invalidates a pending request; prepare it again before importing.
 
-Renewal keeps the online key, device trust and instruction counters. It checks
-the configured root, principal, key match and validity before publication.
-Private roots remain with their custodians. Bare public keys have no expiry;
-their certificates and custody records have separate deadlines.
+Keys created by automatic local setup use their saved passphrases for approval.
+Review each request. Renewal is not automatic; manual keys still ask for passphrases.
 
-The inventory reads server files. Its dates alone do not prove which certificate
-a listener is serving or whether signing custody is healthy. The panel reports
-the existing custody status separately.
+If the response is unavailable, the server may already have applied the renewal.
+Download a fresh public renewal request before submitting again. Leaving the
+page clears the selected approval file; it does not cancel a submitted renewal.
+
+Renewal keeps the online key, device trust and instruction counters. It checks
+the configured root, identity, key match and validity before publication.
+Public keys have no expiry date; certificates and signed confirmations have separate deadlines.
+
+The inventory reads server files, not live service certificates. Signing checks are separate.
 
 ## What you see
 
@@ -86,7 +91,7 @@ file under `$IRIS_CONFIG/instr/`, check that file first.
 ## Replace the two root keys { #instruction-root-ceremony-and-recovery }
 
 Exactly two distinct public roots belong in `$IRIS_CONFIG/instr/roots.d/`, with
-private keys held by separate custodians at separate sites. The encrypted
+private keys kept in your chosen protected storage. The encrypted
 online key is `$IRIS_CONFIG/instr/signing-key.age`; the runtime plaintext is
 `$IRIS_RUN/instr/signing-key`. For the file inventory, see [Data formats and
 states](../reference/state-and-data.md).
@@ -95,9 +100,9 @@ states](../reference/state-and-data.md).
 
 Use the [Console root attestation procedure](deployment-rotation.md#attest-existing-signing-roots)
 for initial and quarterly confirmations by both holders. Renew the online
-certificate separately when due. The commands below are the CLI alternative.
+certificate separately when due. The CLI example below uses separately held offline keys.
 
-1. Have both custodians confirm they hold their private key at separate sites.
+1. Have both root key holders confirm access to their private keys.
    Compare public fingerprints with the approved inventory by running
    `ssh-keygen -lf root-a.pub` and `ssh-keygen -lf root-b.pub` on public
    copies.
@@ -149,7 +154,7 @@ certificate separately when due. The commands below are the CLI alternative.
    ```
 
    The status shows the new keylist sequence.
-8. Repeat steps 5 to 7 with the other custodian, the other root and the next
+8. Repeat steps 5 to 7 with the other key holder, the other root and the next
    sequence, so both roots are attested on their own.
 9. Compare the Console panel and the `iris_instruction_*` metrics with the
    windows you recorded, then record identities, fingerprints, times and
@@ -168,22 +173,22 @@ certificate follows the shorter renewal window in steps 3 and 4.
 ## If one root key is lost
 
 1. Keep both public root files and the existing device trust bytes.
-2. Identify the surviving offline custodian.
+2. Identify the surviving root key holder.
 3. Repeat the export, issue and import steps above with the surviving root for
    the next online certificate and keylist. No device trust change is required.
 4. Record the quorum as degraded until a replacement root and a new signed
    device release are in place. The 180-day attestation metric only reports
-   signed records, not physical custody, so confirm the loss with your
-   custodians directly rather than relying on that metric alone.
+   signed records, not whether someone still has the private key. Confirm the
+   loss with the key holders.
 
 ## If both root keys are lost
 
 1. Declare the outage. Keep the public keys, the state evidence, and the
    server's tracker and origin controls. Devices fall back to the last policy
    they accepted, then to the documented stale behavior.
-2. At two separate offline sites, create two new independent roots with
-   passphrase protection: `ssh-keygen -t ed25519 -f /offline/root-a`, and the
-   matching root-b command at its site. Record their public fingerprints.
+2. Use `iris-key-setup` to create two new independent roots with passphrase
+   protection in your chosen protected storage. Use separate holders or guided
+   local setup. Record their public fingerprints.
 3. Reconcile root configuration, keylist and revocation state, and the sequence
    under a reviewed maintenance procedure, then provision the new
    online certificate/keylist. Single commands do not recover a fleet in place.
@@ -225,30 +230,24 @@ sends its heartbeat but skips staging for that tick, one pass of the agent's
 check-in loop. Every failure state is listed in [Data formats and
 states](../reference/state-and-data.md).
 
-## Publish a new Guest Shell agent bundle
+## Replace a Guest Shell agent { #publish-a-new-guest-shell-agent-bundle }
 
-On Catalyst 9000 series switches the agent runs in Guest Shell; switches with
-app-hosting storage can run the IOx app instead. Treat a bundle update as a
-fleet operation.
+Replace the agent through removal and re-onboarding. For a new IRIS release,
+follow [Deploy a new release](upgrade.md), including deployment replacement.
+For an agent replacement within the same deployment:
 
-1. For standalone bundles, run `tools/build-ssh-verifiers.sh` on a Docker
-   builder that supports both amd64 and arm64.
-2. Upgrade each device's `bootstrap.sh` through onboarding. Older bootstraps
-   reject the new archive members.
-3. Build each architecture with the approved binary and exactly two approved
-   public roots, using the [build
-   options](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/device-packages.md).
-   Record the archive and sidecar hashes and the source provenance.
-4. Publish the bundle and its 64-hex SHA-256 sidecar on the artifact server,
-   with installer and bootstrap evidence for both public-root files. Deliver
-   sidecar before archive: missing, malformed or mismatched evidence, unsafe
-   members or incomplete writes refuse the new bundle and keep the prior
-   runnable bundle.
-5. Check the next tick's `instr_protocol` value, the accepted identity and the
-   instruction state, including the fallback to tracker-only when the bundled
-   verifier is unavailable.
+1. Open **Inventory**, select the devices and choose **Undeploy**. Wait for
+   confirmed removal before continuing. See
+   [Undeploy, retire and clean up devices](../user-guide/undeploy.md).
+2. Check that **Settings → Device packages** reports `ok` for **Guest Shell**.
+   The server prepares its Guest Shell bundles automatically.
+3. Choose **Onboard**. The installer delivers the bootstrap and the matching
+   agent bundle, including both approved public roots.
+4. Check each device's fresh heartbeat and accepted signed instruction.
 
-Roll back by restoring the reviewed prior bundle and its evidence as one set.
+The package tools publish the bundle and its SHA-256 file. Missing or
+mismatched evidence stops bundle installation.
+
 On IOx, signature verification is a device-wide setting, not a per-app one. See
 [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000
 devices for the IOx app](../install/iox.md#device-global-package-verification).
@@ -289,7 +288,7 @@ stays pending or unavailable.
 ## Related
 
 - [Turn on instruction signing](../install/activate-signing.md)
-- [Create the two offline signing keys](../install/signing-roots.md)
+- [Create the two root signing keys](../install/signing-roots.md)
 - [How instructions are signed and trusted](../architecture/security-model.md)
 - [Find your way around the Console](../user-guide/console.md)
 - [Rotate credentials and certificates](rotations.md)

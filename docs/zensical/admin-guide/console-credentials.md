@@ -11,20 +11,25 @@ the browser certificate, metrics scraping token and outbound collector
 authentication. Private material stays in encrypted server configuration and
 its private runtime copy. Deployment-mounted credential files remain unchanged.
 
+The browser certificate protects the browser-to-Console connection. See its
+current identity and expiry under **Settings > TLS & trust**. Device connections
+and the private Console-to-server connection have separate certificates.
+
 ## Replace the browser certificate
 
-1. In **Browser certificate**, enter every exact DNS name and IP address used
-   to reach the Console. Separate names with commas; do not enter URLs or
-   wildcards.
-2. Choose **Request approval from my CA** and select **Create replacement
+1. Expand **Replace the Console browser certificate**. Enter every exact DNS name
+   and IP address used to reach the Console. Separate names with commas; do not
+   enter URLs or wildcards.
+2. Choose **My certificate authority (CA)** and select **Create replacement
    request**. Download the public request and submit it to your certificate
    authority. The private key never leaves IRIS through this workflow.
 3. Import the approved public PEM chain, leaf certificate first. Select
    **Validate approval**. The certificate must match the generated key and
    exact requested names, allow TLS server authentication, and be valid now
    with more than seven days remaining.
-4. Review the replacement fingerprint and ensure browser clients trust its
-   issuing authority. Select **Apply approved certificate** and confirm.
+4. Expand **Replacement names and public fingerprint** and review its details. Check
+   browser clients trust its issuing authority. Select **Apply approved certificate**
+   and confirm.
 5. Open a new trusted browser connection. Verify the served certificate and
    application access, not just the published state.
 
@@ -60,9 +65,14 @@ key. **Settings > TLS & trust** still supports importing an existing key/pair
 or returning to the deployment default; these actions are blocked while an
 admitted publication needs recovery.
 
+If the result is unknown or refused, select **Refresh request** and review the
+current identity and state. Choose the approval file again before submitting it.
+Leaving the page clears that selection but does not cancel a submitted request.
+A status refresh shows publication progress; it does not prove listener reload.
+
 ## Replace the metrics scraping token
 
-1. Under **Service credentials**, choose **Metrics scraping token**.
+1. Expand **Rotate telemetry credentials**, then choose **Metrics scraping token**.
 2. Select **Generate token in this browser**, or enter a replacement token.
    Select **Download private token file** and protect it as a credential.
    Status responses do not return the token later.
@@ -86,7 +96,7 @@ adopting Console management. See the [mounted-file procedure](rotations.md#rotat
 
 1. Create the replacement credential in your collector's administration
    interface, keeping the previous credential valid during migration.
-2. Under **Service credentials**, choose **Outbound collector authentication**.
+2. Under **Rotate telemetry credentials**, choose **Outbound collector authentication**.
 3. Enter the exact HTTPS collector base URL already configured for telemetry.
    Add its authentication header names and values, then select **Apply
    replacement credential**. This does not change the export destination.
@@ -98,13 +108,19 @@ adopting Console management. See the [mounted-file procedure](rotations.md#rotat
    **Finish verified rotation** and confirm.
 
 IRIS cannot revoke credentials at an external collector. Finishing removes its
-saved previous Console value; it does not attest to remote revocation. Deployment
+saved previous Console value; confirm remote revocation with its administrator. Deployment
 files remain untouched and should not be mistaken for an active override.
 
 Credentials are bound to the exact HTTPS base URL. Changing the telemetry
 destination while an override targets another URL stops export rather than
 forwarding those credentials elsewhere. Finish or revert the pending transition
 before preparing replacement credentials for a different destination.
+
+For an unknown or refused credential result, select **Refresh evidence** and
+review the operation ID and observed use before continuing. Secret fields clear
+on submission, when you change credential families, or when you leave the page
+or browser tab. Re-enter a replacement only after checking the current state.
+Returning to the page never submits a request again.
 
 ## Scheduling and deployment boundaries
 
@@ -114,7 +130,7 @@ See [Schedule key maintenance](key-maintenance.md).
 
 These workflows use server-owned encrypted configuration and the authenticated
 Console connection. They do not modify host bind mounts or Kubernetes Secrets.
-For management and device TLS, peer issuing CA, offline signing roots, service
+For management and device TLS, peer issuing CA, root signing keys, service
 encryption identity and seeder credentials, use
 [deployment maintenance](deployment-rotation.md). That host-worker workflow has
 a narrower deployment boundary and requires verified recovery access.

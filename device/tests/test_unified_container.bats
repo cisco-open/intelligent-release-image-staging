@@ -29,6 +29,22 @@ _xr() {
   _base IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_TEST_SKIP_MOUNT_CHECK=1 "$@"
 }
 
+_production() {
+  # Supply the image's working directory without requiring /opt/iris on the
+  # test host. Keep production mode and every entrypoint validation enabled.
+  env -i PATH="$PATH" "$@" bash -c '
+    _test_runtime=$1
+    cd() {
+      if [ "$#" -eq 1 ] && [ "$1" = /opt/iris ]; then
+        builtin cd "$_test_runtime"
+      else
+        builtin cd "$@"
+      fi
+    }
+    . "$0"
+  ' "$ENTRYPOINT" "$BATS_TEST_TMPDIR"
+}
+
 _placement_from_conf() {
   env -i PATH="$PATH" PYTHONPATH="$DEVICE/agent:$DEVICE" \
     python3 - "$CONF" "$1" <<'PY'
@@ -105,6 +121,198 @@ PY
   grep -q 'iris-root.allowed_signers' "$common"
   grep -Eq 'build-device-image\.sh.*--instruction-roots-dir' "$iox"
   grep -Eq 'build-device-image\.sh.*--instruction-roots-dir' "$xr"
+}
+
+_neutral_archive() {
+  python3 - "$1" "${2:-0}" <<'PY'
+import gzip, hashlib, io, json, sys, tarfile
+from pathlib import Path
+def encoded(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+def tar(entries):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w') as archive:
+        for name, data in entries:
+            member = tarfile.TarInfo(name)
+            if data is None:
+                member.type, member.mode = tarfile.DIRTYPE, 0o755
+            else:
+                member.size = len(data)
+            archive.addfile(member, None if data is None else io.BytesIO(data))
+    return buffer.getvalue()
+blobs = {}
+def blob(data, media, **extra):
+    key = hashlib.sha256(data).hexdigest()
+    blobs['blobs/sha256/' + key] = data
+    return dict(mediaType=media, digest='sha256:' + key, size=len(data), **extra)
+kind = 'application/vnd.oci.image.'
+descriptors = []
+for arch in ('amd64', 'arm64'):
+    entries = [(name, None) for name in ('opt', 'opt/iris', 'opt/iris/agent')]
+    entries.append(('opt/iris/agent/runtime.py', arch.encode()))
+    if sys.argv[2] == '1':
+        entries.append(('opt/iris/agent/iris-root.allowed_signers', b'active public trust'))
+    layer = tar(entries)
+    config = dict(os='linux', architecture=arch, rootfs=dict(type='layers',
+        diff_ids=['sha256:' + hashlib.sha256(layer).hexdigest()]))
+    manifest = dict(schemaVersion=2, mediaType=kind+'manifest.v1+json',
+        config=blob(encoded(config), kind+'config.v1+json'),
+        layers=[blob(gzip.compress(layer, mtime=0), kind+'layer.v1.tar+gzip')])
+    descriptors.append(blob(encoded(manifest), kind+'manifest.v1+json',
+        platform=dict(os='linux', architecture=arch)))
+index = dict(schemaVersion=2, mediaType=kind+'index.v1+json', manifests=descriptors)
+Path(sys.argv[1]).write_bytes(tar([('oci-layout', encoded(dict(imageLayoutVersion='1.0.0'))),
+    ('index.json', encoded(index)), *sorted(blobs.items())]))
+PY
+}
+
+_neutral_fixture() {
+  BUILD_REPO="$BATS_TEST_TMPDIR/build-repo"
+  MOCK_BIN="$BATS_TEST_TMPDIR/mock-bin"
+  MOCK_OCI="$BATS_TEST_TMPDIR/neutral.oci.tar"
+  MOCK_DOCKER_LOG="$BATS_TEST_TMPDIR/docker.log"
+  MOCK_RENDER_TRACE="$BATS_TEST_TMPDIR/render.log"
+  mkdir -p "$BUILD_REPO"/{tools/iris_installer,tools/licenses,device/container,device/agent,deliverables,server,artifacts} "$MOCK_BIN"
+  cp "$REPO/tools/build-device-image.sh" "$BUILD_REPO/tools/"
+  cp "$DEVICE/container/"{Dockerfile,entrypoint.sh,reconcile.sh,rebuild-xml.py} "$BUILD_REPO/device/container/"
+  cp "$REPO/tools/"{iris-aead.c,build-instruction-crypto-inner.sh} "$BUILD_REPO/tools/"
+  cp "$REPO/tools/licenses/musl-COPYRIGHT" "$BUILD_REPO/tools/licenses/"
+  cp "$REPO/tools/iris_installer/"{__init__.py,state.py,custody.py,key_setup.py,device_finalize.py} "$BUILD_REPO/tools/iris_installer/"
+  printf 'fixture-version\n' > "$BUILD_REPO/VERSION"
+  printf '# fixture\n' > "$BUILD_REPO/device/agent/runtime.py"
+  printf '# fixture\n' > "$BUILD_REPO/device/agent/peer-transfer-hook.sh"
+  printf '# fixture\n' > "$BUILD_REPO/device/verify_image.py"
+  for arch in x86_64 aarch64; do
+    printf 'synthetic %s\n' "$arch" > "$BUILD_REPO/deliverables/aria2c-$arch"
+    printf '%s %s\n' "$(sha256sum "$BUILD_REPO/deliverables/aria2c-$arch" | cut -d' ' -f1)" "$arch" >> "$BUILD_REPO/tools/aria2c.sha256"
+  done
+  cat > "$BUILD_REPO/server/instruction_keys.py" <<'PY'
+import os
+from pathlib import Path
+class InstructionKeyError(Exception): pass
+def render_device_trust(roots, output):
+    Path(os.environ['MOCK_RENDER_TRACE']).write_text('called')
+    for name in ('iris-signers.allowed_signers', 'iris-root.allowed_signers'):
+        (Path(output) / name).write_text('synthetic rooted-mode context')
+PY
+  cat > "$MOCK_BIN/file" <<'SH'
+#!/bin/sh
+case "$1" in *amd64) echo 'ELF x86-64';; *arm64) echo 'ELF ARM aarch64';; *) exit 1;; esac
+SH
+  cat > "$MOCK_BIN/docker" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MOCK_DOCKER_LOG"
+if [ "$*" = 'buildx version' ]; then exit 0; fi
+[ "$1 $2" = 'buildx build' ] || exit 91
+for value in "$@"; do
+  case "$value" in type=oci,dest=*) cp "$MOCK_OCI" "${value#type=oci,dest=}";; esac
+done
+SH
+  chmod +x "$MOCK_BIN/docker" "$MOCK_BIN/file"
+  _neutral_archive "$MOCK_OCI"
+}
+
+_device_builder() {
+  local overrides=()
+  while [[ "${1:-}" == *=* ]]; do overrides+=("$1"); shift; done
+  env -i PATH="$MOCK_BIN:$PATH" MOCK_OCI="$MOCK_OCI" \
+    MOCK_DOCKER_LOG="$MOCK_DOCKER_LOG" MOCK_RENDER_TRACE="$MOCK_RENDER_TRACE" \
+    "${overrides[@]}" bash "$BUILD_REPO/tools/build-device-image.sh" "$@"
+}
+
+@test "neutral device build has explicit separate identity and no root rendering" {
+  _neutral_fixture
+  mkdir "$BATS_TEST_TMPDIR/context"
+  run _device_builder --context "$BATS_TEST_TMPDIR/context" --neutral-trust
+  [ "$status" -eq 0 ]
+  archive="$BUILD_REPO/artifacts/iris-device-fixture-version-neutral.oci.tar"
+  [ -f "$archive" ]
+  grep -qx 'format=iris-device-neutral-oci-v1' "$archive.manifest"
+  grep -qx 'trust_mode=neutral' "$archive.manifest"
+  grep -Eq '^source_sha256=[0-9a-f]{64}$' "$archive.manifest"
+  grep -q -- '--build-arg IRIS_NEUTRAL_TRUST=1' "$MOCK_DOCKER_LOG"
+  [ ! -e "$MOCK_RENDER_TRACE" ]
+  [ ! -s "$BATS_TEST_TMPDIR/context/agent/iris-signers.allowed_signers" ]
+  [ ! -s "$BATS_TEST_TMPDIR/context/agent/iris-root.allowed_signers" ]
+  mkdir "$BATS_TEST_TMPDIR/reuse-context"
+  run _device_builder --context "$BATS_TEST_TMPDIR/reuse-context" --neutral-trust
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"reusing canonical device OCI"* ]]
+  [ "$(grep -c '^buildx build ' "$MOCK_DOCKER_LOG")" -eq 1 ]
+}
+
+@test "ordinary device build retains root rendering and rooted provenance" {
+  _neutral_fixture
+  mkdir "$BATS_TEST_TMPDIR/context"
+  run _device_builder --context "$BATS_TEST_TMPDIR/context"
+  [ "$status" -eq 0 ]
+  archive="$BUILD_REPO/artifacts/iris-device-fixture-version.oci.tar"
+  grep -qx 'format=iris-device-oci-v1' "$archive.manifest"
+  grep -qx 'trust_mode=rooted' "$archive.manifest"
+  [ -s "$MOCK_RENDER_TRACE" ]
+  [ -s "$BATS_TEST_TMPDIR/context/agent/iris-root.allowed_signers" ]
+  grep -q -- '--build-arg IRIS_NEUTRAL_TRUST=0' "$MOCK_DOCKER_LOG"
+}
+
+@test "neutral build refuses explicit roots and missing architecture before work" {
+  _neutral_fixture
+  mkdir "$BATS_TEST_TMPDIR/context"
+  run _device_builder --context "$BATS_TEST_TMPDIR/context" --neutral-trust --instruction-roots-dir /not-opened
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"cannot use instruction roots"* ]]
+  run _device_builder IRIS_INSTRUCTION_ROOTS_DIR=/not-opened --context "$BATS_TEST_TMPDIR/context" --neutral-trust
+  [ "$status" -eq 2 ]
+  run _device_builder IRIS_DEVICE_PLATFORMS=linux/amd64 --context "$BATS_TEST_TMPDIR/context" --neutral-trust
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"requires both"* ]]
+  [ ! -e "$MOCK_DOCKER_LOG" ]
+  [ ! -e "$MOCK_RENDER_TRACE" ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/context")" ]
+}
+
+@test "forced rebuild cannot mix neutral and rooted caches" {
+  _neutral_fixture
+  for first in neutral rooted; do
+    output_path="$BATS_TEST_TMPDIR/built-$first.oci.tar"
+    mkdir "$BATS_TEST_TMPDIR/$first-context" "$BATS_TEST_TMPDIR/$first-second"
+    args=()
+    [ "$first" != neutral ] || args=(--neutral-trust)
+    run _device_builder --context "$BATS_TEST_TMPDIR/$first-context" --output "$output_path" "${args[@]}"
+    [ "$status" -eq 0 ]
+    before="$(sha256sum "$output_path" "$output_path.manifest")"
+    args=()
+    [ "$first" != rooted ] || args=(--neutral-trust)
+    run _device_builder IRIS_FORCE_DEVICE_IMAGE_BUILD=1 --context "$BATS_TEST_TMPDIR/$first-second" --output "$output_path" "${args[@]}"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"different trust mode"* ]]
+    [ "$(sha256sum "$output_path" "$output_path.manifest")" = "$before" ]
+  done
+  [ "$(grep -c '^buildx build ' "$MOCK_DOCKER_LOG")" -eq 2 ]
+}
+
+@test "neutral builder refuses an emitted runtime containing active roots" {
+  _neutral_fixture
+  _neutral_archive "$MOCK_OCI" 1
+  mkdir "$BATS_TEST_TMPDIR/context"
+  run _device_builder --context "$BATS_TEST_TMPDIR/context" --neutral-trust
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already contains active trust"* ]]
+  [ -z "$(ls -A "$BUILD_REPO/artifacts")" ]
+}
+
+@test "neutral Dockerfile removes only empty placeholders before one flattened export" {
+  dockerfile="$DEVICE/container/Dockerfile"
+  grep -qx 'ARG IRIS_NEUTRAL_TRUST=0' "$dockerfile"
+  grep -q '0) test -s /opt/iris/agent/iris-signers.allowed_signers' "$dockerfile"
+  grep -q '1) test ! -s /opt/iris/agent/iris-signers.allowed_signers' "$dockerfile"
+  grep -q 'rm /opt/iris/agent/iris-signers.allowed_signers /opt/iris/agent/iris-root.allowed_signers' "$dockerfile"
+  [ "$(grep -c '^FROM scratch$' "$dockerfile")" -eq 1 ]
+  grep -qx 'COPY --from=runtime-files / /' "$dockerfile"
+  # BuildKit creates a second (empty) layer for WORKDIR, even if COPY already
+  # supplied the directory. CAF and offline trust finalization require one.
+  ! sed -n '/^FROM scratch$/,$p' "$dockerfile" | grep -Eq '^(WORKDIR|RUN|ADD) '
+  [ "$(sed -n '/^FROM scratch$/,$p' "$dockerfile" | grep -c '^COPY ')" -eq 1 ]
+  grep -qx '  cd /opt/iris || fatal "cannot enter the device runtime directory"' "$ENTRYPOINT"
 }
 
 @test "missing and unknown platform values fail before any config write" {
@@ -205,17 +413,15 @@ PY
 }
 
 @test "production IOx requires CAF app-data and refuses a catalog path override" {
-  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=iox \
+  run _production IRIS_DEVICE_PLATFORM=iox \
     IRIS_CATALOG_URL=https://192.0.2.1:8443 IRIS_CATALOG_TOKEN=test-token \
     IRIS_DEVICE_ID=device-1 IRIS_DEVICE_SSH_HOST=192.0.2.2 \
-    IRIS_DEVICE_SSH_USER=test IRIS_DEVICE_SSH_PASS=test \
-    bash "$ENTRYPOINT"
+    IRIS_DEVICE_SSH_USER=test IRIS_DEVICE_SSH_PASS=test
   [ "$status" -ne 0 ]
   [[ "$output" == *"CAF_APP_APPDATA_DIR is required"* ]]
 
-  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=iox \
-    CAF_APP_APPDATA_DIR=/data/appdata IRIS_CATALOG_CA=/tmp/redirected.pem \
-    bash "$ENTRYPOINT"
+  run _production IRIS_DEVICE_PLATFORM=iox \
+    CAF_APP_APPDATA_DIR=/data/appdata IRIS_CATALOG_CA=/tmp/redirected.pem
   [ "$status" -ne 0 ]
   [[ "$output" == *"IRIS_CATALOG_CA is test-only"* ]]
 }
@@ -360,9 +566,9 @@ EOF
 }
 
 @test "XR test-only mount bypass cannot be enabled in production" {
-  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=xr-appmgr \
+  run _production IRIS_DEVICE_PLATFORM=xr-appmgr \
     IRIS_TEST_SKIP_MOUNT_CHECK=1 IRIS_CATALOG_URL=https://192.0.2.1:8443 \
-    IRIS_CATALOG_TOKEN=t IRIS_DEVICE_ID=d bash "$ENTRYPOINT"
+    IRIS_CATALOG_TOKEN=t IRIS_DEVICE_ID=d
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a mounted filesystem"* ]]
 }

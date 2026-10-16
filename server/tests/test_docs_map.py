@@ -58,6 +58,62 @@ def test_every_nav_page_exists():
             "zensical.toml nav references missing page: %s" % page
 
 
+def test_activity_abort_describes_preflight_wait_and_installer_stop_request():
+    page = Path(DOCS, "user-guide/onboarding.md").read_text()
+    text = " ".join(page.split())
+    assert "requests a stop for a running installer" in text
+    assert "waits for those checks to finish and prevents the installer from starting" in text
+    assert "Wait for the job's final status before another action" in text
+
+
+def test_catalyst_iox_storage_requirement_matches_the_onboarding_profile():
+    source = Path(REPO, 'server/gui_onboard.py').read_text()
+    module = ast.parse(source)
+    assignment = next(node for node in module.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == '_C9K_IOX_ENV'
+                              for target in node.targets))
+    profile = ast.literal_eval(assignment.value)
+    requirements = Path(DOCS, 'install/device-requirements.md').read_text()
+    supported = Path(DOCS, 'install/supported-devices.md').read_text()
+    assert profile['SHARE_IOS_PATH'] in requirements
+    assert 'requires an app-hosting SSD' in requirements
+    assert 'The share must be writable' in requirements
+    assert 'app-hosting SSD and the required IRIS share' in supported
+
+
+def test_unassign_retention_docs_distinguish_xr_ownership_from_undeploy():
+    assignments = Path(DOCS, "user-guide/assignments.md").read_text()
+    parked = _section(assignments, "What happens to an image you unassign")
+    _assert_unit(parked, ("IOS-XR", "IRIS downloaded", "removed", "adopted",
+                          "unknown origin", "stay"),
+                 "XR parking removes only proven downloads, not adopted files")
+    assert "to keep it on the device" not in parked
+    undeploy = " ".join(Path(DOCS, "user-guide/undeploy.md").read_text().split())
+    assert "assignments and root image files" in undeploy
+    assert "Unassigning first can remove files IRIS downloaded on IOS-XR" in undeploy
+    assert "assignments.md#unassigned-image-park" in undeploy
+    glossary = Path(DOCS, "reference/glossary.md").read_text()
+    assert "Retained files" in _section(glossary, "park")
+    for relative in ("docs/dev/validation-records.md",
+                     "docs/dev/ai-assisted-deployment.md",
+                     "server/webroot/help-device.html"):
+        text = " ".join(Path(REPO, relative).read_text().split())
+        assert "Unassigning an IOS-XR image removes files IRIS downloaded in place" in text
+        assert "files of unknown origin stay" in text
+        assert "Undeploy itself leaves any remaining root image files" in text
+
+
+def test_force_undeploy_docs_explain_marked_router_network_cleanup():
+    undeploy = " ".join(Path(DOCS, "user-guide/undeploy.md").read_text().split())
+    assert "VirtualPortGroups with an IRIS ownership description" in undeploy
+    assert "static NAT mappings inside those marked subnets" in undeploy
+    assert "Unmarked operator interfaces and unrelated NAT rules stay in place" in undeploy
+    assert "It leaves your VLAN, SVI, VirtualPortGroup and NAT rules" not in undeploy
+    api = Path(DOCS, "reference/console-api.md").read_text()
+    assert "../user-guide/undeploy.md#force-undeploy" in api
+    assert "force`, which removes only the IRIS-installed agent" not in api
+
+
 def test_nav_page_existence_check_catches_missing_file_and_directory_target(tmp_path):
     """Prove the os.path.isfile guard test_every_nav_page_exists relies on
     actually flags both failure shapes Zensical itself stays silent about: a
@@ -268,10 +324,29 @@ def test_problem_registry_covers_literal_role_coordinator_codes():
     assert not codes - headings, sorted(codes - headings)
 
 
-def test_rollback_guard_recovery_section_stays_available():
+def test_migration_guard_recovery_keeps_evidence_without_old_code_rollout():
     page = _page("admin-guide/recovery.md")
-    assert "## Roll back the per-device state split" in page
-    assert "does not restore writes made after the" in page
+    assert "## Inspect retained per-device migration evidence { #rollback-after-the-shard-migration }" in page
+    assert "retained document can omit newer" in page
+    assert "Do not replace the placeholder" in page
+    assert "run older\n    application code" in page
+    assert "current security records and a consistent backup" in page
+    assert "[Deploy a new release](upgrade.md)" in page
+    assert "Restore the retained document at the original path" not in page
+    assert "state rollback" not in _page("admin-guide/index.md")
+
+
+def test_changed_package_source_uses_build_only_then_deployment_replacement():
+    page = _page("install/device-packages.md")
+    rebuild = _section(page, "When to rebuild the packages")
+    assert "docker compose -f server/docker-compose.yml build --pull" in rebuild
+    assert "[Deploy a new release](../admin-guide/upgrade.md)" in rebuild
+    assert "removes\nand re-onboards" in rebuild
+    assert "Verify readiness on the new deployment before onboarding" in rebuild
+    assert "same release and public roots when generating or signing its packages" in rebuild
+    assert "up -d --build" not in rebuild
+    assert "rollout restart" not in rebuild
+    assert "tools/provision-iox-packages.sh" not in rebuild
 
 
 def test_readme_api_reference_is_rendered_site_not_html_source():
@@ -607,12 +682,13 @@ def test_docs_state_policy_outbox_backlog():
 
 def test_docs_state_phase_zero_role_and_qos_contract():
     """Phase 0 documentation must distinguish server enforcement from future
-    device instructions and preserve the preflight-only origin boundary."""
+    device instructions and preserve the reviewed origin boundary."""
     _require("security.md", [
         "virtual role ACL",
         "shadows the role",
         "does not sever existing connections",
-        "preflight only",
+        "default is **preflight**",
+        "reviewed opt-in",
         "shared_permit_deny",
         "agent-distribution exemption",
     ])
@@ -648,7 +724,17 @@ def test_docs_state_phase_zero_role_and_qos_contract():
                  "the agent-distribution exemption must list the controls")
     _assert_unit(security, ("reconciler", "preflight",
                             "keeps applying the rules in force"),
-                 "mutual-origin blocking must stay preflight only")
+                 "mutual-origin blocking must stay inert by default")
+    _assert_unit(security, ("exact device identities", "IPv4 addresses",
+                           "limits", "another preview"),
+                 "origin activation must bind exact reviewed identities and addresses")
+    _require("user-guide/roles.md", ["Distribution access", "Preview only",
+        "New address limit", "New device limit", "Apply reviewed change",
+        "Saved mode", "Transfer-service status", "Approved for blocking",
+        "Confirmed at last refresh", "Refresh status",
+        "Choose behavior when instructions expire", "Follow the server setting", "Keep last verified settings",
+        "Use built-in device settings", "no upload or download speed limit",
+        "Canceling keeps them and sends no read"])
     _require("architecture/limitations.md",
              ["per-role origin shaping is not expressible"])
     _require("reference/peer-policy-api.md", [
@@ -683,6 +769,13 @@ def test_docs_state_phase_zero_recovery_and_interface_boundaries():
         "`partial`",
         "persists both the accepted revision and its epoch",
     ])
+    recovery = " ".join(_section(
+        _page("user-guide/roles.md"), "When a role change half-succeeds").split())
+    assert "Preview the remaining change again with the current revision" in recovery
+    assert "An earlier revision or confirmation can be refused after a partial write" in recovery
+    assert "send the same request again" not in recovery
+    help_server = " ".join(Path(REPO, "server/webroot/help-server.html").read_text().split())
+    assert "Preview the remaining change with the current revision" in help_server
     _require("reference/peer-policy-api.md", [
         "preview returns 200 JSON",
         "committed DELETE returns 204",
@@ -755,6 +848,21 @@ def test_docs_state_rotation_proof_is_loopback_swarm():
     """Rotation is proven by observing the typed current service seeder through
     the tracker's loopback /swarm -- no registry shortcut, no IP guess."""
     _require("admin-guide/rotations.md", ["/swarm", "service:seeder"])
+
+
+def test_docs_seeder_rotation_preserves_token_free_urls_and_enforces_overlap_cap():
+    """Credential headers and the overlap cap do not depend on fresh torrents."""
+    rotation = " ".join(_page("admin-guide/rotations.md").split())
+    deployment = " ".join(_page("admin-guide/deployment-rotation.md").split())
+    assert "HTTPS authorization header" in rotation
+    assert "published torrent URLs and image hashes unchanged" in rotation
+    assert "At most two previous credentials can remain valid" in rotation
+    assert "refreshing device torrents does not change this limit" in rotation
+    assert "Releasing it restarts seeding with the current credential" in rotation
+    assert "retired announce" not in rotation
+    assert "unless every device has a fresh torrent" not in rotation
+    assert "torrent announce URLs" not in deployment
+    assert "HTTPS authorization header" in deployment
 
 
 def test_docs_state_report_identity_survives_retries():
@@ -975,7 +1083,7 @@ def test_devices_csv_example_header_matches_the_console_template():
     assert header == served_header
 
 
-def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
+def test_workstream_a_docs_define_tracker_cadence_and_safe_replacement():
     """Acceptance 26 keeps the persisted tracker contract executable in prose."""
     reference = _page("reference/peer-policy-api.md")
     operations = (_page("architecture/security-model.md") + "\n"
@@ -1021,27 +1129,22 @@ def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
                      r"jitter.{0,40}(?:once|one)", cadence)
     assert ("left == 0" in reference or "left == 0" in operations)
 
-    downgrade = operations.lower()
-    assert re.search(r"remove.{0,100}every.{0,100}(?:global|role).{0,100}state",
-                     downgrade, re.DOTALL)
-    assert re.search(r"(?:one|an) additional.{0,100}scalar-only.{0,100}"
-                     r"commit", downgrade, re.DOTALL)
+    replacement = operations.lower()
     for filename in ("peer-policy.json", "peer-policy.lkg.json"):
-        assert filename in downgrade
-    assert re.search(r"state-free.{0,80}schema[- ]1|schema[- ]1.{0,80}state-free",
-                     downgrade, re.DOTALL)
-    assert re.search(r"(?:do not|never).{0,80}retained.{0,80}"
-                     r"state-bearing.{0,80}ring snapshot", downgrade,
-                     re.DOTALL)
-    assert "restricted-role" in downgrade and "quarantine" in downgrade
+        assert filename in replacement
+    assert 'deployment removal, a fresh install' in replacement
+    assert 'device re-onboarding' in replacement
+    assert 'restricted-role' in replacement and 'quarantine' in replacement
     assert re.search(r"(?:older|predating).{0,160}independent quarantine",
-                     downgrade, re.DOTALL)
+                     replacement, re.DOTALL)
     assert re.search(r"not.{0,80}sufficient.{0,120}(?:quarantine|downgrad)",
-                     downgrade, re.DOTALL)
+                     replacement, re.DOTALL)
+    assert 'one additional, scalar-only policy commit' not in replacement
+    assert 'before you start the older binary' not in replacement
 
 
-def test_workstream_a_docs_separate_tracker_observability_and_api_only_state():
-    """Acceptance 27/28 preserves scalar intent and the API-only boundary."""
+def test_workstream_a_docs_separate_tracker_observability_and_state_controls():
+    """Tracker overlays stay outside device intent and round-trip through CSV."""
     observability = (_page("reference/telemetry-signals.md") + "\n"
                      + _page("reference/peer-policy-api.md") + "\n"
                      + _page("user-guide/monitoring.md"))
@@ -1080,18 +1183,18 @@ def test_workstream_a_docs_separate_tracker_observability_and_api_only_state():
     assert "qos_state" in console_lower
     assert re.search(r"qos_state.{0,160}(?:api-only|management api|documented api)",
                      console_lower, re.DOTALL)
-    assert "no role-policy json editor" in console_lower
+    assert "seeder_numwant" in console_lower and "leecher_numwant" in console_lower
+    assert "named fields for sharing permissions, speed limits and agent settings" in console_lower
 
     fleet_lower = fleet.lower()
-    for term in ("iris-role", "roles.csv", "scalar-only", "qos_state",
+    for term in ("iris-role", "roles.csv", "seeder/leecher", "qos_state",
                  "qos_changed", "candidate-bound"):
         assert term in fleet_lower, term
-    assert re.search(r"iris-role\s+export.{0,160}omit.{0,60}qos_state",
+    assert re.search(r"iris-role\s+export.{0,160}including.{0,60}qos_state",
                      fleet_lower, re.DOTALL)
     assert re.search(r"iris-role\s+define.{0,160}(?:remove|clear).{0,80}state",
                      fleet_lower, re.DOTALL)
-    assert re.search(r"iris-role\s+import.{0,160}(?:remove|clear).{0,80}state",
-                     fleet_lower, re.DOTALL)
+    assert "blank or missing columns remove" in fleet_lower
     assert re.search(r"(?:configure|preserve|remove).{0,100}state.{0,100}"
                      r"management api", fleet_lower, re.DOTALL)
     for verb in ("configure", "preserve", "remove"):
@@ -1323,8 +1426,8 @@ def _assert_phase1_enforcement_boundary(text):
 
 
 def _assert_phase1_rollup_relationship(text):
-    _assert_unit(text, ("fleet_rollup", "issued_revision", "nullable"),
-                 "issued revision must be documented as current-or-null")
+    _assert_unit(text, ("fleet_rollup", "issued_revision", "highest", "null"),
+                 "issued revision must be documented as the highest issued revision or null")
     _assert_unit(text, ("fleet_rollup", "applied", "policy revision"),
                  "applied rollup must count accepted policy revisions")
     for unit in _units(text):
@@ -1338,6 +1441,28 @@ def _assert_phase1_rollup_relationship(text):
             r"(?:by\s+)?instruction serial", lower)
         if affirmative and not negative:
             raise AssertionError("fleet rollup must not key on instruction serial")
+
+
+def test_role_docs_explain_reciprocal_edits_and_per_device_instruction_revisions():
+    roles = " ".join(_page("user-guide/roles.md").split())
+    reference = " ".join(_page("reference/peer-policy-api.md").split())
+    assert "updates the other role's list in the same save" in roles
+    assert "adds or removes the matching link in each other role's list" in reference
+    assert "Devices can report different accepted revisions" in reference
+    assert ("effective settings unchanged does not by itself issue a new instruction"
+            in reference)
+
+
+def test_key_holder_guides_use_plain_language_and_preserve_saved_links():
+    for name in ("install/signing-roots.md", "admin-guide/index.md",
+                 "admin-guide/instruction-keys.md", "admin-guide/recovery.md",
+                 "install/separate-docker-hosts.md"):
+        prose = re.sub(r"\{ #[^}\n]+ \}", "", _without_code_blocks(_page(name)))
+        prose = re.sub(r"(?<=\])\([^)]*\)", "", prose)
+        assert not re.search(r"\b(?:custody|custodians?)\b", prose), name
+    roots = _page("install/signing-roots.md")
+    for holder, order in (("a", "first"), ("b", "second")):
+        assert f"{{ #holder-{holder}-on-the-{order}-custody-machine }}" in roots
 
 
 
@@ -1542,6 +1667,24 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
             unit, re.IGNORECASE)
 
 
+def test_iox_native_signing_keeps_manifest_and_platform_trust_distinct():
+    signing = _section(_page("install/iox.md"), "Native package signing")
+    normalized = " ".join(signing.split())
+    for phrase in (
+            "IOS XE 17.15.x", "only Cisco-signed applications",
+            "Your own certificates and IRIS instruction keys cannot replace the Cisco package signature",
+            "unsigned packages with SHA512 entries", "authorized Cisco signing service",
+            "exact `package.mf` bytes", "adds `package.sign`",
+            "manifest excludes itself, `package.sign` and `package.cert`",
+            "Keep signed packages unchanged", "provenance sidecars after signing",
+            "target device with package verification enabled"):
+        assert phrase in normalized, phrase
+    assert (
+        "https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/"
+        "software/17_15/17-15-x-release-notes-ie3x00-ess3300.html"
+    ) in signing
+
+
 def test_docs_phase1_iox_verification_transaction():
     iox = _page("install/iox.md")
     verification_heading = "Signature verification is a device-wide setting"
@@ -1591,7 +1734,7 @@ def test_docs_phase1_iox_verification_transaction():
              ("IOx verification", "signed wrapper",
               "verification-state change")),
             ("admin-guide/instruction-keys.md",
-             "Publish a new Guest Shell agent bundle",
+             "Replace a Guest Shell agent",
              ("IOx", "signature verification is a device-wide setting")),
             ("install/iox.md", "Check that the IOx app came up",
              ("IOx verification", "uninstall recovery",
@@ -1652,7 +1795,7 @@ def test_docs_phase1_kubernetes_and_split_host_custody():
                          "age identity", "runtime plaintext", "instruction state"),
                  "private custody material must remain on the server host")
     _assert_unit(split, ("offline-root public keys", "public material",
-                         "private keys", "offline custodians"),
+                         "private keys", "offline key holders"),
                  "public trust material must not be called secret")
 
     # The post-rewrite check list is one table with a column per layout, so
@@ -1679,10 +1822,13 @@ def test_docs_phase1_operations_root_and_offline_runbooks():
     operations = _page("admin-guide/instruction-keys.md")
     _assert_section_terms(operations, "Replace the two root keys",
                           ("quarterly two-root ceremony", "two distinct public roots",
-                           "custodians", "sites", "fingerprints"),
+                           "chosen protected storage", "root key holders", "fingerprints"),
                  "quarterly two-root ceremony is incomplete")
+    _assert_unit(operations, ("private root keys", "separate", "guided local setup",
+                             "Never upload", "Console"),
+                 "root key storage must allow the supported setup choices without inviting private-key upload")
     _assert_section_terms(operations, "If one root key is lost",
-                          ("surviving offline custodian", "next online certificate",
+                          ("surviving root key holder", "next online certificate",
                            "keylist", "No device trust change"),
                           "one-root failover must leave device trust unchanged")
     break_glass = _section(operations, "If both root keys are lost")
@@ -1694,10 +1840,18 @@ def test_docs_phase1_operations_root_and_offline_runbooks():
     _assert_unit(operations, ("ciphertext bootstrap envelope",
                               "not a secret key"),
                  "offline payload must be identified as ciphertext, not a key")
-    bundle_drop = _section(operations, "Publish a new Guest Shell agent bundle")
-    _assert_unit(bundle_drop, ("sidecar before archive", "mismatched evidence",
-                               "prior runnable bundle"),
-                 "Guest Shell rollout must order evidence and retain rollback")
+    bundle_drop = _section(operations, "Replace a Guest Shell agent")
+    _assert_ordered(bundle_drop, ("Inventory", "Undeploy", "confirmed removal",
+                                  "Device packages",
+                                  "Onboard", "fresh heartbeat"),
+                    "Guest Shell replacement must remove the old agent before onboarding", 2500)
+    _assert_unit(bundle_drop, ("bootstrap", "agent bundle", "both approved public roots"),
+                 "Guest Shell onboarding must deliver matching bootstrap and public trust")
+    _assert_unit(bundle_drop, ("SHA-256", "mismatched evidence", "stops bundle installation"),
+                 "Guest Shell onboarding must retain bundle verification")
+    assert "#publish-a-new-guest-shell-agent-bundle" in operations.replace(" ", "")
+    assert "Roll back by restoring the reviewed prior bundle" not in bundle_drop
+    assert "**Devices**" not in bundle_drop + _page("admin-guide/upgrade.md")
     _assert_unit(operations, ("Authenticated refresh", "self-heal",
                               "key availability"),
                  "offline bootstrap must converge through authenticated refresh")
@@ -1786,8 +1940,9 @@ def test_docs_phase1_changelog_and_release_boundary():
 
     _assert_section_terms(_page("architecture/security-model.md"),
                           "What the status shows and what it hides",
-                          ("mutual-origin", "preflight only"),
-                 "the open mutual-origin boundary must remain explicit")
+                          ("mutual-origin", "default", "preflight", "reviewed opt-in",
+                           "current aria2 session", "shared", "degraded"),
+                 "reviewed opt-in and evidence boundaries must remain explicit")
 
 
 # ---------------------------------------------------------------------------
@@ -1932,3 +2087,111 @@ def test_installer_guides_use_terminal_key_and_recovery_tools():
     for required in ("irisctl maintenance", "--job-id", "--allow-downtime",
                      "--independent-copy"):
         assert required in recovery, required
+
+
+def test_managed_installer_offers_local_and_separate_holder_workflows():
+    managed = _page("install/managed-package.md")
+    for phrase in ("irisctl setup", "without `sudo`", "Separate key holders",
+                   "--key-directory", "all three layouts", "independent copy",
+                   "does not include these private setup keys"):
+        assert phrase in managed, phrase
+    approval = _page("install/offline-approval.md")
+    for phrase in ("local setup", "iris-key-setup --local", "LOCAL KEY HOLDER",
+                   "only public approval files", "separate-holder"):
+        assert phrase in approval, phrase
+
+
+def test_automatic_setup_docs_keep_passphrases_recovery_and_manual_keys_distinct():
+    managed = " ".join(_page("install/managed-package.md").split())
+    for phrase in (
+            "Automatic key setup is the default (`--key-mode automatic`)",
+            "You do not choose or type signing-key passphrases",
+            "confirm **Start setup?**",
+            "strong random passphrase for each signing key", "mode `0600`", "mode `0700`",
+            "outside deployment storage and backups",
+            "~/.local/share/iris-setup-keys/<instance>", "setup prints the path",
+            "password for `sudo`", "Console administrator password remain separate",
+            "host compromise can expose both", "secure independent copy of the entire key folder",
+            "including passphrase files and `recovery.age`",
+            "Existing manual keys are never replaced or unlocked automatically",
+            "--key-mode manual", "original `--key-directory`"):
+        assert phrase in managed, phrase
+    approval = " ".join(_page("install/offline-approval.md").split())
+    assert "advanced workflow for separate key holders and later local approvals" in approval
+    assert "automatic setup does not unlock them" in approval
+    assert "Automatically managed keys use their saved passphrase" in approval
+    assert "manually managed keys ask you to enter theirs" in approval
+    developer = " ".join(Path(REPO, "docs/dev/installer.md").read_text().split())
+    for phrase in ("--key-mode automatic", "--key-mode manual", "SSH_ASKPASS",
+                   "never through secret arguments, environment values or logs",
+                   "exact pending request", "recorded managed keys",
+                   "does not protect against full host compromise",
+                   "request review and SHA256 confirmation remain required"):
+        assert phrase in developer, phrase
+    runbook = " ".join(Path(REPO, "docs/dev/ai-assisted-deployment.md").read_text().split())
+    assert "without asking the owner to type key passphrases" in runbook
+    assert "existing manual keys require their original passphrases" in runbook
+
+
+def test_certificate_overview_keeps_routine_renewal_distinct_from_advanced_changes():
+    rotations = " ".join(_page("admin-guide/rotations.md").split())
+    signing = " ".join(_page("admin-guide/instruction-keys.md").split())
+    assert "what each certificate protects, its status and expiry" in rotations
+    assert "technical details and advanced changes start closed" in rotations
+    assert "Replacing the signing key is a separate advanced task" in rotations
+    assert "Dates come from public server files" in rotations
+    assert "use their saved passphrases for approval" in signing
+    assert "Renewal is not automatic" in signing
+    deployment = _page("admin-guide/deployment-rotation.md")
+    label = "Advanced: replace deployment keys"
+    assert "Open **Settings > Certificates & keys**, then **" + label + "**" in deployment
+    assert "<strong>" + label + "</strong>" in Path(REPO, "server/webroot/index.html").read_text()
+    assert "<strong>" + label + "</strong>" in Path(REPO, "server/webroot/help-server.html").read_text()
+
+
+def test_contributor_deployment_runbook_matches_managed_setup():
+    runbook = " ".join(Path(REPO, "docs/dev/ai-assisted-deployment.md").read_text().split())
+    for phrase in ("managed package procedure", "both IOx architectures",
+                   "Infrastructure-only checks", "clients are committed",
+                   "bin/aria2c", "deliverables/aria2c-aarch64",
+                   "does not fetch or compile replacement clients",
+                   "irisctl setup", "iris-key-setup --local", "LOCAL KEY HOLDER",
+                   "Private-key operations are refused inside containers",
+                   "do not claim the account or sign in unless asked",
+                   "a SHA512 manifest is not a native signature",
+                   "source-build installer needs network access"):
+        assert phrase in runbook, phrase
+    for stale in ("Fetch the verified aria2c release", "only you create them",
+                  "whatever the device types you chose", "proof of concept only"):
+        assert stale not in runbook, stale
+
+
+def test_signing_guides_distinguish_root_approval_from_instruction_signing():
+    roots = " ".join(_page("install/signing-roots.md").split())
+    glossary = " ".join(_section(_page("reference/glossary.md"), "root key, signing root").split())
+    assert "online instruction-signing key" in roots
+    assert "The online key signs the instructions" in roots
+    assert "key-retirement list" in roots and "key-retirement list" in glossary
+    assert "The online key signs device instructions" in glossary
+    assert "chosen protected local storage" in _page("install/activate-signing.md")
+    assert "iris-key-setup --local" in _page("install/activate-signing.md")
+    signing = " ".join(_page("install/activate-signing.md").split())
+    helper = Path(REPO, "tools/iris_installer/key_setup.py").read_text()
+    for label in ("Approve server request", "Server signing key"):
+        assert label in signing and label in helper, label
+    assert "Online signing certificate" not in signing
+    assert "owner-selected local storage" in roots
+    assert "sign every instruction the server sends" not in roots
+
+
+def test_backup_permission_repair_preserves_recorded_storage_and_private_modes():
+    repair = " ".join(_section(_page("admin-guide/backups.md"),
+                              "Repair volume ownership after a restore").split())
+    for phrase in ("recorded project, volumes and paths", "Stop its writers",
+                   "repair only the verified paths", "Never use recursive",
+                   "preserve the operation files", "Do not run a separate Compose stack"):
+        assert phrase in repair, phrase
+    assert "chown -R" not in repair
+    assert "chmod -R" not in repair
+    assert "docker run" not in repair
+    assert "server_iris-state" not in repair

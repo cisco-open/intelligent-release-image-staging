@@ -57,6 +57,7 @@ ERROR_CODES = frozenset((
     "policy_unavailable", "endpoint_unavailable", "live_unavailable",
     "handout_unavailable", "role_unavailable", "role_cap",
     "stamp_invalid", "stamp_commit", "key_superseded", "status_write",
+    "origin_egress_invalid",
 ))
 _DAY = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
@@ -1163,10 +1164,36 @@ def _live_connections(paths, device_id, now):
     return addresses, int(received + live_samples.LIVE_VALUE_VALIDITY)
 
 
+def _origin_egress_addresses():
+    """Operator-declared source addresses, carried inside authenticated policy."""
+    raw = os.environ.get("IRIS_ORIGIN_EGRESS_IPS", "")
+    values = raw.split(",") if raw else []
+    if len(values) > 8 or len(set(values)) != len(values):
+        raise StamperError("origin_egress_invalid")
+    for value in values:
+        try:
+            address = ipaddress.IPv4Address(value)
+        except (ValueError, TypeError):
+            raise StamperError("origin_egress_invalid") from None
+        if (str(address) != value or address.is_unspecified
+                or address.is_multicast or address.is_loopback
+                or address.is_link_local or address.is_reserved):
+            raise StamperError("origin_egress_invalid")
+    return values
+
+
+def _allow_origin_egress(allowed, origin_addresses):
+    result = sorted(set(allowed) | set(origin_addresses))
+    if len(result) > instructions.MAX_ALLOWED:
+        raise StamperError("origin_egress_invalid")
+    return result
+
+
 def compile_peers(paths, policy, device_id, role, restricted, definition,
                   now, stamp_expires):
     doc, compiled = policy.document, policy.roles
     include_origin = peer_policy.role_origin_enabled(doc, role)
+    origin_addresses = _origin_egress_addresses() if include_origin else []
     explicit = device_id in doc.get("assignments", {})
     owner = auth.Principal("device", device_id)
     if restricted and not explicit and \
@@ -1177,7 +1204,7 @@ def compile_peers(paths, policy, device_id, role, restricted, definition,
             if len(allowed) > instructions.MAX_ALLOWED:
                 return {"mode": "tracker-only", "include_origin": include_origin,
                         "allowed_expires_at": stamp_expires}
-            return {"mode": "allow", "allowed": allowed,
+            return {"mode": "allow", "allowed": _allow_origin_egress(allowed, origin_addresses),
                     "include_origin": include_origin,
                     "allowed_expires_at": stamp_expires}
         by_ip, endpoint_expiries = _endpoint_attribution(paths, now)
@@ -1214,7 +1241,7 @@ def compile_peers(paths, policy, device_id, role, restricted, definition,
                     "allowed_expires_at": stamp_expires}
         expiry = min(expiries + [int(now + peer_endpoints.endpoint_ttl()),
                                  stamp_expires])
-        return {"mode": "allow", "allowed": sorted(allowed),
+        return {"mode": "allow", "allowed": _allow_origin_egress(allowed, origin_addresses),
                 "include_origin": include_origin,
                 "allowed_expires_at": expiry}
 
@@ -1609,7 +1636,8 @@ class InstructionStamper:
                                   if k != "allowed_expires_at"}
                 renewal = max(1, min(120, peer_endpoints.endpoint_ttl() // 3))
                 if membership_old == membership_new \
-                        and old_peers["allowed_expires_at"] - now > renewal:
+                        and old_peers["allowed_expires_at"] - now > renewal \
+                        and old_peers["allowed_expires_at"] <= body["expires_at"]:
                     part["peers"] = copy.deepcopy(old_peers)
 
             desired = {

@@ -49,6 +49,9 @@ def main():
         def enroll_peer_tls(self, device_id, csr):
             return Issuer().issue(device_id, csr)
 
+        def get_peer_revocations(self, device_id, nonce):
+            return Issuer().revocation_snapshot(nonce)
+
     child = None
     current = None
     next_identity_check = 0
@@ -94,6 +97,7 @@ def main():
                         with os.fdopen(fd, 'w') as stream:
                             stream.write(fragment)
                         env['IRIS_PEER_TLS_CONF'] = str(path)
+                        env['IRIS_PEER_TLS_REVOCATIONS'] = str(runtime / 'peer-tls/revocations.txt')
                     child = subprocess.Popen(['bash', sys.argv[1]], env=env)
                     current = identity
                 else:

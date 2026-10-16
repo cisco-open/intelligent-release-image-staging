@@ -188,6 +188,16 @@ def poll_seeder(rpc):
             peer_tls = {"runtime_mode": mode, "runtime_source": "aria2_rpc"}
     except Exception:
         pass
+    if peer_tls['runtime_mode'] == 'required':
+        try:
+            import peer_tls_revocations
+            status = rpc('aria2.getPeerTLSRevocationStatus', [])
+            if isinstance(status, dict):
+                status = peer_tls_revocations.observation(dict(status, observed_at=int(time.time())))
+                if status is not None:
+                    peer_tls['revocations'] = status
+        except Exception:
+            pass
     connections = sum(_int(d.get("connections")) for d in active)
     names, totals, upload_bps = {}, {}, {}
     for d in active:
@@ -2503,7 +2513,7 @@ def _mutual_origin_preflight_ids(enforcement):
     except _peer_enforcement.EnforcementError:
         return None
     ids = summary["newly_denied_device_ids"]
-    return None if ids is None else frozenset(ids)
+    return None if ids is None or summary["mode"] != "preflight" else frozenset(ids)
 
 
 def _peer_enforcement_fact(enforcement, derived_denied,

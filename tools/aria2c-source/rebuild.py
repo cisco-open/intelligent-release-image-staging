@@ -4,12 +4,15 @@
 """Rebuild an extracted source bundle with Docker buildx; no source git checkout."""
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
+from types import SimpleNamespace
 
 
 def verify(root):
@@ -57,7 +60,16 @@ def reconstruct(root, target, manifest):
                 path.chmod(0o755 if member.mode & 0o111 else 0o644)
     subprocess.run(['git', '-C', str(target), 'init', '-q'], check=True)
     for patch in manifest['patches']:
-        source = root / 'original-producer-recipe/patches' / patch['file']
+        name = patch.get('path', 'original-producer-recipe/patches/' + patch['file'])
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or '..' in relative.parts or not relative.parts:
+            raise ValueError('Unsafe patch path')
+        source = root / relative
+        if any(path.is_symlink() for path in (source, *source.parents)) or not source.is_file():
+            raise ValueError('Missing or linked patch input')
+        with source.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != patch['sha256']:
+                raise ValueError('Patch checksum mismatch')
         subprocess.run(['git', '-C', str(target), 'apply', '--check', str(source)], check=True)
         subprocess.run(['git', '-C', str(target), 'apply', str(source)], check=True)
     shutil.rmtree(target / '.git')  # Only metadata just generated in this private temporary tree.
@@ -69,6 +81,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True, help='New output directory; must not exist')
     parser.add_argument('--jobs', type=int, default=2)
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--cache', type=Path, help='retained checksum-locked APK cache')
+    parser.add_argument('--offline', action='store_true', help='require retained APKs and base image')
     args = parser.parse_args()
     root = Path(__file__).resolve().parent
     try:
@@ -77,6 +91,26 @@ def main():
         count = verify(root)
         if args.verify_only:
             print(json.dumps({'source_files_verified': count}))
+            return
+        if args.offline and args.cache is None:
+            raise ValueError('--offline requires --cache')
+        if args.cache is not None:
+            helper = root / 'current-recipe/rebuild-pinned.py'
+            spec = importlib.util.spec_from_file_location('bundle_pinned_rebuild', helper)
+            pinned = importlib.util.module_from_spec(spec)
+            previous = sys.dont_write_bytecode
+            try:
+                # Imported helpers are part of the sealed source set. Do not
+                # create unlisted __pycache__ files inside the caller's bundle.
+                sys.dont_write_bytecode = True
+                spec.loader.exec_module(pinned)
+                pinned.SOURCE = root
+                result = pinned.build(SimpleNamespace(architecture=args.architecture, jobs=args.jobs,
+                    output=args.output, source_directory=root, cache=args.cache,
+                    offline=args.offline, no_cache=False))
+            finally:
+                sys.dont_write_bytecode = previous
+            print(json.dumps(result, sort_keys=True))
             return
         output = args.output.absolute()
         if output.exists() or output.is_symlink() or not output.parent.is_dir():

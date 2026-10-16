@@ -6,7 +6,8 @@
 
 sudo env IRIS_BACKUP_DOCKER_IMAGE=<existing immutable image id> \
   PYTHONDONTWRITEBYTECODE=1 python3 -m pytest server/tests/test_backup_docker.py -q -p no:cacheprovider
-The image must contain /bin/sh and sleep. Every resource has a unique owner.
+The storage image must contain /bin/sh and sleep, with no declared VOLUMEs.
+Every resource has a unique owner.
 """
 
 import hashlib
@@ -33,13 +34,20 @@ def docker(*args):
     return subprocess.check_output(['docker', *map(str, args)], stderr=subprocess.PIPE)
 
 
+def remove_fixture_container(container):
+    # Only this exact fixture container and its implicit anonymous volumes.
+    # Explicitly named fixture volumes are removed separately below.
+    docker('rm', '-fv', container)
+
+
 @pytest.fixture
 def deployment(tmp_path, request):
     image = os.environ.get('IRIS_BACKUP_DOCKER_IMAGE')
     if not image or os.geteuid() != 0:
         pytest.skip('explicit cached test image and root required for Docker volume capture')
-    image_id = json.loads(docker('image', 'inspect', image))[0]['Id']
-    assert image_id == image, 'use an immutable image ID, not a mutable tag'
+    image_record, = json.loads(docker('image', 'inspect', image))
+    assert image_record['Id'] == image, 'use an immutable image ID, not a mutable tag'
+    assert not image_record['Config'].get('Volumes'), 'use a storage fixture image without declared VOLUMEs'
     name = 'iris-backup-test-' + uuid.uuid4().hex[:8]
     owner = str(uuid.uuid4())
     state = tmp_path / 'state'
@@ -112,7 +120,7 @@ def deployment(tmp_path, request):
     finally:
         # Exact unique fixture resources only; no broad prune or fleet changes.
         for container in reversed(containers):
-            docker('rm', '-f', container)
+            remove_fixture_container(container)
         for volume in reversed(volumes):
             docker('volume', 'rm', volume)
 
@@ -165,7 +173,7 @@ def test_external_image_mount_rejects_another_container_writer(deployment):
             with pytest.raises(backup.InstallError, match='can write deployment storage'):
                 backup.capture_plan(DockerInstall(journal))
     finally:
-        docker('rm', '-f', writer)
+        remove_fixture_container(writer)
 
 
 def test_capture_failure_restarts_original_services(deployment, monkeypatch):
@@ -232,7 +240,31 @@ def test_external_writable_bind_of_volume_refused(deployment):
                 recovery_output=deployment.recovery, allow_downtime=True))
         assert not (deployment.state / 'backup-operation.json').exists()
     finally:
-        docker('rm', '-f', writer)
+        remove_fixture_container(writer)
+
+
+def test_fixture_cleanup_removes_only_its_implicit_image_volumes():
+    image = os.environ.get('IRIS_INSTALLER_DOCKER_TEST_IMAGE')
+    if not image:
+        pytest.skip('explicit cached server image required for anonymous-volume cleanup proof')
+    record, = json.loads(docker('image', 'inspect', image))
+    assert record['Id'] == image, 'use an immutable image ID, not a mutable tag'
+    assert record['Config'].get('Volumes'), 'server image must exercise implicit anonymous volumes'
+    name = 'iris-backup-test-cleanup-' + uuid.uuid4().hex[:8]
+    container = docker('run', '-d', '--network', 'none', '--name', name,
+                       '--entrypoint', '/bin/sh', image, '-c', 'sleep 300').decode().strip()
+    try:
+        mounted, = json.loads(docker('container', 'inspect', container))
+        volumes = [mount['Name'] for mount in mounted['Mounts'] if mount['Type'] == 'volume']
+        assert len(volumes) == len(record['Config']['Volumes'])
+        for volume in volumes:
+            details, = json.loads(docker('volume', 'inspect', volume))
+            assert 'com.docker.volume.anonymous' in (details.get('Labels') or {})
+    finally:
+        remove_fixture_container(container)
+    for volume in volumes:
+        with pytest.raises(subprocess.CalledProcessError):
+            docker('volume', 'inspect', volume)
 
 
 def test_server_uid_can_use_readonly_control_mount_without_docker_socket(deployment):

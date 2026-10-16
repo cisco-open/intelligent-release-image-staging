@@ -33,11 +33,64 @@ KUBECTL_DESTINATION = Path('/usr/local/bin/kubectl')
 SYSTEM_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 
-def provision_kubernetes_client(run):
+def preflight_prebuilt(target):
+    """Check a prepared host without provisioning or contacting a registry.
+
+    This is not an offline dependency installer. The caller must authenticate
+    its kit separately and still perform deployment/network/cluster preflight.
+    Unlike source builds, neutral-runtime finalization needs no Buildx or QEMU.
+    """
+    if target not in ('docker', 'docker-split', 'kubernetes'):
+        raise InstallError('Unknown prebuilt deployment target')
+    check_platform()
+    names = ('python3', 'bash', 'age', 'age-keygen', 'openssl', 'ssh-keygen',
+             'tar', 'gzip', 'xz', 'file', 'skopeo', 'rpmbuild', 'docker', 'systemctl')
+    if target == 'docker-split':
+        names += ('ssh',)
+    if target == 'kubernetes':
+        names += ('ip',)
+    paths = {name: shutil.which(name, path=SYSTEM_PATH) for name in names}
+    missing = sorted(name for name, path in paths.items() if path is None)
+    client = None
+    if target == 'kubernetes':
+        for name, suffix in (('kubectl', ()), ('k3s', ('kubectl',))):
+            executable = shutil.which(name, path=SYSTEM_PATH)
+            if executable:
+                paths[name] = executable
+                client = (executable, *suffix)
+                break
+        if client is None:
+            missing.append('kubectl or k3s')
+    if missing:
+        raise InstallError('Prebuilt installation requires a prepared host; missing: '
+                           + ', '.join(missing) + '. No dependencies were installed')
+    # Paths came only from the fixed system path, not a kit or inherited PATH.
+    # These commands inspect the local daemon and plugin; they never pull images.
+    if not command_ok([paths['docker'], 'info']):
+        raise InstallError('Docker is unavailable; no dependencies were installed')
+    if not command_ok([paths['docker'], 'compose', 'version']):
+        raise InstallError('Docker Compose is unavailable; no dependencies were installed')
+    if not command_ok([paths['python3'], '-I', '-c', 'import yaml']):
+        raise InstallError('XR packaging requires Python YAML support (python3-yaml); no dependencies were installed')
+    return {'profile': 'prepared-host', 'target': target, 'tools': paths,
+            'kubernetes_client': list(client) if client else None}
+
+
+def validate_kubernetes_input(source):
+    """Check a supplied client against the installer pin without executing it."""
+    from .device_finalize import _snapshot
+    with tempfile.TemporaryDirectory(prefix='iris-kubectl-check-') as temporary:
+        checksum, size, _ = _snapshot(Path(source), Path(temporary) / 'kubectl', 128 * 1024 * 1024)
+        if size == 0 or checksum != KUBECTL_SHA256:
+            raise InstallError('Local Kubernetes client checksum differs from the installer pin')
+
+
+def provision_kubernetes_client(run, *, local_source=None):
     """Preserve an installed client; add a verified client only when absent.
 
     This provisions no Kubernetes daemon, modifies no cluster, and never
-    replaces a system-managed or operator-provided executable.
+    replaces a system-managed or operator-provided executable. An explicit local
+    source is copied and pinned; that route never falls back to downloading.
     """
     if shutil.which('kubectl', path=SYSTEM_PATH):
         return ('kubectl',)
@@ -61,18 +114,22 @@ def provision_kubernetes_client(run):
     # publish atomically with no-overwrite semantics even under a race.
     with tempfile.TemporaryDirectory(prefix='.iris-kubectl-', dir=destination.parent) as temporary:
         candidate = Path(temporary) / 'kubectl'
-        url = 'https://dl.k8s.io/release/' + KUBECTL_VERSION + '/bin/linux/amd64/kubectl'
-        run(['curl', '--fail', '--silent', '--show-error', '--location',
-             '--proto', '=https', '--proto-redir', '=https', '--tlsv1.2',
-             '--retry', '3', '--connect-timeout', '15', '--max-time', '300',
-             '--max-filesize', str(128 * 1024 * 1024), '--output', str(candidate), url], timeout=1000)
+        if local_source is not None:
+            from .device_finalize import _snapshot
+            _snapshot(Path(local_source), candidate, 128 * 1024 * 1024)
+        else:
+            url = 'https://dl.k8s.io/release/' + KUBECTL_VERSION + '/bin/linux/amd64/kubectl'
+            run(['curl', '--fail', '--silent', '--show-error', '--location',
+                 '--proto', '=https', '--proto-redir', '=https', '--tlsv1.2',
+                 '--retry', '3', '--connect-timeout', '15', '--max-time', '300',
+                 '--max-filesize', str(128 * 1024 * 1024), '--output', str(candidate), url], timeout=1000)
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
             fd = os.open(candidate, flags)
             with os.fdopen(fd, 'rb') as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= 128 * 1024 * 1024:
-                    raise InstallError('Downloaded Kubernetes client is not a bounded regular file')
+                    raise InstallError('Kubernetes client is not a bounded regular file')
                 checksum = hashlib.sha256()
                 for block in iter(lambda: stream.read(1024 * 1024), b''):
                     checksum.update(block)
@@ -134,6 +191,8 @@ def command_ok(command):
 
 def missing_packages():
     packages = {package for tool, package in TOOLS.items() if not shutil.which(tool)}
+    if not command_ok(['python3', '-I', '-c', 'import yaml']):
+        packages.add('python3-yaml')
     if not shutil.which("docker"):
         packages.update(("docker.io", "docker-compose-v2", "docker-buildx"))
     else:
@@ -166,6 +225,8 @@ def provision(run):
         run(["apt-get", "update"], timeout=900)
         # --no-remove prevents the solver from removing an existing runtime.
         run(["apt-get", "install", "--no-remove", "-y", *packages], timeout=1800)
+    if not command_ok(['python3', '-I', '-c', 'import yaml']):
+        raise InstallError('Python YAML support is unavailable; check the selected python3 interpreter before resuming')
     if not command_ok(["docker", "info"]):
         raise InstallError("Docker is unavailable; check its service before resuming")
     if not command_ok(["docker", "compose", "version"]) or not command_ok(["docker", "buildx", "version"]):

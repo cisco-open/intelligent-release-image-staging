@@ -81,12 +81,14 @@ def validate_mutual_origin(value):
     """
     if not isinstance(value, dict) or set(value) != _MUTUAL_ORIGIN_KEYS:
         raise EnforcementError("bad mutual_origin fields")
-    if value.get("mode") != MUTUAL_ORIGIN_MODE:
+    if value.get("mode") not in (MUTUAL_ORIGIN_MODE, "enforce"):
         raise EnforcementError("bad mutual_origin mode")
     count = value.get("newly_denied_device_count")
     ids = value.get("newly_denied_device_ids")
     if count is None and ids is None:
-        return _unknown_mutual_origin()
+        return dict(_unknown_mutual_origin(), mode=value["mode"])
+    if value["mode"] == "enforce":
+        raise EnforcementError("enforcement is not a preflight observation")
     if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         raise EnforcementError("bad newly_denied_device_count")
     if not isinstance(ids, list) or len(ids) > peer_endpoints.SUPPORTED_DEVICES:

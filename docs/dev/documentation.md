@@ -19,7 +19,7 @@ it is never built and never published.
 
 **Who each guide is for.** Installation Guide: a network engineer with a fresh
 host who has never seen IRIS; they follow it top to bottom once. Administration
-Guide: the person maintaining server state, upgrades, credentials, and recovery.
+Guide: the person maintaining server state, releases, credentials, and recovery.
 User Guide: the
 person who runs IRIS every day; they arrive with a task and leave when it is
 done. Architecture Guide: an architect or reviewer who needs to know how it
@@ -93,7 +93,7 @@ link to its definition.
 | tick | one pass of the agent's check-in loop |
 | LKG | the last policy the device accepted (last known good) |
 | keyed state | the files the server keeps per device, under that device's id |
-| mutual origin | two devices that both hold a full copy of the same image |
+| mutual origin | permission in both directions between a device and the distribution server |
 | quarantine (image) | an image that failed the Cisco hash check and is held back from devices |
 | quarantine (device) | a device told to stop sharing with every peer |
 | principal | who a request is from: a device, the server's seeder, or a legacy device |
@@ -103,10 +103,10 @@ link to its definition.
 | wave | a group of devices a schedule releases together |
 | scheduled outcome | the record of what a scheduled run did on one device (the API calls it a receipt) |
 | origin seeder | the server's own copy of the image, the first source in the swarm |
-| park | keep an unassigned image on the device in case it is assigned again |
+| park | stop sharing an unassigned image and clean its staging copy; retained files depend on the platform and who supplied them |
 | verifier_missing | the device would check the signature but the tool to do so is not installed |
 | Bulk Hash | the checksum Cisco publishes for an image |
-| root key, signing root | one of the two offline keys that sign every instruction key |
+| root key, signing root | one of two protected keys used to approve online instruction-signing keys and sign the key-retirement list |
 
 The glossary line for "scheduled outcome" is the only place a user page writes
 "receipt" outside an API route or field name; every such line needs a narrow
@@ -213,16 +213,20 @@ The table below records the retained aliases for the reorganization.
 
 | Alias id | Page and new heading text | Who depends on the id |
 | --- | --- | --- |
+| `managed-single-host-docker` | `admin-guide/upgrade.md` → Managed deployment replacement | Retained historical heading link |
+| `publish-a-new-guest-shell-agent-bundle` | `admin-guide/instruction-keys.md` → Replace a Guest Shell agent | Retained link to the former bundle-publication procedure |
 | `build-and-publish-the-arm64-iox-package` | `install/device-packages.md` "Build the packages" | `test_aiagent_arm_package_docs.py`, in-docs links from two install pages. |
 | `embedded-agent-packages` | `install/device-packages.md` "When to rebuild the packages" | `help-server.html:118` (shipped in images). |
 | `initialise-instruction-custody` | `install/activate-signing.md` "Start signing instructions" | `test_aiagent_arm_package_docs.py`; in-docs links. The id keeps the old spelling; the text is American. |
+| `holder-a-on-the-first-custody-machine` | `install/signing-roots.md` "Holder A: on the first offline machine" | Saved links to the separate-holder instructions. |
+| `holder-b-on-the-second-custody-machine` | `install/signing-roots.md` "Holder B: on the second offline machine" | Saved links to the separate-holder instructions. |
 | `instruction-root-ceremony-and-recovery` | `admin-guide/instruction-keys.md` "Replace the two root keys"; the pointer section on `admin-guide/recovery.md` | `tools/start-compose-server.sh`, `kubernetes/README.md:426`, older script copies, CHANGELOG. |
 | `f3-offline-bootstrap-envelope-redelivery` | `admin-guide/instruction-keys.md` "Deliver the first instruction file by hand" | Four in-docs pages, CHANGELOG. |
 | `device-administrator-trust-boundary` | `architecture/security-model.md` "What a device administrator can still change" | The literal link `test_docs_map.py` pins on `architecture/data-path.md`. |
 | `device-global-package-verification` | `install/iox.md` "Signature verification is a device-wide setting" | `device/iox/README.md:148-149`, six in-docs pages. |
 | `unassigned-image-park` | `user-guide/assignments.md` "What happens to an image you unassign" | `fleet/assignments.csv.example:15`, six in-docs pages. |
 | `recover-a-volume-whose-private-modes-were-changed` | `admin-guide/recovery.md` "Repair a volume whose file permissions were changed" | `kubernetes/README.md:352`. |
-| `rollback-after-the-shard-migration` | `admin-guide/recovery.md` "Roll back the per-device state split" | Guard files written by older `keyed_state.py` builds, CHANGELOG (two links). |
+| `rollback-after-the-shard-migration` | `admin-guide/recovery.md` "Inspect retained per-device migration evidence" | Guard files written by older `keyed_state.py` builds, CHANGELOG (two links). |
 | `crash-safe-same-name-replacement` | `architecture/data-path.md` "How the agent replaces an image without deleting it first" | `device/iox/README.md:193`, two in-docs pages. |
 
 Two test helpers already understand the attribute. `_section()` in

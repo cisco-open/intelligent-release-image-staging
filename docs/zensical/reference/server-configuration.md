@@ -54,7 +54,7 @@ as unknown. See [Deployment information](../user-guide/console.md#deployment-inf
 | `IRIS_ARTIFACTS_HOST_DIR` | `../artifacts` | Host directory mounted read-write at `/srv/artifacts`. |
 | `IRIS_SHARP_SANS_FONT_HOST` | `/dev/null` | Legacy font bind mount. Leave unset. |
 | `IRIS_GUI_PUBLISH` | `8080` | Published Console host port. |
-| `IRIS_CONSOLE_URL` | unset | Full external HTTPS Console URL shown in server settings, for example `https://console.example.com:8080`. |
+| `IRIS_CONSOLE_URL` | unset | Full external HTTPS Console URL shown in server settings, for example `https://console.example.com:8080`. Its hostname is included in new one-host default browser certificates; existing certificates are retained on restart. |
 | `IRIS_PEER_TLS_MODE` | `disabled` | `required` turns on peer transfer TLS. Set the same value on every process in the swarm. See [Guardrails](../architecture/security-model.md#guardrails). |
 | `IRIS_GUI_ALLOW_PLAINTEXT`, `IRIS_CATALOG_ALLOW_PLAINTEXT`, `IRIS_ARTIFACTS_ALLOW_PLAINTEXT` | unset | `1` serves that component over plain HTTP when no usable certificate is set. Loopback or an isolated test network only. |
 | `IRIS_VERSION` | unset | Build argument for the release string the Console Settings page shows. |
@@ -70,6 +70,7 @@ as unknown. See [Deployment information](../user-guide/console.md#deployment-inf
 | `IRIS_SEEDER_PREV_TTL` | `2592000` seconds (30 days) | How long a rotated-out seeder token still works. Set it once for the whole deployment. See [Rotate credentials and certificates](../admin-guide/rotations.md). |
 | `IRIS_HTTP_TIMEOUT` | `30` seconds | Socket timeout for tracker and catalog requests. |
 | `IRIS_ENDPOINT_TTL` | `900` seconds | Freshness window for a device's peer endpoint. |
+| `IRIS_ORIGIN_EGRESS_IPS` | unset | Up to eight comma-separated fixed IPv4 source addresses used by outbound origin transfers. Restricted roles that permit the origin receive these addresses in their authenticated allow-list. Use exact addresses without spaces or subnets. |
 | `IRIS_ENROLL_TTL` | `3600` seconds | Lifetime of the one-shot enrollment token in a per-device installer. |
 | `IRIS_HEALTH_LISTENERS` | `tracker:6969,catalog:8443,artifacts:8000,management:9443` | What `:9101/readyz` checks, as `name:port,name:port`. `off` checks nothing. |
 | `IRIS_AUDIT_RETENTION_DAYS`, `IRIS_AUDIT_MAX_EVENTS` | `90` days, `50000` | Audit entries older than the retention days, or past the event cap, are pruned. Raise both together. |
@@ -80,6 +81,20 @@ as unknown. See [Deployment information](../user-guide/console.md#deployment-inf
 Use the documented bounds for each variable. `0` disables
 `IRIS_XR_SESSION_TIMEOUT`, `IRIS_METRICS_PORT` and API request-rate budgets;
 other settings may reject it or fall back to their defaults.
+
+### Origin egress addresses
+
+When outbound origin connections use a different source address from the
+catalog, set `IRIS_ORIGIN_EGRESS_IPS` to the fixed source IPv4 addresses seen
+by devices. Use up to eight addresses separated by commas without spaces.
+For an installer-managed deployment, pass `--origin-egress-ip ADDRESS` to
+`irisctl install` or `irisctl setup`, repeating it for each address. The
+installer retains this selection for resume and maintenance. Confirm the
+addresses at a receiving device or egress gateway; a Kubernetes pod address
+or Service address can differ from the outbound source. Keep them stable
+across pod placement changes. Restricted roles that permit the origin receive
+these addresses in their authenticated allow-list. Peer TLS still checks the
+origin identity.
 
 ### Container paths
 

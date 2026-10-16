@@ -17,6 +17,10 @@ class LifecycleUnavailable(Exception):
     pass
 
 
+class LifecycleConflict(Exception):
+    """Worker refused a request before accepting a new retention intent."""
+
+
 ROTATION_FAMILIES = ('management-tls', 'device-tls', 'peer-ca',
                      'instruction-roots', 'age-identity', 'age-recovery', 'seeder-announce')
 
@@ -54,11 +58,16 @@ def call(request):
         raise ValueError('Expected a maintenance request')
     action = request.get('action')
     fields = {'status': {'action'}, 'rotation-status': {'action'},
+              'retention-status': {'action', 'request_id'},
+              'retire-history': {'action', 'request_id', 'expected_revision', 'job_ids'},
+              'delete-backup': {'action', 'request_id', 'expected_revision', 'backup_id', 'confirm_delete'},
+              'resume-delete': {'action', 'request_id', 'expected_revision', 'backup_id', 'confirm_delete'},
               'deployment-info': {'action'},
               'sync-management': {'action', 'request_id'},
               'rotate': {'action', 'request_id', 'family', 'allow_downtime'},
               'recover-rotation': {'action', 'request_id', 'family', 'allow_downtime'},
               'backup': {'action', 'request_id', 'allow_downtime'},
+              'recover-backup': {'action', 'request_id', 'backup_id', 'allow_downtime'},
               'restore': {'action', 'request_id', 'backup_id', 'allow_downtime', 'confirm_restore'},
               'recover-restore': {'action', 'request_id', 'backup_id', 'allow_downtime', 'confirm_restore'},
               'verify': {'action', 'request_id', 'backup_id'}, 'extract': {'action', 'request_id', 'backup_id'}}
@@ -67,16 +76,28 @@ def call(request):
     if action not in ('status', 'rotation-status', 'deployment-info') and (not isinstance(request['request_id'], str)
             or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['request_id'])):
         raise ValueError('Provide a bounded maintenance request ID')
-    if action in ('backup', 'rotate', 'recover-rotation') and request['allow_downtime'] is not True:
+    if action in ('backup', 'recover-backup', 'rotate', 'recover-rotation') and request['allow_downtime'] is not True:
         raise ValueError('Confirm IRIS downtime before capture')
     if action in ('restore', 'recover-restore') and (request['allow_downtime'] is not True
             or request['confirm_restore'] is not True):
         raise ValueError('Confirm deployment replacement and IRIS downtime before restoring')
     if action in ('rotate', 'recover-rotation') and request['family'] not in ROTATION_FAMILIES:
         raise ValueError('Choose a supported credential family')
-    if action in ('verify', 'extract', 'restore', 'recover-restore') and (not isinstance(request['backup_id'], str)
+    if action in ('verify', 'extract', 'restore', 'recover-restore', 'recover-backup') and (not isinstance(request['backup_id'], str)
             or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['backup_id'])):
         raise ValueError('Choose a captured backup')
+    if action in ('retire-history', 'delete-backup', 'resume-delete'):
+        if not isinstance(request['expected_revision'], str) or not re.fullmatch('[0-9a-f]{64}', request['expected_revision']):
+            raise ValueError('Refresh maintenance history before continuing')
+        if action == 'retire-history':
+            selected = request['job_ids']
+            if (not isinstance(selected, list) or not 1 <= len(selected) <= 25
+                    or any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', value) for value in selected)
+                    or len(set(selected)) != len(selected)):
+                raise ValueError('Select between one and 25 distinct finished operations')
+        elif (request['confirm_delete'] is not True or not isinstance(request['backup_id'], str)
+                or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', request['backup_id'])):
+            raise ValueError('Confirm deletion of one exact deployment and recovery archive pair')
     endpoint = os.environ.get('IRIS_LIFECYCLE_SOCKET', '/run/iris-lifecycle/control.sock')
     try:
         network_endpoint = os.environ.get('IRIS_LIFECYCLE_URL')
@@ -97,14 +118,17 @@ def call(request):
     except (OSError, ValueError, KeyError, http.client.HTTPException):
         raise LifecycleUnavailable('Deployment lifecycle worker unavailable. Configure it on the installer host.') from None
     if not response['ok']:
+        if response.get('code') == 'retention-conflict':
+            raise LifecycleConflict(response.get('error', 'Maintenance history changed; refresh before continuing'))
         # Worker messages are fixed safe validation text, not raw command logs.
         raise LifecycleUnavailable(response.get('error', 'Maintenance request refused'))
     return response['result']
 
 
-def status():
+def status(retention_request_id=None):
     try:
-        return call({'action': 'status'})
+        return call({'action': 'status'} if retention_request_id is None else
+                    {'action': 'retention-status', 'request_id': retention_request_id})
     except LifecycleUnavailable:
         return {'available': False, 'target': 'unavailable', 'storage': 'unavailable',
                 'can_verify': False, 'can_extract': False, 'can_restore': False, 'jobs': [],

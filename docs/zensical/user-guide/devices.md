@@ -19,8 +19,14 @@ a credential or a role, or replace the images they stage.
 3. Read the selected count before you act on it.
 
 **Select page** and **Clear page selection** act on the visible page, **Select
-all N matching devices** takes every device the filter matches, and **Cancel**
-clears everything. A selection follows device IDs across pages.
+all N matching devices** adds every matching device, and **Cancel** clears
+everything. Selections stay selected across pages and filter changes. The bar
+also counts selections outside the current page or filter. Use **Cancel** first
+when you want to start a different group.
+
+**Select all** reads every page before adding devices. If a page cannot be
+read, nothing is added. Changing filters, changing the selection or leaving
+Inventory cancels that read.
 
 ### Search and filter
 
@@ -31,6 +37,14 @@ Switches, IR Routers, Catalyst Routers, Catalyst Switches, NCS and Cisco 8000
 Series, with legacy and unknown categories retained. Hover a series cell to see
 the stored model. For the role filter and **Set role**, see
 [Control which devices share with each other](roles.md).
+
+The table refreshes every ten seconds while Inventory is visible. Your filters,
+selection and keyboard focus stay in place. If the device list cannot be read,
+the selection remains, but its match to the current filter is unconfirmed.
+
+Credential and sharing-policy controls are disabled when their current data
+is unavailable. If an edit reports an unknown outcome, check the refreshed row
+before trying again.
 
 ### Run a toolbar action
 
@@ -55,9 +69,14 @@ not the rows you selected, see [Schedule maintenance windows](scheduling.md).
 ### Assign a set of images
 
 1. Select the devices and click **Assign images**. The picker opens pre-checked
-   with the images every selected device already holds.
+   with the images assigned to every selected device.
 2. Check the images the whole selection should stage, up to ten.
-3. Apply. A selection whose assignments differ is flagged, then confirmed.
+3. Apply. Different assignments are flagged. Removing existing assignments
+   asks for confirmation.
+
+The dialog keeps the devices you reviewed when you opened it. For conflicts
+or an unknown result, follow
+[Assign images and check staging status](assignments.md#in-the-console).
 
 !!! warning
 
@@ -75,8 +94,17 @@ The device routes and their schemas are in [Console API](../reference/console-ap
 
 ### The deployment details drawer
 
-Each row has a **ⓘ Deployment details** control. It opens a read-only drawer
+Each row has a **ⓘ Deployment details** control. It opens a drawer
 that lists every image assigned to that device. **Esc** or **✕** closes it.
+
+If a re-imaged or replaced device reports a changed SSH host key, verify its
+identity before choosing **Forget host key** and confirming. The next connection
+trusts and saves the key it presents. Success confirms that device's saved entry
+is absent, including hashed entries; other devices' keys stay unchanged. If the
+request outcome is unknown, check the saved key before trying again.
+
+Saved deployment logs appear below the record. Missing dates and results show
+as unknown. **Previous device** marks a log dated before this device was added.
 
 | State | What it means |
 | --- | --- |
@@ -114,6 +142,8 @@ under this name is labeled **previous device**.
 
 A bulk action reports each success and refusal instead of failing the whole
 batch. The status line counts the successes and names the devices that refused.
+Delete also names partial or unknown results and keeps those devices selected;
+see [Undeploy, retire and clean up devices](undeploy.md#retire-a-device-from-the-inventory).
 HTTP 207 means partial cleanup. HTTP 429 means the server rejected the request
 on admission, and the response carries `Retry-After`. Those limits are in
 [Console API](../reference/console-api.md). For a refusal you cannot place, see

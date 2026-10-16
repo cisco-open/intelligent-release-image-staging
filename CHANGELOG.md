@@ -17,9 +17,451 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Close Inventory filters reliably when Escape follows immediately after opening.
+
+## [2026.10.16]
+
+- Keep peer permissions within the selected instruction's expiry when a device
+  returns to a previously used role, so onboarding can complete after role changes.
+- Allow managed Docker removal alongside a read-only host filesystem monitor,
+  while retaining checks for writable mounts and direct volume consumers.
+- Keep local Kubernetes runtime images available while maintenance stops services,
+  and recover missing images from the authenticated backup before resuming.
+- Allow fixed origin egress IPv4 addresses in restricted peer policies when
+  Kubernetes or another NAT topology uses a different catalog address.
+- Preserve per-device migration evidence without recommending older application
+  code, and build changed device packages for a fresh deployment and re-onboarding.
+- Keep Docker removal checks stable when stopping a container changes the
+  network's IP-use counters, while still checking resource identities and settings.
+- Include both prebuilt-release intake helpers in the source release archive.
+- Leave no temporary archive output during backup verification or initial restore
+  checks, so a worker restart does not block later maintenance. Keep real
+  extraction staging private and preserve older unrecognized files.
+- Keep backup history and recovery controls visible when saved backup storage
+  cannot be fully listed. Show unavailable counts and block archive changes.
+- Name the interrupted maintenance action in its recovery message and explain
+  how to resume a restore interrupted during its initial backup checks.
+- Replace deployments through undeploy, removal, a new installation and device
+  re-onboarding. Remove the in-place application upgrade command and build
+  engines while preserving historical worker fences and backup protection.
+- Remove a managed Docker, separate-host Docker, or Kubernetes deployment with
+  a reviewed resource plan, explicit data-purge choice, and resumable removal.
+  Explain that Kubernetes storage retention can leave the underlying data.
+- Recover services after an interrupted managed backup from its original
+  history entry or host command. Keep incomplete output, authenticate completed
+  archives, and allow a new backup only after the original job is resolved.
+- Enable same-job recovery controls while that operation needs recovery,
+  without enabling conflicting maintenance or backup deletion.
+- Let operators retry interrupted backup verification or isolated extraction
+  without blocking deployment maintenance; retain unverified private output.
+- Validate the host-prepared recovery key before backup or downtime, then
+  recheck its approved bytes before changing encrypted configuration.
+- Document first-time backup signer trust, separate IOx assembly from native
+  signing, and clarify architecture-specific clients and ARM build prerequisites.
+- Keep tracker announcements responsive when a device reaches its overall
+  download limit, while retaining image-transfer rate limits and peer TLS checks.
+- Correct the policy preview's nonexistent 120-second tracker interval floor.
+
+- Clarify that role-link edits update both roles together and that devices
+  can retain different signed policy revisions when their settings are unchanged.
+
+- Use plain language for private-key holders in the signing and recovery guides,
+  keeping existing command paths and saved heading links unchanged.
+
+- Limit Cisco hash-feed downloads to ten minutes and queued image verification
+  to eleven minutes. Slow or unavailable feeds report an incomplete check
+  without changing stored verdicts or discarding the published image.
+
+- Retain bounded, root-private command output after managed installer failures
+  and timeouts, including Docker, separate-host and Kubernetes builds. Terminal
+  errors point to sensitive diagnostics without exposing command output.
+
+- Keep the compiled ARM client in the server build context so fresh Docker and
+  Kubernetes source installations can build both Guest Shell bundles.
+
+- Refresh both architecture-matched Guest Shell bundles at server startup and
+  instruction-root rotation. Missing or stale ARM files now prevent readiness.
+
+- Explain that peer arrows and faster reporting require telemetry streaming
+  to be enabled during device onboarding; saving an interval keeps that choice.
+  Document the response-time and download-speed limits on faster reporting.
+
+- Clarify that a distribution-access storage error can follow a saved approval;
+  reread the current approval and status before a new preview.
+
+- Keep separate, request-bound native package generations when replacing
+  instruction roots on a prebuilt installation. Recovery retains the original
+  caches and resumes only the approved successor generation.
+
+- Publish the Guest Shell launch-failure timestamp atomically with private
+  permissions, replacing stale writable markers without following symlinks.
+  A marker write failure still allows the agent to report its status.
+
+- Correct partial role-change recovery guidance: refresh both stores and review
+  a fresh preview with the current policy revision before confirming again.
+
+- Remove exact IRIS temporary upload files during router undeploy after an
+  interrupted Guest Shell publication. Verify their absence while preserving
+  unrelated files in the shared directory.
+
+- Publish Guest Shell inputs through a prompt-aware session, keeping the full
+  integrity-check command inside Guest Shell and waiting for its confirmation
+  before closing SSH. Unconfirmed publication is never retried automatically.
+
+- Include a bounded, credential-free failure category when Guest Shell input
+  publication cannot be confirmed, distinguishing transport, bootstrap and
+  command errors while retaining the original failure.
+
+- Upload Guest Shell onboarding inputs under temporary names, then verify and
+  atomically publish each complete file under the bootstrap lock, with the
+  bundle last. Failed copies preserve published inputs. Retain a bounded
+  bundle acceptance or rejection record without credentials; upload completion
+  remains separate from runtime startup and catalog contact.
+
+- Refuse redirects on authenticated device catalog requests, preventing bearer
+  forwarding and request replay at redirect destinations, including plaintext
+  URLs. Preserve pinned TLS verification and bounded response handling.
+
+- Correct Kubernetes token-rotation file paths and explain saved versus applied
+  browser certificates, including checks for each Console instance. Use the
+  actual Inventory navigation for scheduled management credential checks.
+
+- Preserve the selected retention request when reading managed worker status,
+  so completed history clearing and backup deletion remain observable.
+
+- Add an explicit `--observability` option to managed installation and guided
+  setup for authenticated metrics on Docker, split Docker and Kubernetes.
+  The default stays off; resume retains the selection.
+
+- Allow simultaneous browser certificate status reads while keeping certificate
+  changes exclusive and refusing reads during an active change.
+
+- Correct IOx removal commands, XR onboarding transfer details and browser
+  certificate address guidance to match the implemented workflows.
+
+- Correct seeder-rotation guidance for header authentication, unchanged torrent
+  URLs, quarantine release and the two-previous-credential limit. When that
+  limit is reached, explain that rotation must wait for a credential to expire.
+
+- Use plain signing-key status and root-confirmation labels in Advanced policies.
+
+- Show public certificate validity for Kubernetes projected Secret mounts,
+  while retaining strict private-key and renewal custody checks.
+
+- Reject NUL characters in device credentials and audit export passwords
+  before saving, and reject malformed telemetry destination ports.
+
+- Allow finished maintenance history and unneeded saved backups to be cleared
+  separately, preserving recovery records and protection against request replay.
+  Failed backup attempts without saved files no longer consume backup slots.
+  Keep historical recovery archives visible and protected.
+
+- Clarify that aborting onboarding during connection checks waits for those
+  checks to finish and prevents the installer from starting.
+
+- Remove the misleading Monitoring "All" filter; the available time ranges
+  now accurately describe searches of up to 90 days.
+
+- Correct the backup guide's permission-repair procedure to preserve the
+  recorded deployment and private file modes instead of changing whole stores.
+
+- Remove temporary backup snapshots after a refused or failed capture while
+  retaining operation history and any captured encrypted archives.
+
+- Load restore validation from the installed deployment's verified source,
+  including when the managed lifecycle worker runs from its separate runtime.
+
+- Clarify Force undeploy in the guide, recovery message and audit trail:
+  router Guest Shell cleanup also removes IRIS-marked VirtualPortGroups and
+  related NAT configuration, while preserving unrelated operator networking.
+
+- Include the advertised Console address in new one-host browser certificates,
+  keeping existing certificates unchanged on restart.
+
+- Start Guest Shell encrypted transfers when the platform maps `/flash` to
+  `/bootflash`, while continuing to reject untrusted links in private
+  certificate storage.
+
+- Offer only compatible model and management-type pairs when adding a device;
+  Catalyst 8000 series Guest Shell and IOx both use a router management type.
+- Verify removal of hashed SSH host keys and report lookup or removal failures
+  consistently, including callers that do not stop on shell errors.
+- Keep audit events from the same second visible when loading older pages.
+  Ask for a refresh if retention has replaced the log during browsing.
+- Preserve the current audit history when restoring a same-deployment backup,
+  while continuing to reject changed credentials and security state.
+- Report invalid device-certificate approvals as a request conflict instead of
+  a service outage, while keeping storage failures separate.
+
+- Revoke one device's peer certificates from its Inventory details without
+  deleting its row or staged images. Show the saved decision separately from
+  device-reported enforcement. Allow fresh onboarding under the same inventory
+  name with new credentials and keys while keeping old certificates revoked.
+  Updated clients reject revoked identities and stop encrypted peer connections
+  when their revocation list expires; clients without this support still need
+  network isolation when an immediate cutoff is required.
+
+- Refresh both precompiled aria2c clients with certificate-withdrawal enforcement
+  and matching source records. Keep publication separate from local build checks.
+  Correct a package-build freshness warning when a merged feature branch has
+  newer device code and no missing upstream changes.
+
+- Clarify Policies and certificate maintenance with plain-language choices and
+  expandable technical details. Stop periodic refreshes on the Policies form
+  and confirm before discarding edited distribution settings. Keep deployment
+  components collapsed on Overview until opened, without hiding read failures.
+
+- Make guided installation manage signing-key passphrases automatically. Generate
+  strong random passphrases, keep them in protected local storage, and sign the
+  checked server request without certificate-password prompts. Preserve existing
+  manual keys and the separate-holder workflow. Show clear installation progress
+  and predictable Console setup steps with named next actions.
+
+- Add an offline installer bootstrap for the supported Ubuntu server baseline.
+  Authenticate the package before importing its controller, record its accepted
+  prerequisite plan, and preserve exact package evidence for interrupted recovery.
+
+- Assemble local release candidates from an exact reviewed commit, with matching
+  installer/source inventories and isolated output. Keep publisher authentication,
+  corresponding-source notices and redistribution approval as separate release gates.
+  Carry the pinned aria2 source companion for both architectures. Verify Ubuntu
+  source/notices, Debian and Alpine image sources, and core Python/pip sources
+  independently. Include neutral Python/XML and static helper sources for both
+  device architectures. Preserve original notices and inventory every
+  distributed image layer before completing publication checks.
+  Allow explicit integrity checks of retained Debian source archives after
+  repository metadata expires, while keeping fresh-build checks unchanged.
+  Collect image ownership and original notices, then complete candidate evidence
+  without rebuilding or replacing the original files.
+
+- Separate release authentication from publication. A tag exports authenticated
+  files for qualification; a later manual workflow checks the exact files and
+  reviewer approval before publishing them without a rebuild.
+  Add local prebuilt preparation with independent source checks, an exact-file
+  review record and explicit run metadata. Let the manual publisher select the
+  matching profile and qualification record. Hosted prebuilt authentication still
+  needs its approved candidate-input integration.
+
+- Bound local packaging-source reads by their original timeout, including silent
+  Git processes, and isolate them from unrelated Git configuration.
+
+- Add authenticated prebuilt inputs for the installer, with explicit release
+  selection, offline verification and pinned local packaging tools. Preserve
+  the selected input mode on resume and check saved package bytes before reuse.
+  Keep the default source-build workflow available.
+  Block publication of the new prebuilt candidates until component source coverage
+  and deployment qualification checks are connected.
+
+- Check Guest Shell source references and both committed aria2 architectures
+  before prebuilt installation. Support a pinned local Kubernetes client without
+  downloading or replacing an existing client.
+
+- Include finalized runtimes and native package caches in prebuilt backups.
+  Recover missing caches from a matching same-deployment backup while preserving
+  existing altered files for inspection.
+
+- Record accepted offline Ubuntu dependency changes before applying them.
+  Resume interrupted work without adopting a different package plan, and allow
+  normal security updates after dependency installation has completed. Give the
+  split Console host its own recorded plan and keep ownership checks read-only.
+
+- Prepare device runtimes for both CPU architectures before adding deployment
+  trust. Keep each runtime to one filesystem layer and generate IOx and XR
+  wrappers without rebuilding the image.
+
+- Align the contributor deployment runbook and installation signing guidance
+  with managed setup, committed aria2c clients and owner-selected key storage.
+  Distinguish root approvals, online instruction signatures and native IOx signing.
+
+- Support an explicit local-key mode in `iris-key-setup` for approvals and key
+  maintenance on the deployment host. Keep separate-holder checks as the default,
+  require local custody confirmation, and retain protected-key and public-file
+  checks. Explain both choices in certificate Settings and the guides.
+
+- Clarify Policies around device sharing, saved distribution permissions and
+  confirmed blocking. Describe approval withdrawal without presenting diagnostic
+  counts as new blocks.
+
+- Explain what each certificate protects and what to do next in Settings.
+  Separate certificate renewal from signing key replacement, simplify approval
+  steps, and update the administration guides to match.
+
+- Treat lost replies and server errors during device or credential changes as
+  uncertain outcomes. Clear submitted secrets and require an explicit, successful
+  profile refresh before another credential change.
+
+- Keep current distribution-access approvals and shared-address safety history
+  when restoring an older deployment backup. Preserve uncertain apply attempts,
+  refuse missing or conflicting authority, and require fresh application proof
+  after restart across Docker and Kubernetes layouts.
+
+- Close an interrupted Console response without appending a second HTTP error
+  to its body. Failures before a response starts still return the documented
+  unavailable response, without retrying the operation.
+
+- Add reviewed distribution-access controls in Policies. Preview exact device
+  and address counts before applying bounded origin restrictions. Keep shared
+  addresses out of the blocklist, retain approvals across endpoint expiry, and
+  show confirmed application separately from saved settings. Upgrades keep
+  review-only mode until an operator enables enforcement.
+
+- Keep the two public Guest Shell trust files readable when native IOS file
+  access changes their mapped owner. Preserve private-file permissions and
+  reject an unreadable bundle before replacing the running agent.
+
+- Add an isolated mixed-API capacity test with real uploads, device heartbeats,
+  latency and resource checks, restart recovery and shared rate-limit tests.
+
+- Update the build-only source-map-js dependency to 1.2.2 to fix malformed
+  source maps blocking the build process (CVE-2026-93749).
+
+- Complete the React workflow migration with the standalone Swarm map and
+  remaining Inventory messages. Preserve filters, keyboard focus, sourced
+  transfer arrows and device controls. Expire measured arrows while paused,
+  reject malformed observations and ignore obsolete session failures. Build
+  the map inside the server image with its existing nonce-based browser policy.
+  Handle Overview cancellation while reading a response body so navigation
+  cannot leave an unhandled browser error.
+
+- Move setup, package readiness, image verification and the Swarm summary into
+  React. Validate native responses, clear unavailable readiness evidence, keep
+  verification writes serialized through navigation, and require explicit review
+  after lost replies. Distinguish wrapper provenance from native signatures and
+  configured schedules from successful checks. Count image-peer entries correctly
+  and pause the embedded map on navigation, tab hide and late frame load.
+- Match Swarm interval saves and fresh-report requests to their native response
+  identity. Honor required operator confirmation. Keep manual pause through
+  navigation, stop hidden interval previews
+  before submission, and provide explicit review after an uncertain response.
+  Report-request APIs expose the actual accepted ID and pending request.
+
+- Move deployment trust, worker rotations, scheduled key maintenance and
+  backup/restore into React. Check exact approvals, saved policy revisions and
+  accepted job IDs before reporting success. Preserve drafts and uncertain
+  request IDs, require explicit review, and recover only the original operation.
+  Check rotation and backup blockers together. Public trust approval limits now
+  fit the supported certificate and signed list; root attestation confirms
+  native verification and installation separately from a status read.
+
+- Move browser certificate replacement and telemetry credential rotation into
+  React. Check request identity and outcomes before reporting success, distinguish
+  publication from listener reload, and require observed use before retirement.
+  Clear submitted or hidden secrets and require explicit review after uncertain
+  results. Browser approval HTTP limits now fit supported public PEM chains.
+  Reject chains that exceed the stored limit after normalization, preserving
+  the pending request for a corrected approval.
+
+- Move certificate inventory, instruction certificate renewal and online signer
+  rotation into React. Match replies to the intended request and transition,
+  serialize approval reads, and require fresh evidence after uncertain results.
+  Signing-approval HTTP limits now accommodate the supported public files.
+
+- Move General, TLS/trust, Telemetry and Audit export into React. Check save
+  replies before reporting success, preserve ordinary drafts, clear submitted
+  or hidden private material, and require review after uncertain saves. Resume
+  download and export status checks for the same job after returning to its page.
+
+- Move the complete Policies workflow into React. Preserve drafts and preview
+  revisions, check save/import/delete replies, and require review after an
+  uncertain save. Keep keyboard focus and distinguish unavailable diagnostics
+  from zero counts. Role CSV export/import now preserves seeder and leecher
+  timing overrides.
+
+- Move Inventory Set role and bulk quarantine into React. Preserve reviewed
+  targets and preview revisions, check response accounting and report partial
+  or uncertain outcomes. Stop quarantine batches after an uncertain result
+  and identify devices not attempted.
+
+- Move schedule creation, history and ownership actions into React. Keep the
+  reviewed target fixed, order panel and Inventory reads, preserve conditional
+  ownership writes, and require review after an unknown creation result.
+
+- Move inventory CSV, Onboard/Undeploy options, Adopt and Delete actions into
+  React. Keep job targets and options fixed after review, serialize CSV imports
+  with other device edits, and reject stale downloads. Report incomplete
+  retirement separately from success and keep those targets selected.
+
+- Move image and bulk credential dialogs into React. Keep Apply tied to the
+  reviewed devices and require a complete, current image preview. Preserve
+  assignment conflict checks, validate results and bound parallel requests.
+  Report unknown outcomes without retrying; keep locks through dialog close.
+
+- Move Add Device and credential profiles into React. Keep form entries during
+  polling, order shared credential reads, check save and delete outcomes, and
+  keep pending-write locks through close and reopen. Clear entered passwords
+  when the credential panel or tab is left; never repeat an uncertain write.
+
+- Move Inventory's table, filters, selection and row edits into React. Keep
+  keyboard focus during refreshes, reject stale response bodies and show
+  unavailable credentials or policy explicitly. Coordinate row edits with
+  bulk actions and report unknown write results without retrying.
+
+- Order Inventory, Overview and sharing-policy status reads to reduce file-read
+  contention. Read current state for every request, leave writes independent,
+  and return a retryable 503 if a read waits too long to start.
+
+- Check selected device IDs before claiming all filter matches are selected.
+  Show selections outside the current page or filter. Apply Select all only
+  after every page succeeds; cancel stale reads when the target changes and
+  keep the previous selection on failure.
+
+- Move Inventory's Activity drawer and batch job control into React. Keep
+  cancellation scoped to displayed jobs, preserve batch options, bound log
+  memory and reject stale stream callbacks. Report unknown write results
+  without retrying, and keep jobs running when their viewer closes.
+
+- Move Inventory's device-details drawer into React. Keep record and log reads
+  independent, reject stale responses after switching or reopening devices,
+  and prevent duplicate host-key requests. Preserve image-error precedence,
+  XR host-network details and keyboard access. Keep undated logs visible in
+  device history and show missing results as unknown, not done.
+
+- Move Monitoring's audit trail and deployment logs into React. Preserve older
+  audit pages during refresh, keep time filters consistent and reject late log
+  responses. Add keyboard time selection and keep the log drawer below the header.
+
+- Avoid unused device-detail work when refreshing Overview. Read current
+  assignments, heartbeats and onboarding status on every request, and keep
+  Inventory's full targeting and instruction-status checks.
+
+- Move the Images screen into React with independent upload and import jobs.
+  Keep verification, typed quarantine overrides and delete checks intact;
+  prevent late responses from closing another image's details. Keep upload
+  progress visible and wrap long results on narrow screens. Offer all supported
+  image formats in the file chooser.
+
+- Move dashboard rendering into React while keeping the current layout and
+  refresh behavior. Preserve keyboard focus across refreshes and prevent late
+  telemetry-health responses from replacing newer results.
+
+- Accept merged or cherry-picked build sources when their checked files match
+  the reference branch. Continue refusing genuinely stale device sources.
+
+- Reuse defensive-copy plans for unchanged inventory rows, while retaining
+  fresh content and permission checks on every read.
+
+- Add a retained-input aria2 rebuild helper with exact APK hashes for amd64 and
+  ARM64. It bypasses withdrawn package-index entries while preserving the
+  published source and accepting only binaries that match the committed clients.
+
+- Ship `irisctl setup` for interactive local key creation, signing approval and
+  installation across Docker, split Docker and Kubernetes. Existing keys and
+  deployment settings are retained; separate-holder setup remains available.
+
+- Clarify that the Catalyst IOx profile requires the app-hosting SSD share for
+  image placement; Guest Shell is the choice when that storage is unavailable.
+
+- Resume interrupted initial installer snapshots using recorded public inputs.
+  Verify each file before publishing it and preserve unknown or changed files.
+
+- Allow installer port checks to pass after closed TCP connections while still
+  rejecting active listeners. Cover single and split Docker hosts. Recovery
+  errors now give the supported terminal commands for the selected deployment.
+
 - Prepare both IOx architectures with verified SHA512 package manifests for
   native Polaris signing. Exclude signature files from manifests and refuse
   to rewrite signed wrappers. Keep image payloads and OCI digests unchanged.
+  Clarify the Cisco signing requirement for Industrial Ethernet on IOS XE 17.15.
 
 ## [2026.10.08]
 

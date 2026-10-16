@@ -17,12 +17,11 @@ import os
 from pathlib import Path
 import re
 import shlex
-import socket
 import stat
 import subprocess
 import tempfile
 
-from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, digest, run
+from .deploy import DockerInstall, OWNER_CLAIM, PRODUCTION_REVIEW, check_tcp_endpoint, digest, run, observability_enabled
 from .state import InstallError, atomic_write, regular_bytes
 
 
@@ -34,6 +33,13 @@ SPLIT_FIELDS = {
 
 def validate_split_config(config):
     """Validate the transport separately from the common deployment fields."""
+    if isinstance(config, dict) and 'origin_egress_ips' in config:
+        from .deploy import origin_egress_ips
+        origin_egress_ips(config)
+        config = {key: value for key, value in config.items() if key != 'origin_egress_ips'}
+    if isinstance(config, dict) and 'observability' in config:
+        observability_enabled(config)
+        config = {key: value for key, value in config.items() if key != 'observability'}
     if not SPLIT_FIELDS.issubset(config):
         raise InstallError('Split Docker requires explicit SSH transport and Console custody settings')
     base = {'target', 'instance', 'host', 'console_bind', 'console_port', 'recovery_recipient', 'peer_tls'}
@@ -76,11 +82,7 @@ def preflight(config, runner=run):
     """Check local listeners and remote custody/port without claiming resources."""
     validate_split_config(config)
     for port in (6969, 8443, 8000, 6881, 9101, 9443):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind((config['host'], port))
-            except OSError:
-                raise InstallError('Server listener is unavailable; no deployment was created') from None
+        check_tcp_endpoint(config['host'], port)
     code = r'''
 import json,os,pathlib,platform,shutil,socket,subprocess,sys
 r=json.load(sys.stdin); root=pathlib.Path(r['console_state_dir'])
@@ -89,7 +91,10 @@ for path in [*reversed(root.parents),root]:
  if path.is_symlink(): raise RuntimeError('Unsafe Console custody path')
  if path.exists() and (path.stat().st_uid!=0 or path.stat().st_mode&0o022): raise RuntimeError('Unsafe Console parent')
 if root.exists() or not root.parent.is_dir(): raise RuntimeError('Console custody must be new with an existing parent')
-with socket.socket() as sock: sock.bind((r['console_bind'],r['console_port']))
+with socket.socket() as sock:
+ sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+ sock.bind((r['console_bind'],r['console_port']))
+ sock.listen(1)
 if shutil.which('docker'):
  for kind in ('container','volume','network'):
   args=['docker',kind,'ls','-q']+(['-a'] if kind=='container' else [])
@@ -106,11 +111,13 @@ if shutil.which('docker'):
 # One fixed program, with a bounded JSON request on stdin. Neither credentials
 # nor caller-supplied commands are interpolated into the remote shell command.
 REMOTE_PROGRAM = r'''
-import base64, hashlib, json, os, pathlib, platform, stat, subprocess, sys, tempfile
+import base64, fcntl, hashlib, json, os, pathlib, platform, re, stat, subprocess, sys, tempfile
 r=json.loads(sys.stdin.buffer.read(8*1024*1024+1))
 root=pathlib.Path(r['root']); identity=r['identity']; project=r['project']
+capture_lock=None
 def run(args, data=None):
- p=subprocess.run(args,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+ p=subprocess.run(args,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False,
+                  pass_fds=(capture_lock,) if capture_lock is not None else ())
  if p.returncode: raise RuntimeError('Remote operation failed: '+args[0])
  return p.stdout
 def check_path(path):
@@ -129,9 +136,18 @@ if r['action']=='claim':
   root.mkdir(mode=0o750)
   marker.write_text(json.dumps({'instance_id':identity,'project':project})); marker.chmod(0o600)
   os.chown(root,0,10001)
-else:
+elif r['action']!='ownership' or root.exists():
  if not marker.is_file() or marker.is_symlink() or json.loads(marker.read_bytes())!={'instance_id':identity,'project':project}:
   raise RuntimeError('Console ownership could not be verified')
+if 'capture_id' in r:
+ if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',r['capture_id']):
+  raise RuntimeError('Invalid capture authority')
+ capture_lock=os.open(root/'.backup-capture.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+ info=os.fstat(capture_lock)
+ if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600:
+  raise RuntimeError('Unsafe remote capture lock')
+ try: fcntl.flock(capture_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError: raise RuntimeError('An earlier remote capture command is still active')
 def owned():
  for kind in ('container','volume','network'):
   args=['docker',kind,'ls','-q']+(['-a'] if kind=='container' else [])
@@ -191,12 +207,25 @@ def write(name,data,mode):
   if os.path.exists(tmp): os.unlink(tmp)
 action=r['action']
 if action=='claim': pass
+elif action=='ownership':
+ import shutil
+ if r.get('require_runtime') and not root.exists():
+  raise RuntimeError('Recorded Console custody is missing')
+ if shutil.which('docker'):
+  owned()
+ elif r.get('require_runtime'):
+  raise RuntimeError('Recorded Console Docker runtime is unavailable')
 elif action=='provision':
  release=dict(line.rstrip().split('=',1) for line in pathlib.Path('/etc/os-release').read_text().splitlines() if '=' in line)
  if release.get('ID','').strip('"')!='ubuntu' or release.get('VERSION_ID','').strip('"')!='24.04' or platform.machine()!='x86_64':
   raise RuntimeError('Console requires Ubuntu 24.04 amd64')
  packages=[]
  import shutil
+ if r.get('prebuilt'):
+  if not shutil.which('docker') or not shutil.which('openssl'):
+   raise RuntimeError('Prebuilt Console requires Docker, Compose and OpenSSL already installed')
+  run(['docker','info']); run(['docker','compose','version']); owned()
+  sys.exit(0)
  if not shutil.which('openssl'): packages.append('openssl')
  if not shutil.which('docker'): packages+=['docker.io','docker-compose-v2']
  elif subprocess.run(['docker','compose','version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
@@ -293,7 +322,13 @@ class SplitDockerInstall(DockerInstall):
             raise InstallError('Pinned SSH transport custody changed; remote operation refused')
         payload = dict(action=action, root=self.config['console_state_dir'],
                        identity=self.journal.document['id'], project=self.config['instance'], **values)
-        command = 'sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive python3 -I -B -c ' + shlex.quote(REMOTE_PROGRAM)
+        capture_id = getattr(self, 'backup_capture_id', None)
+        if capture_id is not None:
+            payload['capture_id'] = capture_id
+        if action == 'provision':
+            payload['prebuilt'] = self.prebuilt()
+        program = REMOTE_PROGRAM
+        command = 'sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive python3 -I -B -c ' + shlex.quote(program)
         return self.command(self.ssh_command(command), input=json.dumps(payload).encode(), capture=True, timeout=timeout)
 
     def transport_fingerprints(self):
@@ -366,6 +401,37 @@ class SplitDockerInstall(DockerInstall):
     def remote_container(self):
         return json.loads(self.remote('container', image=self.journal.document['completed']['console-image']))
 
+    def capture_recovery_authority(self, containers, volumes):
+        return {'transport': self.transport_fingerprints()}
+
+    def capture_recovery_inventory(self, authority):
+        if authority != {'transport': self.transport_fingerprints()}:
+            raise InstallError('Original split capture transport changed')
+        from .backup import docker_capture_plan
+        _sources, volumes, containers = docker_capture_plan(self, services=('iris',))
+        # Every remote operation takes the same inherited lock. A surviving
+        # old SSH-side Python/docker command cannot overlap this read/restart.
+        containers.insert(0, self.remote_container())
+        return volumes, containers
+
+    def capture_recovery_health(self, container):
+        if container.get('remote'):
+            self.verify_console_management()
+        else:
+            # This branch is only health observation; do not restart a running
+            # container via compose or change its accepted incarnation.
+            import time
+            deadline = time.monotonic() + 180
+            while True:
+                record, = json.loads(self.command(['docker', 'container', 'inspect', container['id']], capture=True))
+                if record['Id'] != container['id'] or not record['State']['Running']:
+                    raise InstallError('Original split server did not resume')
+                if record['State'].get('Health', {}).get('Status', 'healthy') == 'healthy':
+                    return
+                if time.monotonic() >= deadline:
+                    raise InstallError('Original split server did not become healthy')
+                time.sleep(1)
+
     def stop_writers(self, containers, *, recovering_clean_operation=False):
         for container in containers:
             if container.get('remote'):
@@ -427,29 +493,35 @@ class SplitDockerInstall(DockerInstall):
         if 'split-prepared' in completed:
             if digest(self.compose_file) != completed['prepared'] or digest(self.console_build_file) != completed['split-prepared']:
                 raise InstallError('Split deployment configuration changed')
-            return
-        super().prepare()
-        both = json.loads(regular_bytes(self.compose_file))
-        console = both['services'].pop('console')
-        both['services']['iris'].setdefault('environment', {})['IRIS_INSTALLER_TARGET'] = 'docker-split'
-        both['services']['iris'].setdefault('ports', []).append({
-            'target': 9443, 'published': '9443', 'host_ip': self.config['management_bind'], 'protocol': 'tcp'})
-        local_build = {'name': self.config['instance'], 'services': {'console': copy.deepcopy(console)}}
-        local_build['services']['console'].pop('depends_on', None)
-        local_build['services']['console']['volumes'] = []
-        atomic_write(self.console_build_file, json.dumps(local_build, sort_keys=True).encode())
-        atomic_write(self.compose_file, json.dumps(both, sort_keys=True, indent=2).encode())
-        self.journal.document['completed']['prepared'] = digest(self.compose_file)
-        self.journal.document['completed']['split-transport'] = self.transport_fingerprints()
-        self.journal.checkpoint('split-prepared', digest(self.console_build_file))
+        else:
+            super().prepare()
+            both = json.loads(regular_bytes(self.compose_file))
+            console = both['services'].pop('console')
+            both['services']['iris'].setdefault('environment', {})['IRIS_INSTALLER_TARGET'] = 'docker-split'
+            both['services']['iris'].setdefault('ports', []).append({
+                'target': 9443, 'published': '9443', 'host_ip': self.config['management_bind'], 'protocol': 'tcp'})
+            local_build = {'name': self.config['instance'], 'services': {'console': copy.deepcopy(console)}}
+            local_build['services']['console'].pop('depends_on', None)
+            local_build['services']['console']['volumes'] = []
+            atomic_write(self.console_build_file, json.dumps(local_build, sort_keys=True).encode())
+            atomic_write(self.compose_file, json.dumps(both, sort_keys=True, indent=2).encode())
+            self.journal.document['completed']['prepared'] = digest(self.compose_file)
+            self.journal.document['completed']['split-transport'] = self.transport_fingerprints()
+            self.journal.checkpoint('split-prepared', digest(self.console_build_file))
+        # Claim/provision belongs to preparation, never ownership inspection.
+        # Repeating this section recovers an interruption after split-prepared.
         self.remote('claim')
+        if self.prebuilt():
+            from .prebuilt_install import _kit
+            if _kit(self).profile == 'ubuntu-dependencies':
+                from .split_dependencies import provision
+                provision(self)
         self.remote('provision')
 
     def verify_resource_ownership(self):
         super().verify_resource_ownership()
         if 'split-prepared' in self.journal.document['completed']:
-            self.remote('claim')
-            self.remote('provision')
+            self.remote('ownership', require_runtime='console-image' in self.journal.document['completed'])
 
     def _transfer_image(self, image):
         """Stream docker save directly through SSH; no unbounded RAM archive."""
@@ -475,6 +547,13 @@ class SplitDockerInstall(DockerInstall):
         super().build()
         saved = self.journal.document['completed'].get('console-image')
         image = json.loads(regular_bytes(self.console_build_file))['services']['console']['image']
+        if self.prebuilt():
+            from .prebuilt_install import acquire_images
+            imported = acquire_images(self, json.loads(regular_bytes(self.console_build_file))['services'])
+            if saved is not None and saved != imported[image]:
+                raise InstallError('Recorded remote Console differs from the authenticated image')
+            saved = imported[image]
+            self.journal.checkpoint('console-image', saved)
         if not saved:
             self.command(['docker', 'compose', '-p', self.config['instance'], '-f', self.console_build_file, 'build', '--pull'])
             saved = self.command(['docker', 'image', 'inspect', image, '--format', '{{.Id}}'], capture=True).decode().strip()

@@ -39,7 +39,7 @@
 # release) -- an explicit acknowledgement, not a default.
 
 iris_check_agent_freshness() {
-  local repo="$1" paths="$2" ref="" label head behind
+  local repo="$1" paths="$2" ref="" label head behind base
   git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   for label in origin/main main; do
     if git -C "$repo" rev-parse --verify -q "$label" >/dev/null 2>&1; then
@@ -64,6 +64,21 @@ iris_check_agent_freshness() {
   behind="$(git -C "$repo" rev-list --count "HEAD..$ref" -- $paths 2>/dev/null || true)"
   case "$behind" in ''|*[!0-9]*) return 0 ;; esac
   [ "$behind" -gt 0 ] || return 0
+  # A no-fast-forward merge (or a cherry-pick) can put commits on the
+  # reference side without adding any source bytes missing from this tip.
+  # Compare the selected trees before calling that topology stale. A real
+  # upstream difference still follows the normal warning/refusal path.
+  if git -C "$repo" diff --quiet HEAD "$ref" -- $paths; then
+    return 0
+  fi
+  # A feature may continue past the second parent of a no-fast-forward merge.
+  # Its newer source differs from $ref, but is not behind if the reference
+  # added no guarded-path changes after their common base. Require a resolved
+  # base and a successful tree comparison; missing history proves nothing.
+  base="$(git -C "$repo" merge-base HEAD "$ref" 2>/dev/null || true)"
+  if [ -n "$base" ] && git -C "$repo" diff --quiet "$base" "$ref" -- $paths; then
+    return 0
+  fi
   {
     echo "!! WARNING: this checkout is $behind commit(s) behind $ref under: $paths"
     echo "   The image/package about to be built will ship OLDER agent code"

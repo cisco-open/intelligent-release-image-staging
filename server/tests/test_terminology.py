@@ -9,7 +9,7 @@ The rename retired `attachment`/`network_attachment` (-> management type),
 deployment `receipt` (-> deployment record), and peer `receipt` (-> peer
 transfer record) everywhere except a short, explicit set of fenced sites
 (RFC 6266, an IOS logging discriminator, a CSV rejection guard, the
-time-of-receipt sense of "receipt", Tasks 22–23's distinct schedule receipts,
+time-of-receipt sense of "receipt", distinct schedule and build-authentication receipts,
 append-only history, and a handful of deliberate hard-break regression pins).
 This test scans every TRACKED file
 (``git ls-files`` -- untracked/ignored paths such as HANDOFF.md and
@@ -95,6 +95,10 @@ _TRIPWIRE_TEST_ANCHORS = (
 # allowlisted when it contains one of its file's anchors. Keep anchors narrow
 # enough that they could not accidentally cover a NEW violation.
 ALLOWLIST = [
+    ("tools/release-stage.py",
+     ("image_components.MAX_RECEIPT",),
+     "reuses the existing bounded build-evidence inventory reader constant; "
+     "not deployment or peer terminology"),
     ("tools/iris_installer/restore.py",
      ("'schedule-occurrences', 'schedule-receipts', 'report_ledger',",
       'outcomes=schedules.ReceiptStore(q.state_dir)'),
@@ -193,6 +197,10 @@ ALLOWLIST = [
      "pins router-install.sh's NETWORK_ATTACHMENT tripwire message"),
     ("device/tests/test_router_uninstall.bats", _TRIPWIRE_TEST_ANCHORS,
      "pins router-uninstall.sh's NETWORK_ATTACHMENT tripwire message"),
+    ("server/tests/test_router_pending_cleanup.py",
+     ('"IRIS_FORCE_AGENT_ONLY", "NETWORK_ATTACHMENT", "NAT_INTERFACE")}',),
+     "test environment removes the retired variable so the real cleanup "
+     "script's stale-wrapper tripwire cannot inherit the caller's value"),
     ("device/iox/tests/test_iox_install_output.bats", _TRIPWIRE_TEST_ANCHORS,
      "pins iox/install.sh's NETWORK_ATTACHMENT tripwire message"),
     ("device/iox/tests/test_iox_uninstall.bats", _TRIPWIRE_TEST_ANCHORS,
@@ -370,12 +378,77 @@ TERM_FILE_ALLOWLIST = [
      "asset, including iris-openapi32.js, under the guard"),
 ]
 
+# Build/verification records are a separate domain from deployment records and
+# peer transfer records. These exact files implement or test that domain. Only
+# the internal receipt spelling is exempt: operator prose and shared modules
+# retain the guard, as does attachment in every file below.
+TERM_FILE_ALLOWLIST.extend(
+    (path, ("receipt",),
+     "authenticated build inputs, artifact finalization, or installer execution "
+     "evidence; unrelated to retired deployment/peer-transfer record names")
+    for path in (
+        "device/iox/tests/test_iox_build_amd64_name.bats",
+        "device/xr/tests/test_build_xr_package.bats",
+        "server/tests/test_device_context.py",
+        "server/tests/test_device_finalize.py",
+        "server/tests/test_guest_inputs.py",
+        "server/tests/test_image_components.py",
+        "server/tests/test_installer_offline_bootstrap.py",
+        "server/tests/test_installer_offline_inputs.py",
+        "server/tests/test_installer_prebuilt_backup.py",
+        "server/tests/test_installer_prebuilt_dependencies.py",
+        "server/tests/test_installer_prebuilt_device.py",
+        "server/tests/test_installer_prebuilt_images.py",
+        "server/tests/test_installer_prebuilt_journal.py",
+        "server/tests/test_installer_prebuilt_packages.py",
+        "server/tests/test_installer_release_kit.py",
+        "server/tests/test_installer_split_dependencies.py",
+        "server/tests/test_packaging_inputs.py",
+        "server/tests/test_release_candidate.py",
+        "server/tests/test_release_kit_dependency_profile.py",
+        "server/tests/test_release_kit_producer.py",
+        "server/tests/test_setup_status_wrapper_v2.py",
+        "tools/build-release-candidate.py",
+        "tools/build-release-kit.py",
+        "tools/iris_installer/device_context.py",
+        "tools/iris_installer/debian_sources.py",
+        "tools/iris_installer/core_python_sources.py",
+        "tools/iris_installer/runtime_sources.py",
+        "tools/iris_installer/candidate_evidence.py",
+        "tools/iris_installer/image_source_notices.py",
+        "tools/iris_installer/device_finalize.py",
+        "tools/iris_installer/guest_inputs.py",
+        "tools/iris_installer/image_components.py",
+        "tools/iris_installer/offline_bootstrap.py",
+        "tools/iris_installer/offline_dependencies.py",
+        "tools/iris_installer/offline_sources.py",
+        "tools/iris_installer/packaging_inputs.py",
+        "tools/iris_installer/prebuilt_backup.py",
+        "tools/iris_installer/prebuilt_dependencies.py",
+        "tools/iris_installer/prebuilt_device.py",
+        "tools/iris_installer/prebuilt_images.py",
+        "tools/iris_installer/prebuilt_install.py",
+        "tools/iris_installer/release_kit.py",
+        "tools/iris_installer/split_dependencies.py",
+    )
+)
+
 
 # Task 23 consumes the approved Task 22 per-device schedule-receipt contract.
 # These scopes belong to that domain; the rest of each shared file remains
 # guarded against retired deployment/peer vocabulary. No attachment exemption
 # is implied, even inside these scopes.
 TERM_SCOPE_ALLOWLIST = [
+    ("tools/iris_installer/prebuilt_trust.py", "_caches", ("receipt",),
+     "authenticates immutable predecessor build finalization and native-wrapper "
+     "provenance, not deployment or peer-transfer records"),
+    ("server/tests/test_prebuilt_trust_rotation.py", "rotating", ("receipt",),
+     "build-finalization fixture checks provenance while simulating only the "
+     "licensed native wrapper SDK; not deployment or peer-transfer records"),
+    ("tools/iris_installer/deploy.py", "_finalized_package_hashes", ("receipt",),
+     "compares native-wrapper bytes with their exact runtime finalization record"),
+    ("tools/iris_installer/deploy.py", "DockerInstall._acquire_prebuilt_packages", ("receipt",),
+     "authenticates and resumes native-wrapper packaging from immutable build inputs"),
     ("server/assignment_service.py",
      "AssignmentService.acknowledge_schedule_result", ("receipt",),
      "Task 23 releases occurrence claims only after durable schedule receipts"),
@@ -595,6 +668,60 @@ def test_schedule_receipt_exemptions_preserve_other_domains(tmp_path, monkeypatc
         ("server/deployment_records.py", 5, "receipt"),
         ("server/tests/test_scheduled_execution.py", 2, "attachment"),
         ("server/unrelated.py", 1, "receipt"),
+    ]
+
+
+def test_build_record_exemptions_preserve_operator_and_peer_domains(tmp_path, monkeypatch):
+    sources = {
+        "tools/iris_installer/release_kit.py": "receipt = None\nattachment = None\n",
+        "tools/iris_installer/prebuilt_trust.py": (
+            "receipt = None\n"
+            "def _caches():\n"
+            "    receipt = None\n"
+            "    attachment = None\n"
+            "def other():\n"
+            "    receipt = None\n"),
+        "server/tests/test_prebuilt_trust_rotation.py": (
+            "receipt = None\n"
+            "def rotating():\n"
+            "    receipt = None\n"
+            "    attachment = None\n"
+            "def other():\n"
+            "    receipt = None\n"),
+        "tools/iris_installer/deploy.py": (
+            "receipt = None\n"
+            "def _finalized_package_hashes():\n"
+            "    receipt = None\n"
+            "    attachment = None\n"
+            "class DockerInstall:\n"
+            "    def _acquire_prebuilt_packages(self):\n"
+            "        receipt = None\n"
+            "        attachment = None\n"
+            "    def other(self):\n"
+            "        receipt = None\n"),
+        "server/peer_transfer.py": "receipt = None\n",
+        "docs/zensical/install/overview.md": "Keep the receipt.\n",
+    }
+    for path, text in sources.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO", str(tmp_path))
+    monkeypatch.setitem(globals(), "_tracked_files", lambda: list(sources))
+    assert [(path, line, term) for path, line, term, *_rest in _iter_hits()] == [
+        ("tools/iris_installer/release_kit.py", 2, "attachment"),
+        ("tools/iris_installer/prebuilt_trust.py", 1, "receipt"),
+        ("tools/iris_installer/prebuilt_trust.py", 4, "attachment"),
+        ("tools/iris_installer/prebuilt_trust.py", 6, "receipt"),
+        ("server/tests/test_prebuilt_trust_rotation.py", 1, "receipt"),
+        ("server/tests/test_prebuilt_trust_rotation.py", 4, "attachment"),
+        ("server/tests/test_prebuilt_trust_rotation.py", 6, "receipt"),
+        ("tools/iris_installer/deploy.py", 1, "receipt"),
+        ("tools/iris_installer/deploy.py", 4, "attachment"),
+        ("tools/iris_installer/deploy.py", 8, "attachment"),
+        ("tools/iris_installer/deploy.py", 10, "receipt"),
+        ("server/peer_transfer.py", 1, "receipt"),
+        ("docs/zensical/install/overview.md", 1, "receipt"),
     ]
 
 

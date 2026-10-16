@@ -718,8 +718,7 @@ def test_idle_bare_poll_does_not_run_reconcile(tmp_path):
 
     # Simulate a converged loop: seed poll keys and a far-future maintenance
     # deadline so only a genuine change would justify running.
-    rec._poll_keys = (tracker._stat_key(p["policy"]),
-                      peer_endpoints.change_key(p["endpoints"]))
+    rec._poll_keys = rec._current_poll_keys()
     rec._next_maintenance = 1_000_000.0
 
     # Ten consecutive idle bare polls (waked=False) with nothing changed.

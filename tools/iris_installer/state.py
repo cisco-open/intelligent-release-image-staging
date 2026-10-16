@@ -59,7 +59,7 @@ class Journal:
         self.document = None
 
     @contextmanager
-    def locked(self, *, create=False):
+    def locked(self, *, create=False, allow_uninstall=False):
         if create:
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = self.directory.lstat()
@@ -86,6 +86,8 @@ class Journal:
                         or not isinstance(self.document.get("config"), dict)
                         or not isinstance(self.document.get("completed"), dict)):
                     raise InstallError("Unsupported or incomplete installation journal")
+            if not allow_uninstall:
+                uninstall_guard(self.directory)
             yield self
         finally:
             os.close(fd)
@@ -101,3 +103,13 @@ class Journal:
     def pause(self, state):
         self.document["state"] = state
         self.save()
+
+
+def uninstall_guard(directory):
+    """A retained removal intent blocks new mutations, including old resumes."""
+    path = Path(directory) / 'uninstall.json'
+    if path.exists() or path.is_symlink():
+        from .uninstall import read
+        record = read(Path(directory))
+        if record['phase'] != 'prepared':
+            raise InstallError('This deployment has an uninstall operation; use irisctl uninstall status or recover')

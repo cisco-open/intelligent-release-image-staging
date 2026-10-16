@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Offline custodian companion; private roots never travel to the server."""
+"""Terminal signing companion; deployment receives only public approvals."""
 
 import os
 from pathlib import Path
@@ -21,6 +21,14 @@ def signing_environment():
     return env
 
 
+def sign(root, command):
+    """Use saved random passphrases only for explicitly managed local roots."""
+    from . import automatic_keys
+    if automatic_keys.is_managed(root):
+        return automatic_keys.run_for_root(root, command)
+    return subprocess.run(command, env=signing_environment(), check=False)
+
+
 def approve(args):
     public = regular_bytes(args.public_key, 16384)
     if not public.startswith(b"ssh-ed25519 ") or b"PRIVATE" in public:
@@ -33,14 +41,13 @@ def approve(args):
     output = Path(args.output).absolute()
     if output.exists() or output.is_symlink():
         raise InstallError("Certificate destination already exists; choose a new path")
-    # Prompt belongs to ssh-keygen and its controlling terminal. Neither the
-    # passphrase nor private key bytes are read by the installer.
+    # Manual roots use OpenSSH's terminal prompt. Explicitly managed roots use
+    # the protected local helper; deployment still receives only this approval.
     with tempfile.TemporaryDirectory(prefix="iris-approval-") as directory:
         request = Path(directory) / "online.pub"
         request.write_bytes(public)
-        result = subprocess.run(["ssh-keygen", "-s", str(root), "-I", "iris-online",
-                                 "-n", "iris-server", "-V", "+0s:+30d", str(request)],
-                                env=signing_environment(), check=False)
+        result = sign(root, ["ssh-keygen", "-s", str(root), "-I", "iris-online",
+                             "-n", "iris-server", "-V", "+0s:+30d", str(request)])
         if result.returncode:
             raise InstallError("Custodian signing failed; no certificate was published")
         data = regular_bytes(Path(directory) / "online-cert.pub", 65536)
@@ -77,9 +84,8 @@ def approve_keylist(args):
     with tempfile.TemporaryDirectory(prefix='iris-keylist-approval-') as directory:
         request = Path(directory) / 'keylist.payload'
         request.write_bytes(payload)
-        result = subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(root),
-                                 '-n', keys.KEYLIST_NAMESPACE, str(request)],
-                                env=signing_environment(), check=False)
+        result = sign(root, ['ssh-keygen', '-Y', 'sign', '-f', str(root),
+                            '-n', keys.KEYLIST_NAMESPACE, str(request)])
         if result.returncode:
             raise InstallError('Custodian signing failed; no approval published')
         artifact = keys.assemble_keylist_artifact(payload, regular_bytes(str(request) + '.sig', keys.MAX_SIGNATURE_BYTES))

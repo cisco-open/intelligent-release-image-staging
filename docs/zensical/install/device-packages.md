@@ -252,23 +252,23 @@ public copy onboarding distributes.
 
 ## When to rebuild the packages { #embedded-agent-packages }
 
-Every Python source file under `device/agent/` goes into the Guest Shell bundle,
-both IOx packages and the IOS-XR RPM. After a change to shared agent source or
-to the common device image, rebuild, republish, and redeploy each affected
-device:
+Shared agent source, device image or client changes require fresh Guest Shell,
+both IOx and IOS-XR outputs. Build images without replacing running containers:
 
 ```bash
-docker compose -f server/docker-compose.yml up -d --build
-tools/provision-iox-packages.sh
-tools/build-xr-package.sh --out artifacts/
-tools/check-package-freshness.sh
+docker compose -f server/docker-compose.yml build --pull
 ```
 
-On Kubernetes, rebuild the server image as well, then copy every package again.
+Use [Build the packages](#build-and-publish-the-arm64-iox-package) for private
+output. Follow [Deploy a new release](../admin-guide/upgrade.md), which removes
+and re-onboards device agents after deployment replacement.
+On Kubernetes, build the replacement's server image and publish packages there.
+Verify readiness on the new deployment before onboarding.
 
-When the `aria2c` pin in `tools/aria2c.sha256` changes, refresh both handed-in
-binaries, rebuild both images and every device package from them, and copy the
-packages again. The agents must be file-identical across packages.
+After a client-pin change, rebuild both images and every device package.
+Copy them to the replacement. Agents must be file-identical across packages.
+
+Keep the same release and public roots when generating or signing its packages.
 
 !!! warning
 
@@ -297,4 +297,4 @@ manifest recording that output's SHA-256.
 - [Prepare Industrial Ethernet switches with app hosting, Catalyst 9000 and 8000 series devices for the IOx app](iox.md)
 - [Prepare Cisco 8000 and NCS routers for IOS-XR appmgr](ios-xr.md)
 - [Add and onboard devices](../user-guide/onboarding.md)
-- [Upgrade to a new release](../admin-guide/upgrade.md)
+- [Deploy a new release](../admin-guide/upgrade.md)

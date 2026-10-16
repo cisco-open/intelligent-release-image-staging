@@ -249,7 +249,7 @@ def test_prepare_separates_console_and_exposes_only_authenticated_management(tmp
     assert 'depends_on' not in console and console['volumes'] == []
     assert calls == ['claim', 'provision']
     obj.prepare()  # Owned rendered inputs verified without rendering again.
-    assert calls == ['claim', 'provision']
+    assert calls == ['claim', 'provision', 'claim', 'provision']
 
 
 def test_remote_build_has_only_console_custody_and_immutable_image(tmp_path, monkeypatch):

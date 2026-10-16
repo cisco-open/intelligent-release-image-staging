@@ -49,10 +49,12 @@ The heartbeat reports staging progress:
 | `current_image_id` | The image that supplied this heartbeat's identity and observation. |
 | `stage_state` | One state for the tick: `staging`, `downloading`, `transferring_to_ios`, `ready`, or `error`. |
 | `stage_error` | The reason for `stage_state`. |
-| `staged_image_ids` | Assigned images staged and verified as of the last heartbeat. |
-| `errored_image_ids` | Assigned images that failed on the last tick. |
+| `staged_image_ids` | For multiple images, those staged and verified as of the last heartbeat. |
+| `errored_image_ids` | For multiple images, those that failed on the last tick. |
 
-An image in both lists shows its current error, not the older staged flag. See [Assign images and check staging status](../user-guide/assignments.md#unassigned-image-park).
+For one image, `current_image_id` and `stage_state` report its staging status;
+the two lists are omitted. An image in both lists shows its current error, not
+the older staged flag. See [Assign images and check staging status](../user-guide/assignments.md#unassigned-image-park).
 
 ## Inventory CSV columns
 
@@ -183,7 +185,7 @@ the terminal `superseded` state.
 
 ## Where server state lives
 
-The management process writes these, on the server host:
+These files live on the server host:
 
 | Base | Files | What it holds |
 | --- | --- | --- |
@@ -191,6 +193,7 @@ The management process writes these, on the server host:
 | `$IRIS_RUN/instr/` | `signing-key`, `signing-key-cert.pub` | Runtime plaintext only, beside the runtime certificate cache. Written on start, gone when the server stops. |
 | `$IRIS_STATE/` | `instructions-epoch.json`, `instructions-epoch.json.lock`, `instruction-key-status.json`, `instruction-stamper-status.json` | Durable instruction state: the epoch, its lock, and the key and stamper status. |
 | `$IRIS_STATE/instructions/` | `keylist.current`, `keylist-state.json`, `keylist.lock`, `roles.d/`, `role-state.json`, `activation.json`, `producer.lock`, `admitted-devices.json`, `serial-history.json`, `roles.lock` | Durable instruction state: the keylist, the role artifacts, the admitted devices and the serial history. |
+| `$IRIS_STATE/` | `origin-enforcement.json`, `origin-enforcement.json.lock`, `origin-enforcement.application.json`, `origin-enforcement.status.json` | Reviewed distribution-access approval, its lock, the tracker's application journal and count-only status. Approval and journal contain private address bindings; include them in a complete deployment backup. |
 
 Every per-device store under `IRIS_STATE` is keyed state, split over 256 shard files.
 

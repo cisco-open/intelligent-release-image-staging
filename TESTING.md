@@ -15,8 +15,8 @@ is safe to roll out to a real fleet.
 
 ## Run the automated tests
 
-Use Python 3.12 with the dependencies in `requirements-dev.txt`: `pytest`,
-`PyYAML`, an independent `cryptography` AES-SIV test oracle, and an OpenAPI
+Use Python 3.12 and Node 24. The Python dependencies in `requirements-dev.txt`
+are `pytest`, `PyYAML`, an independent `cryptography` AES-SIV test oracle, and an OpenAPI
 3.2 validator. Continuous integration (CI) installs the same file. `bats`,
 `mktorrent`, and the `age` CLI, which carries `age-keygen`, come from your
 package manager. A few tests drive those two binaries for real instead of
@@ -26,16 +26,38 @@ present.
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
+npm --prefix server/console-ui ci --no-audit --no-fund
+npm --prefix server/console-ui run build:map
 IRIS_CRYPTO_ARCHES=amd64 bash tools/build-instruction-crypto.sh  # arm64 on an ARM host
-python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ device/xr/tests/ lab/tests/ device/test_verify_image.py tools/test_api_exercise.py -q
+python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ device/xr/tests/ lab/tests/ device/test_verify_image.py tools/test_api_exercise.py tools/test_api_soak.py -q
 bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ device/xr/tests/ server/tests/*.bats
 ```
 
-Build the static instruction helper once with Docker and BuildKit; it needs
-network access for the pinned build inputs. The test commands then run
+Build the map before the Python serving tests; a clean checkout does not contain
+the generated page. Build the static instruction helper once with Docker and
+BuildKit; it needs network access for the pinned build inputs. The test commands then run
 without a live IRIS stack or network access. A missing helper fails the
 crypto tests instead of silently skipping them. To package both
 architectures, omit `IRIS_CRYPTO_ARCHES` from the build command.
+
+### Privileged filesystem checks
+
+The ordinary suite skips tests that need real root ownership. Run these exact
+additional CI checks on a disposable development or test host. They use temporary
+filesystem fixtures and mock host-service operations, not live deployments:
+
+```bash
+sudo env PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  -p no:cacheprovider -q server/tests/test_managed_worker.py
+sudo env PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  -p no:cacheprovider -q server/tests/test_installer_install.py -k umask
+sudo env PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  -p no:cacheprovider -q server/tests/test_installer_initialization.py \
+  server/tests/test_installer_local_setup.py
+```
+
+Keep the rest of the test suite under your ordinary user account. A skipped
+ownership test is not a successful privileged check.
 
 ### Console and Swagger browser checks
 

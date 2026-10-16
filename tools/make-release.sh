@@ -71,13 +71,20 @@ SHIP=(
   tools/apply-assignments.sh tools/get-ioxclient.sh tools/ioxclient.sha256
   tools/stage-iox-package.sh tools/provision-iox-packages.sh
   tools/build-device-image.sh tools/build-xr-package.sh
+  tools/prepare-device-context.py tools/prepare-docker-hosts.py
   tools/check-package-freshness.sh
   tools/irisctl tools/iris_installer tools/iris-key-setup
-  tools/release-auth.py
-  tools/build-installer-package.py
+  tools/release-auth.py tools/release-stage.py
+  tools/prebuilt-intake.py tools/hosted-prebuilt-stage.py
+  tools/build-installer-package.py tools/finalize-device-image.py
+  tools/build-release-kit.py tools/build-release-candidate.py tools/complete-release-candidate.py tools/prepare-prebuilt-release.py tools/inspect-image-components.py tools/build-alpine-sources.py
+  tools/build-packaging-inputs.py tools/build-offline-dependencies.py tools/build-guest-inputs.py
+  tools/bootstrap-offline.py
+  tools/build-offline-sources.py tools/build-debian-sources.py tools/build-core-python-sources.py tools/build-runtime-sources.py tools/build-image-source-notices.py
   tools/agent-source-freshness.sh
   tools/start-compose-server.sh tools/check-host-time.sh tools/make-release.sh tools/vendor-swagger-ui.sh
   tools/api-exercise.py tools/api_exercise_fixtures.py tools/test_api_exercise.py
+  tools/api-soak.py tools/api_soak_workload.py tools/api_soak_fixture.py tools/test_api_soak.py
   tools/aria2c-patches tools/aria2c-build tools/aria2c-source
   # ...and the tested aria2c clients themselves. They are committed (see the
   # re-inclusions in .gitignore), so the release is complete offline: bin/aria2c
@@ -89,7 +96,7 @@ SHIP=(
   bin/aria2c deliverables/aria2c-x86_64 deliverables/aria2c-aarch64
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and
   # the SSH host-key policy they (and the installers) source.
-  lab/device-run.sh lab/xr-run.sh lab/xr-dialogue.pl lab/iris-ssh-policy.sh
+  lab/device-run.sh lab/guest-publish.py lab/xr-run.sh lab/xr-dialogue.pl lab/iris-ssh-policy.sh
   # optional Kubernetes seed-server deployment
   kubernetes
   # fleet: EXAMPLES ONLY (the real csv/conf carry tokens + passwords)

@@ -438,12 +438,24 @@ def test_rollback_guard_names_the_migrated_file_for_the_operator(tmp_path):
     catalog.CatalogStore(str(tmp_path)).get_device("d1")
     with open(path) as f:
         guard_text = f.read()
-    # An operator who only sees the exception (pointing at `path`) and cats
-    # the file needs the restore command in front of them, not a second
-    # lookup.
+    # Keep evidence discoverable without recommending a stale-state rollback.
     assert path + ".migrated" in guard_text
-    assert "mv " in guard_text
+    assert "per-device" in guard_text
+    assert "retained document can omit newer writes" in guard_text
+    assert "Do not replace this guard or run older application" in guard_text
+    assert "new\ninstallation and device re-onboarding" in guard_text
+    assert "mv " not in guard_text
+    assert "original document first" not in guard_text
     assert "docs/zensical/admin-guide/recovery.md" in guard_text
+
+    # The text change leaves both the refusal and live shard reads intact.
+    with pytest.raises(RuntimeError):
+        _legacy_style_read(path)
+    current = catalog.CatalogStore(str(tmp_path))
+    current.record_heartbeat("d1", {"stage_state": "staging"}, now=2.0)
+    assert current.get_device("d1")["stage_state"] == "staging"
+    assert json.loads(Path(path + ".migrated").read_text()) == {"d1": {"device_id": "d1"}}
+    assert Path(path).read_text() == guard_text
 
 
 def test_migration_is_one_shot_even_across_process_restarts(tmp_path):
@@ -1108,6 +1120,45 @@ def test_snapshot_copy_falls_back_for_nested_and_non_json_values():
     copied["c"]["set"].add(4)
     assert rows["a"]["values"][1]["two"] == 2
     assert rows["c"]["set"] == {3}
+
+
+def test_snapshot_copy_plan_is_reused_only_for_unchanged_private_rows(tmp_path, monkeypatch):
+    store = keyed_state.KeyedState(str(tmp_path / "fleet.json"), cache_snapshots=True)
+    store.put("edge-a", {"value": "flat"})
+    choose = keyed_state._snapshot_copier
+    selected = []
+    reads = []
+    signature = store._snapshot_signature
+
+    def plan(rows):
+        copier = choose(rows)
+        selected.append(copier)
+        return copier
+
+    def fresh(path):
+        reads.append(path)
+        return signature(path)
+
+    monkeypatch.setattr(keyed_state, "_snapshot_copier", plan)
+    monkeypatch.setattr(store, "_snapshot_signature", fresh)
+    first = store.snapshot()
+    first["edge-a"]["value"] = {"caller-owned": []}
+    cold_reads = len(reads)
+    for _ in range(5):
+        assert store.snapshot() == {"edge-a": {"value": "flat"}}
+    assert selected == [keyed_state._copy_flat_rows]
+    assert len(reads) == cold_reads + 5  # Fresh open/hash on every request.
+
+    # A writer can change the shape. The fresh-content guard selects a new
+    # copier, and neither cold nor warm returned nested values alias the cache.
+    store.put("edge-a", {"value": [1, {"nested": 2}]})
+    nested = store.snapshot()
+    nested["edge-a"]["value"][1]["nested"] = 99
+    warm = store.snapshot()
+    assert warm == {"edge-a": {"value": [1, {"nested": 2}]}}
+    warm["edge-a"]["value"].append("changed")
+    assert store.snapshot() == {"edge-a": {"value": [1, {"nested": 2}]}}
+    assert selected == [keyed_state._copy_flat_rows, keyed_state.copy.deepcopy]
 
 
 def test_opt_in_snapshot_cache_invalidates_on_chmod_and_fails_closed_on_corruption(

@@ -1,0 +1,218 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// Isolated browser fixtures: never contacts a deployment or a device.
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const root = fileURLToPath(new URL('../', import.meta.url));
+const browser = await chromium.launch({headless: true});
+try {
+  const page = await browser.newPage({viewport: {width: 1440, height: 1000}});
+  const errors = [], writes = [], failures = new Map();
+  let holdTelemetry = false, heldTelemetry = null;
+  const devices = {devices: [{device_id: 'router-a', device_ip: '192.0.2.10', model: 'C8000V',
+    model_family: 'C8xxx', management_type: 'iox', assigned_images: [], stage_state: 'error'}], total: 1, offset: 0, revision: 1, now: 2000000000};
+  const images = {images: [{id: 'image-a', filename: '<img src=x onerror=alert(1)>', quarantined: true}]};
+  const fixtures = {
+    '/api/v1/session': {username: 'Overview fixture', csrf: 'test-only'},
+    '/api/v1/help': {version: 'test', deployment_id: 'fixture-only'},
+    '/api/v1/overview': {images: 1, devices: 5, assigned: 3, staged: 1, staging_now: 2, awaiting_heartbeat: 1,
+      rollout: [{image_id: '<svg onload=alert(1)>', assigned: 3, staged: 1}]},
+    '/api/v1/devices': devices, '/api/v1/images': images,
+    '/api/v1/onboard/jobs': {jobs: [], max_concurrent: 25},
+    '/api/v1/credentials': {profiles: []},
+    '/api/v1/deployment': {layout: 'single-container', components: [{role: 'server', kind: 'container',
+      name: 'iris', host: 'fixture-host', state: 'running', os: 'Debian', architecture: 'arm64'}]},
+    '/api/v1/telemetry/health': {otlp_export: {state: 'ok', signals: {logs: {state: 'ok', queued: 2}, metrics: {state: 'ok'}}}},
+  };
+  page.on('pageerror', error => errors.push({name: error.name, message: error.message, stack: error.stack}));
+  await page.addInitScript(() => {
+    window.testCspViolations = [];
+    window.addEventListener('securitypolicyviolation', event => window.testCspViolations.push(event.violatedDirective));
+    // Deterministically deliver Overview headers before its body. A newer
+    // refresh aborts this real Response.json() stream, reproducing the browser
+    // race without weakening the pageerror/unhandled-rejection assertion.
+    const nativeFetch = window.fetch.bind(window);
+    window.testHoldOverviewBody = false; window.testOverviewBodyHeld = false; window.testOverviewBodyAborts = 0;
+    window.fetch = async (url, options) => {
+      const response = await nativeFetch(url, options);
+      if (String(url) !== '/api/v1/overview' || !window.testHoldOverviewBody) return response;
+      window.testHoldOverviewBody = false;
+      const stream = new ReadableStream({start(controller) {
+        controller.enqueue(new TextEncoder().encode('{'));
+        const abort = () => {window.testOverviewBodyAborts++; controller.error(options.signal.reason);};
+        if (options.signal.aborted) abort(); else options.signal.addEventListener('abort', abort, {once: true});
+        window.testOverviewBodyHeld = true;
+      }});
+      return new Response(stream, {status: response.status, headers: response.headers});
+    };
+  });
+  await page.route('**/*', async route => {
+    const url = new URL(route.request().url());
+    assert.equal(url.origin, 'http://iris.test');
+    if (url.pathname.startsWith('/api/')) {
+      if (route.request().method() !== 'GET') writes.push(url.pathname);
+      if (holdTelemetry && url.pathname === '/api/v1/telemetry/health') { heldTelemetry = route; return; }
+      const failure = failures.get(url.pathname);
+      if (failure === 'network') return route.abort('failed');
+      if (failure === 'http') return route.fulfill({status: 503, json: {error: 'fixture failure'}});
+      return route.fulfill({status: fixtures[url.pathname] ? 200 : 503, json: fixtures[url.pathname] || {error: 'Fixture unavailable'}});
+    }
+    const file = url.pathname.startsWith('/assets/') ? path.join(root, 'dist', path.basename(url.pathname))
+      : path.join(root, '../webroot', url.pathname === '/' ? 'index.html' : url.pathname);
+    try {
+      return route.fulfill({body: await fs.readFile(file), contentType: {'.html': 'text/html', '.js': 'text/javascript',
+        '.css': 'text/css', '.woff2': 'font/woff2'}[path.extname(file)] || 'application/octet-stream',
+        headers: {'Content-Security-Policy': "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"}});
+    } catch { return route.fulfill({status: 404, body: ''}); }
+  });
+  const refresh = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await page.goto('http://iris.test/#overview');
+  await page.locator('#ov-attention [data-attn="devices"]').waitFor();
+  assert.match(await page.locator('#ov-attention').innerText(), /1\s+device needs attention/);
+  assert.match(await page.locator('#ov-cards').innerText(), /Staged\s+1\s+of 3 assigned/i);
+  assert.match(await page.locator('#ov-cards').innerText(), /Waiting for heartbeat\s+1\s+of 5 devices/i);
+  assert.equal(await page.locator('#ov-rows svg').count(), 0, 'Image IDs must be text, never markup');
+  assert.equal(await page.getByRole('progressbar').getAttribute('aria-valuenow'), '33');
+  assert.equal(await page.locator('#ov-rows .pbar > span').evaluate(node => node.style.width), '33%');
+  await page.locator('#telemetry-health').getByText('Telemetry export: ok', {exact: true}).waitFor();
+  assert.match(await page.locator('#telemetry-health').getAttribute('title'), /queued 2/);
+
+  // Runtime details start compact, open with the keyboard, and remain open
+  // across status refreshes without moving focus away from their disclosure.
+  const deploymentDetails = page.locator('#deployment-details');
+  const deploymentToggle = deploymentDetails.locator('summary');
+  assert.equal(await deploymentDetails.evaluate(node => node.open), false);
+  assert.equal(await page.locator('#deployment-table').isVisible(), false);
+  await deploymentToggle.focus();
+  await page.keyboard.press('Enter');
+  await page.locator('#deployment-table').waitFor();
+  assert.match(await page.locator('#deployment-rows').innerText(), /fixture-host/);
+  fixtures['/api/v1/deployment'].observed_at = 2000000000;
+  await refresh();
+  await page.waitForFunction(() => document.querySelector('#deployment-observed').textContent.startsWith('Observed '));
+  assert.equal(await deploymentDetails.evaluate(node => node.open), true);
+  assert.equal(await deploymentToggle.evaluate(node => node === document.activeElement), true);
+  await page.keyboard.press('Space');
+  assert.equal(await deploymentDetails.evaluate(node => node.open), false);
+  fixtures['/api/v1/deployment'].note = 'Full deployment inventory is unavailable.';
+  await refresh();
+  await page.locator('#deployment-note').getByText('Full deployment inventory is unavailable.', {exact: true}).waitFor();
+  assert.equal(await page.locator('#deployment-note').isVisible(), true, 'Partial inventory warning is visible while collapsed');
+  delete fixtures['/api/v1/deployment'].note;
+
+  // Reconciliation must keep the focused action across refreshes.
+  await page.locator('#ov-attention [data-attn="devices"]').focus();
+  fixtures['/api/v1/overview'].staged = 2;
+  await refresh();
+  await page.waitForFunction(() => document.querySelector('#ov-cards').textContent.includes('Staged2of 3 assigned'));
+  assert.equal(await page.evaluate(() => document.activeElement.dataset.attn), 'devices');
+  // Cancellation after HTTP headers is just as expected as cancellation of
+  // fetch itself. The old body must resolve harmlessly without replacing the
+  // newer cards, nor report an unhandled AbortError to the page.
+  await page.evaluate(() => {window.testHoldOverviewBody = true;});
+  await refresh();
+  await page.waitForFunction(() => window.testOverviewBodyHeld);
+  fixtures['/api/v1/overview'].staged = 3;
+  await refresh();
+  await page.waitForFunction(() => document.querySelector('#ov-cards').textContent.includes('Staged3of 3 assigned'));
+  assert.equal(await page.evaluate(() => window.testOverviewBodyAborts), 1);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.deepEqual(errors, [], 'Superseded body reads must be handled, not leaked as page errors');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => location.hash === '#devices' && document.querySelector('#dev-filter-status').value === '__attention');
+  await page.goto('http://iris.test/#overview');
+  await page.locator('#ov-attention [data-attn="images"]').click();
+  await page.waitForFunction(() => location.hash === '#images' && document.querySelector('#images-filter-attention').checked);
+  assert.equal(await page.locator('#rows img').count(), 0);
+  await page.goto('http://iris.test/#overview');
+
+  // Both HTTP and network failures keep valid totals and the other attention group.
+  for (const failure of ['http', 'network']) {
+    failures.set('/api/v1/devices', failure);
+    await refresh();
+    await page.locator('#ov-attention').getByText('Fleet status unavailable', {exact: true}).waitFor();
+    assert.equal(await page.locator('#ov-attention [data-attn="images"]').count(), 1);
+    assert.equal(await page.locator('#ov-attention .is-positive').count(), 0);
+    assert.equal(await page.locator('#ov-cards .card').count(), 6);
+    failures.set('/api/v1/images', failure);
+    await refresh();
+    await page.waitForFunction(() => document.querySelectorAll('#ov-attention [data-attn]').length === 0);
+    assert.equal(await page.locator('#ov-attention .is-positive').count(), 0);
+    failures.clear();
+    await refresh();
+    await page.locator('#ov-attention [data-attn="devices"]').waitFor();
+  }
+  devices.devices[0].stage_state = 'unassigned';
+  images.images[0].quarantined = false;
+  await refresh();
+  await page.locator('#ov-attention').getByText('All clear', {exact: true}).waitFor();
+
+  // Malformed deployment content fails closed without crashing the React root.
+  const deployment = fixtures['/api/v1/deployment'];
+  for (const components of [[null], [{name: {bad: 'value'}}], Array(65).fill({name: 'too many'})]) {
+    fixtures['/api/v1/deployment'] = {...deployment, components};
+    await refresh();
+    await page.locator('#deployment-layout').getByText('Unavailable', {exact: true}).waitFor();
+    assert.equal(await page.locator('#deployment-table').isVisible(), false);
+    assert.equal(await page.locator('#deployment-note').isVisible(), true, 'Unavailable data is flagged while collapsed');
+    fixtures['/api/v1/deployment'] = deployment;
+    await refresh();
+    await page.locator('#deployment-layout').getByText('Single container', {exact: true}).waitFor();
+  }
+
+  // Late health data cannot overwrite the result of a newer refresh.
+  holdTelemetry = true;
+  await refresh();
+  const deadline = Date.now() + 5000;
+  while (!heldTelemetry && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(heldTelemetry, 'Old health response was captured');
+  holdTelemetry = false;
+  fixtures['/api/v1/telemetry/health'] = {otlp_export: {state: 'degraded'}};
+  await refresh();
+  await page.locator('#telemetry-health').getByText('Telemetry export: degraded', {exact: true}).waitFor();
+  const oldResponse = page.waitForResponse(response => response.url().endsWith('/api/v1/telemetry/health'));
+  await heldTelemetry.fulfill({json: {otlp_export: {state: 'off'}}});
+  await oldResponse;
+  // Wait two render frames after the old response has been processed.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.locator('#telemetry-health').innerText(), 'Telemetry export: degraded');
+  assert.equal(await page.locator('#telemetry-health').getAttribute('title'), '');
+
+  // Both Docker and Kubernetes remain compact until expanded. Full runtime
+  // names stay readable inside the table without widening the whole page.
+  for (const [layout, components] of [
+    ['docker', [deployment.components[0], {...deployment.components[0], role: 'console', name: 'iris-console'}]],
+    ['docker-split', [deployment.components[0], {...deployment.components[0], role: 'console', name: 'iris-console', host: 'console-host'}]],
+    ['kubernetes', [
+      {...deployment.components[0], kind: 'pod', name: 'iris-server-6bbdf48f78-x4nrz', host: 'node-a'},
+      {...deployment.components[0], role: 'console', kind: 'pod', name: 'iris-console-765f78698b-4xvqn', host: 'node-b'},
+    ]],
+  ]) {
+    fixtures['/api/v1/deployment'] = {...deployment, layout, components};
+    await refresh();
+    await page.locator('#deployment-layout').getByText(layout === 'kubernetes' ? 'Kubernetes'
+      : layout === 'docker-split' ? 'Docker · separate hosts' : 'Docker · one host', {exact: true}).waitFor();
+    for (const [width, name] of [[1440, 'desktop'], [390, 'mobile'], [320, 'narrow']]) {
+      await page.setViewportSize({width, height: 1000});
+      for (const expanded of [false, true]) {
+        if (await deploymentDetails.evaluate(node => node.open) !== expanded) await deploymentToggle.click();
+        assert.equal(await page.locator('#deployment-table').isVisible(), expanded);
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        if (process.env.IRIS_UI_SCREENSHOTS) {
+          await fs.mkdir(process.env.IRIS_UI_SCREENSHOTS, {recursive: true});
+          await page.screenshot({path: path.join(process.env.IRIS_UI_SCREENSHOTS,
+            `overview-${layout}-${name}-${expanded ? 'expanded' : 'collapsed'}.png`), fullPage: true});
+        }
+      }
+    }
+  }
+  assert.deepEqual(await page.evaluate(() => window.testCspViolations), []);
+  assert.deepEqual(writes, [], 'Viewing and filtering must not issue writes');
+  assert.deepEqual(errors, []);
+  console.log('Overview rendering, failures, keyboard actions, focus retention, stale health and CSP passed.');
+} finally { await browser.close(); }

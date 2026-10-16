@@ -24,6 +24,9 @@ from test_api_split import policy_tiers
 def worker(tmp_path):
     for name in ('state', 'backups', 'recovery', 'extract'):
         (tmp_path / name).mkdir(mode=0o700)
+    from iris_installer.state import atomic_write
+    atomic_write(tmp_path / 'state/installation.json', json.dumps(dict(schema=1,
+        id=str(uuid.uuid4()), config={'target': 'docker'}, completed={})).encode())
     return worker_module.Worker(tmp_path / 'state', tmp_path / 'backups', tmp_path / 'recovery')
 
 
@@ -222,6 +225,78 @@ def test_worker_redacts_exceptions_and_blocks_interrupted_recovery(worker, monke
     assert recovered.jobs[0]['state'] == 'recovery-required'
     with pytest.raises(InstallError, match='recovery'):
         recovered.submit({'action': 'backup', 'allow_downtime': True, 'request_id': str(uuid.uuid4())})
+
+
+@pytest.mark.parametrize('action', ['verify', 'extract'])
+@pytest.mark.parametrize('prior_state', ['running', 'recovery-required'])
+def test_restarted_readonly_job_fails_without_replay_or_partial_output_deletion(worker, tmp_path, monkeypatch, action, prior_state):
+    from iris_installer.state import atomic_write
+    backup_id, request_id = str(uuid.uuid4()), str(uuid.uuid4())
+    original = dict(id=request_id, action=action, backup_id=backup_id, state=prior_state,
+                    started_at=1, detail='Retained original interrupted attempt')
+    captured = dict(id=str(uuid.uuid4()), action='backup', backup_id=backup_id,
+                    state='captured', started_at=1, finished_at=2, detail='Fixture capture')
+    worker.jobs = [captured, original]
+    worker.save()
+    extract = tmp_path / 'extract'
+    partial = extract / request_id
+    partial.mkdir(mode=0o700)
+    private = partial / 'unverified-private-file'
+    atomic_write(private, b'partial isolated fixture; never publish or remove')
+    identity = tmp_path / 'independent'
+    atomic_write(identity, b'not decrypted by the mocked archive reader')
+    before = (partial.stat(), private.stat(), private.read_bytes())
+    calls = []
+    def read(path, *_args, **_kwargs):
+        calls.append(path)
+        return {'metadata': dict(scope=('managed-deployment-files' if path.parent == worker.backup_dir
+                                        else 'identity-recovery'), target='single-docker',
+                                 backup_set_id='same-fixture-set', instance_id='same-fixture-installation')}
+    monkeypatch.setattr(worker_module.backup_archive, 'read', read)
+    recovered = worker_module.Worker(worker.state_dir, worker.backup_dir, worker.recovery_dir,
+                                     identity=identity, extract_dir=extract)
+    failed = recovered.jobs[-1]
+    assert failed['state'] == 'failed' and failed['id'] == request_id
+    assert failed['finished_at'] >= failed['started_at']
+    assert ('not verified' if action == 'extract' else 'No restore') in failed['detail']
+    assert calls == [] and recovered.thread is None
+    assert recovered.submit(dict(action=action, request_id=request_id, backup_id=backup_id)) == {'job_id': request_id}
+    assert recovered.thread is None and calls == []  # Same ID observes, never replays.
+    fresh = str(uuid.uuid4())
+    recovered.submit(dict(action='verify', request_id=fresh, backup_id=backup_id))
+    recovered.thread.join(3)
+    assert not recovered.thread.is_alive() and recovered.jobs[-1]['state'] == 'verified-files'
+    assert len(calls) == 2
+    after = (partial.stat(), private.stat(), private.read_bytes())
+    fields = lambda row: (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_gid, row.st_size)
+    assert tuple(map(fields, before[:2])) == tuple(map(fields, after[:2])) and before[2] == after[2]
+    assert captured in recovered.jobs  # Archive/capture authority remains intact.
+    assert not (worker.state_dir / 'backup-operation.json').exists()
+
+
+@pytest.mark.parametrize('action', ['backup', 'restore', 'rotate', 'renew-transport'])
+@pytest.mark.parametrize('prior_state', ['running', 'recovery-required'])
+def test_readonly_startup_settlement_never_clears_mutating_operation_fences(worker, action, prior_state):
+    job = dict(id=str(uuid.uuid4()), action=action, state=prior_state, started_at=1, detail='Original')
+    worker.jobs = [job]
+    worker.save()
+    recovered = worker_module.Worker(worker.state_dir, worker.backup_dir, worker.recovery_dir)
+    assert recovered.jobs[0]['state'] == 'recovery-required'
+    if prior_state == 'running':
+        expected = {
+            'backup': 'Backup interrupted.', 'restore': 'Restore interrupted.',
+            'rotate': 'Credential rotation interrupted.',
+            'renew-transport': 'Worker connection renewal interrupted.',
+        }
+        assert recovered.jobs[0]['detail'].startswith(expected[action])
+        assert 'recovery control' in recovered.jobs[0]['detail'] or 'then use ' in recovered.jobs[0]['detail']
+        assert 'backup-operation.json' not in recovered.jobs[0]['detail']
+        assert json.loads(recovered.record.read_bytes())[0]['detail'] == recovered.jobs[0]['detail']
+    else:
+        assert recovered.jobs[0]['detail'] == 'Original'
+    assert recovered.thread is None
+    with pytest.raises(InstallError, match='active or requires recovery'):
+        recovered.submit(dict(action='backup', request_id=str(uuid.uuid4()), allow_downtime=True))
 
 
 def test_real_unix_socket_client_and_peer_credentials(worker, tmp_path, monkeypatch):

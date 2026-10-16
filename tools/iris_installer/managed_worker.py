@@ -35,9 +35,18 @@ RECOVERY_ROOT = Path('/var/lib/iris-recovery')
 RECOVERY_ACCESS_ROOT = Path('/var/lib/iris-worker-recovery')
 RECORD = 'worker-service.json'
 PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+# Read-only storage/inventory probes may spawn subprocesses in this same unit.
+# Serialize their birth with capture's cgroup census, not with the entire job:
+# status remains available while the capture/recovery action runs.
+CAPTURE_PROCESS_LOCK = threading.RLock()
 
 
 def command(argv, *, timeout=120):
+    with CAPTURE_PROCESS_LOCK:
+        return _command(argv, timeout=timeout)
+
+
+def _command(argv, *, timeout=120):
     try:
         result = subprocess.run(argv, env={'PATH': PATH, 'LANG': 'C.UTF-8'},
                                 stdin=subprocess.DEVNULL, capture_output=True,
@@ -324,6 +333,8 @@ def _setup(args):
     _root()
     state = private_directory(args.state_dir)
     _path(state)
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state, operation_id=getattr(args, 'application_upgrade_id', None))
     identifier, config = _installation(state)
     record_path = state / RECORD
     if record_path.exists() or record_path.is_symlink():
@@ -550,6 +561,10 @@ def configure_recovery(state_dir, identity_path=None):
 
 
 def _configure_recovery(state, identity_path):
+    from .lifecycle_history import guard as retention_guard
+    retention_guard(state)
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state)
     _apply_recovery_intent(state)
     record = _load(state)
     _check_unit(state, record)
@@ -629,6 +644,10 @@ def configure_restore_signer(state_dir, public_key_path):
 
 
 def _configure_restore_signer(state, public_key_path):
+    from .lifecycle_history import guard as retention_guard
+    retention_guard(state)
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state)
     record = _load(state)
     _check_unit(state, record)
     source = Path(public_key_path).absolute()
@@ -675,6 +694,8 @@ def action(args):
     record = _load(state)
     _check_unit(state, record)
     if args.action != 'stop':
+        from .upgrade_state import guard as upgrade_guard
+        upgrade_guard(state)
         check_storage(state, record)
     command(['systemctl', args.action, record['unit']], timeout=3600)
     if args.action != 'stop':
@@ -685,7 +706,11 @@ def action(args):
 def serve_managed(args):
     _root()
     state = private_directory(args.state_dir)
-    _apply_recovery_intent(state)
+    from .upgrade_state import guard as upgrade_guard
+    # During an upgrade the new pinned worker may expose read-only status.
+    # It must not replay another family's pending startup mutation.
+    if not upgrade_guard(state, inspection=True):
+        _apply_recovery_intent(state)
     record = _load(state)
     check_storage(state, record)
     _runtime(state, record)
@@ -693,22 +718,35 @@ def serve_managed(args):
     original = lifecycle_worker.Worker
 
     class ManagedWorker(original):
+        managed_captures = True
+
         def submit(self, request):
-            check_storage(state, record)
-            return super().submit(request)
+            with CAPTURE_PROCESS_LOCK:
+                check_storage(state, record)
+                return super().submit(request)
+
+        def deployment_info(self):
+            with CAPTURE_PROCESS_LOCK:
+                return super().deployment_info()
+
+        def transport_status(self):
+            with CAPTURE_PROCESS_LOCK:
+                return super().transport_status()
 
         def submit_transport(self, request):
             # Transport recovery remains available even when backup disks are
             # detached; it never captures or decrypts a backup.
-            return super().submit_transport(request)
+            with CAPTURE_PROCESS_LOCK:
+                return super().submit_transport(request)
 
-        def status(self):
-            result = super().status()
-            ready = True
-            try:
-                check_storage(state, record)
-            except (InstallError, OSError, ValueError):
-                ready = False
+        def status(self, retention_request_id=None):
+            with CAPTURE_PROCESS_LOCK:
+                result = super().status(retention_request_id)
+                ready = True
+                try:
+                    check_storage(state, record)
+                except (InstallError, OSError, ValueError):
+                    ready = False
             result['managed_service'] = {'managed': True, 'storage_ready': ready,
                                          'custody': record['storage_layout'],
                                          'off_host_protection': 'not-proven'}

@@ -152,7 +152,7 @@ The pages of most use while you're changing code:
 - [Process and thread topology, preflight and internal rationale](docs/dev/server-internals.md)
 - [aria2 peer sampling, report ring and promotion design](docs/dev/telemetry-internals.md)
 - [KDF, PAE layout, iris-aead adapter and the OpenSSL pin](docs/dev/instruction-crypto.md)
-- [Migration notes for contributors](docs/dev/upgrade-notes.md)
+- [Release compatibility checks](docs/dev/upgrade-notes.md)
 - [tools/api-exercise.py](docs/dev/api-exercise.md)
 - [The React build, mount roots and CSP](docs/dev/console-ui.md)
 - [Where the dashboard metrics come from in code](docs/dev/dashboards.md)

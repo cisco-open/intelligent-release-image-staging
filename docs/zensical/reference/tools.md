@@ -82,12 +82,15 @@ iris-revoke <device_id>
 
 ## Remove IRIS from a device
 
-| Platform | Script |
+| Platform | Command or script |
 | --- | --- |
 | Guest Shell | `device/device-uninstall.sh` |
 | Catalyst 8000 series routers (IOS-XE) | `device/router-uninstall.sh` |
-| IOx | `device/iox/uninstall.sh` |
+| IOx | [IOx control CLI](#iox-control-cli), `submit-uninstall --device-id <id>` |
 | IOS-XR appmgr | `device/xr-uninstall.sh` |
+
+The IOx shell script requires the controller's private channel. Use the
+control CLI, Console, or undeploy API instead of running that script directly.
 
 !!! warning
     Does not reload the device or delete a staged image. See [Undeploy, retire and clean up devices](../user-guide/undeploy.md).

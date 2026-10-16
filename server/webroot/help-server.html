@@ -55,6 +55,24 @@
       <code>6800</code> stays on server loopback.</li>
     </ul>
 
+    <h2>Installer command failures</h2>
+    <p>A failed managed build names a private diagnostics file in the terminal
+    error. Inspect it locally as root and keep the installation state for resume.
+    The installer retains at most eight files, each with the last 128 KiB of
+    stdout and stderr. Earlier logs are never overwritten. These files can
+    contain credentials: do not share them in tickets, chat or public logs.
+    See <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/troubleshooting/#installer-command-failures" target="_blank" rel="noopener">Installer command failures</a>.</p>
+
+    <h2>Settings saves</h2>
+    <p>In General, TLS &amp; trust, Telemetry and Audit export, an uncertain save
+    requires <strong>Reload current settings</strong> and review before retrying.
+    Sign in again after an uncertain password change. Submitted passwords and
+    private keys clear from their forms, as they do when you leave the section
+    or hide the tab. Leaving a page does not cancel a submitted request.</p>
+    <p>Importing a browser certificate reloads only the Console that handled
+    the request. If it was saved but reload was not confirmed, restart that
+    Console. Restart other Console instances too, then verify the served
+    certificate on a new trusted connection to each instance.</p>
     <h2>Local API reference</h2>
     <p>Open <a href="/swagger/">the local Swagger API reference</a> from
     Help → Local API reference, on this Console's HTTPS address and port.
@@ -90,6 +108,10 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       read-only tier-token and management-CA mounts. Confirm the management
       certificate covers the hostname or IP in the URL. A browser
       certificate and the management CA serve different connections.</li>
+      <li>If the response code is <code>projection-busy</code>, a device-status
+      read waited too long behind another read. Retry after
+      <code>Retry-After</code>; repeated failures call for checking server load
+      and storage health.</li>
       <li>Use <code>/readyz</code> for readiness: on server port 9101 it
       checks the tracker, catalog, artifact, and management listeners.
       <code>/healthz</code> only proves the telemetry process answers.
@@ -102,9 +124,117 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       or damaged ciphertext; check the reported cause before changing state.</li>
       <li>Check Monitoring → Audit trail for the last settings or device
       action, and the device job log for onboarding or undeploy failures.</li>
+      <li>In Manage credentials, Refresh profiles checks an unavailable list.
+      An unknown save or delete result means the response was lost or incomplete;
+      refresh and check before trying again. Closing the panel or leaving the
+      tab clears entered passwords, but does not cancel a submitted save.</li>
+      <li>If Inventory shows unavailable credentials or sharing policy, check
+      the server connection before editing those fields. An unknown edit
+      outcome means the response was lost or unreadable; check the refreshed
+      row before trying again.</li>
+      <li>Image and bulk credential dialogs keep the devices you reviewed when
+      you opened them. Check <strong>reviewed devices</strong> before applying.
+      For an image conflict or unknown result, choose <strong>Review current
+      assignments</strong> and check the new selection before applying again.
+      Closing a dialog does not cancel submitted changes.</li>
+      <li><strong>Add device</strong> checks the model series and management type
+      together before offering an agent install. Catalyst 8000 series uses
+      <strong>Router routed</strong> or <strong>Router NAT</strong> for Guest Shell
+      or IOx. Reopen the form if the compatibility check is unavailable.</li>
+      <li><strong>Forget host key</strong> confirms the selected device's saved
+      SSH entry is absent, including hashed entries, and preserves other devices'
+      keys. Verify a replaced device's identity before using this action.</li>
+      <li>CSV import results stay below the Inventory toolbar. Device edits
+      wait until an import finishes. If its response is uncertain, check
+      Inventory before retrying.</li>
+      <li>Delete reports incomplete cleanup separately from a completed
+      retirement. Partial or unknown targets stay selected, even if their
+      rows have left Inventory. Read the named cleanup steps and audit trail
+      before retrying.</li>
+      <li>Schedule dialogs keep the filter and selected devices reviewed at
+      opening. Check <strong>Reviewed target</strong> before creating a window.
+      An unknown creation result needs <strong>Refresh schedules before
+      retrying</strong>; check whether the named schedule already exists.
+      Closing the dialog does not cancel a submitted request.</li>
+      <li>Set role keeps its reviewed devices fixed. If the result is uncertain,
+      use <strong>Refresh policy before retrying</strong> and check the roles
+      before another preview. Bulk quarantine stops on an uncertain result;
+      devices marked <strong>not attempted</strong> were left unchanged by
+      that batch.</li>
+      <li>A partial role change is not a rollback. Repair the reported store
+      failure, refresh inventory and policy, and review applied, failed and
+      drift results. Preview the remaining change with the current revision
+      before confirming; an earlier confirmation can be refused.</li>
+      <li>In Policies, preview a role definition before saving. An uncertain
+      save needs a refresh and review; <strong>Reload current definition</strong>
+      discards your draft. Role CSV exports include seeder and leecher timing
+      overrides; blank or missing timing columns remove those overrides on import.
+      The page loads when opened and after a save. Choose <strong>Refresh policies</strong>
+      to check for changes from elsewhere.</li>
+      <li>Under <strong>Speed limits and agent settings</strong>, expiry applies to
+      the last verified settings message, not the saved role. Keep its verified
+      transfer settings or use the device agent's built-in settings, which have
+      no upload or download speed limit. Transfers can continue. This choice does
+      not extend expired peer permissions or stop every existing connection.</li>
+      <li>Policies → <strong>Distribution access</strong> starts in
+      <strong>Preview only</strong>. To enforce reviewed restrictions, set the
+      new-device and new-address limits, select <strong>Preview change</strong>,
+      check the counts, then <strong>Apply reviewed change</strong>. Choose
+      <strong>Refresh status</strong> to check current application, not just the requested mode. A shared allowed/denied
+      address needs separate addresses. After an uncertain save, use
+      <strong>Refresh status</strong> before another preview. Refreshing asks before
+      discarding an unsaved draft or preview.</li>
     </ol>
 
     <h2>Device packages and certificate changes</h2>
+    <p>In <strong>Settings → Certificates &amp; keys</strong>,
+    the overview shows what each certificate protects, its status and expiry.
+    Open <strong>Renew signing certificate</strong> to extend validity with the same key.
+    Technical details and advanced changes start closed. Open
+    <strong>Advanced: replace signing key</strong> only when the key itself needs
+    replacing. Automatic local setup keys use their saved passphrases for approval;
+    you still review the request and return the public approval. Renewal is not automatic.
+    <strong>Advanced: replace deployment keys</strong> covers connection and encryption keys.
+    The browser certificate
+    this Console serves, including its expiry, is in <strong>TLS &amp; trust</strong>.</p>
+    <p>For an uncertain instruction certificate renewal, download a fresh public
+    renewal request before submitting again. For an uncertain signer rotation,
+    select <strong>Refresh rotation</strong> and review the request ID,
+    fingerprints and state. Leaving the page clears selected approval files
+    but does not cancel a submitted request.</p>
+    <p>For browser certificate replacement, <strong>Refresh request</strong>
+    shows the current request and publication state. Check the apply result for
+    listener reload, then verify a new trusted browser connection. For telemetry
+    credentials, <strong>Refresh evidence</strong> shows replacement use; confirm
+    every consumer before finishing. Unknown or refused results need an explicit
+    refresh and review. Submitted or hidden forms clear entered credentials;
+    returning to the page does not repeat a request.</p>
+    <p>For deployment rotation, use <strong>Refresh maintenance evidence</strong>
+    after reconnecting. For backups, use <strong>Refresh backup history</strong>.
+    Match the operation ID and check its result; acceptance is not completion.
+    An uncertain response needs a refresh and review before another request.
+    Running work and interrupted deployment changes block new maintenance.</p>
+    <p>After a worker restart, interrupted backup verification or isolated
+    extraction is marked failed. Review the result, then start a new request.
+    Partial extraction files remain private on the host and are not verified
+    recovery data.</p>
+    <p>Before a first restore, complete a backup and record
+    its public signer from <code>&lt;installation-state-directory&gt;/backup-custody/signer.pub</code>
+    through a trusted host connection. Keep an independent public copy, then use
+    <code>irisctl maintenance</code> with <code>trust-signer</code> and that reviewed
+    file outside installation state. The
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/admin-guide/backups/#trust-the-backup-signer" target="_blank" rel="noopener">backup signer procedure</a>
+    has the steps. Never establish trust from a signer supplied only with the selected archive.</p>
+    <p>Restore keeps your current <strong>Policies → Distribution access</strong>
+    settings and safety records for shared IP addresses. Check application
+    status again after the server restarts.</p>
+    <p>Scheduled key maintenance keeps your draft if saved settings change.
+    Choose <strong>Reload saved schedule</strong> and review the UTC window
+    before saving again. For an uncertain save, <strong>Refresh maintenance</strong>
+    and check the saved schedule first. Returning to a page never resubmits work.</p>
+    <p>After a scheduled management credential replacement, open
+    <strong>Inventory</strong> and verify every Console before selecting
+    <strong>Retire previous credential</strong>.</p>
     <p>IOx and IOS-XR use the same device-agent image, packaged as
     <code>iris-arm64.tar</code>, <code>iris-amd64.tar</code>, and
     <code>iris-xr.rpm</code>. Guest Shell receives the shared agent in a
@@ -117,8 +247,14 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
     Docker host. See the
     <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/install/device-packages/#embedded-agent-packages" target="_blank" rel="noopener">package rebuild instructions</a>.
     Settings → Device packages checks wrapper bytes against their build
-    manifests. A ready result does not prove the packages contain the latest
-    source or validate a native signature.</p>
+    manifests. A ready result does not authenticate those manifests, prove the
+    packages contain the latest source, or validate a native signature.
+    Artifact updated is the file's modification time. Build only the platforms
+    you use, then select Re-check packages.</p>
+    <p>Settings → Image verification shows completed Bulk Hash checks separately
+    from a configured schedule. If a reply is lost, use Review current status
+    before retrying. Review discards unsaved schedule edits and loads the latest
+    evidence; it cannot prove the result of an earlier request.</p>
 
     <h2>Where state lives</h2>
     <ul>

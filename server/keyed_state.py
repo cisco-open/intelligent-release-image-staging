@@ -59,10 +59,10 @@ on an unparseable state file (the pre-#51/#52/#53/#56/#58
 ``CatalogStore._read`` and ``peer_endpoints._load``, both of which treat a
 *missing* file as ``{}`` but an *existing-and-unreadable* one as corruption)
 trips that same fail-closed path instead of reading an empty store. The
-placeholder carries the recovery instructions in the clear, so ``cat``-ing
-the file the error points at is enough to find them. See
-``docs/zensical/admin-guide/recovery.md`` ("Roll back the per-device state
-split") for the full procedure.
+placeholder identifies retained evidence in the clear, so ``cat``-ing the
+file the error points at explains the refusal. See
+``docs/zensical/admin-guide/recovery.md`` ("Inspect retained per-device migration
+evidence") for the supported recovery procedure.
 """
 import contextlib
 import copy
@@ -84,8 +84,12 @@ SHARD_COUNT = 256
 _JSON_SCALAR_TYPES = frozenset((str, int, float, bool, type(None)))
 
 
-def _copy_snapshot_rows(rows):
-    """Defensive copies without recursively copying immutable fleet fields.
+def _copy_flat_rows(rows):
+    return {key: row.copy() for key, row in rows.items()}
+
+
+def _snapshot_copier(rows):
+    """Choose a defensive copier once for a private, immutable cache entry.
 
     Normal inventory rows are flat JSON objects. Copy both dictionary levels
     when their keys/values are exactly immutable JSON scalars; retain deepcopy
@@ -96,8 +100,12 @@ def _copy_snapshot_rows(rows):
         if type(key) is not str or type(row) is not dict or any(
                 type(field) is not str or type(value) not in _JSON_SCALAR_TYPES
                 for field, value in row.items()):
-            return copy.deepcopy(rows)
-    return {key: row.copy() for key, row in rows.items()}
+            return copy.deepcopy
+    return _copy_flat_rows
+
+
+def _copy_snapshot_rows(rows):
+    return _snapshot_copier(rows)(rows)
 
 
 def _fsync_directory(path):
@@ -273,7 +281,7 @@ class KeyedState:
             cached = self._snapshot_cache.get(bucket) if cacheable else None
             if before is not None and cached is not None \
                     and cached[0] == before:
-                return _copy_snapshot_rows(cached[1])
+                return cached[2](cached[1])
 
             # Never fall back to cached state when a read fails or the file
             # changes while being read. _read_shard preserves normal strict
@@ -287,7 +295,11 @@ class KeyedState:
                 # the next request must retry the filesystem read.
                 return rows
             if cacheable and before is not None and before == after:
-                self._snapshot_cache[bucket] = (after, _copy_snapshot_rows(rows))
+                # Cache rows are never returned directly. Their scalar/nested
+                # shape cannot change, so avoid rechecking every field on each
+                # hit. File contents and permissions are still read every time.
+                copier = _snapshot_copier(rows)
+                self._snapshot_cache[bucket] = (after, copier(rows), copier)
             return rows
 
     def _write_shard(self, bucket, rows):
@@ -423,15 +435,19 @@ class KeyedState:
             "fleet, so this file exists to make it fail loudly instead of\n"
             "silently reporting no devices, no policy and no telemetry.\n"
             "\n"
-            "If you are rolling back to that older code, restore the\n"
-            "original document first:\n"
+            "Keep this guard, the retained document and the per-device\n"
+            "files intact. The retained document can omit newer writes;\n"
+            "it is historical evidence, not a current restore set.\n"
             "\n"
-            "    mv %s %s\n"
+            "Use the original deployment's recorded release and state\n"
+            "paths. Do not replace this guard or run older application\n"
+            "code against this store. A different release requires a new\n"
+            "installation and device re-onboarding.\n"
             "\n"
-            "See docs/zensical/admin-guide/recovery.md, \"Roll back the\n"
-            "per-device state split\", for the full recovery procedure.\n"
-            % (self.dir, migrated_path, self.legacy_path,
-               migrated_path, self.legacy_path)
+            "See docs/zensical/admin-guide/recovery.md, \"Inspect retained\n"
+            "per-device migration evidence\", and the deployment-replacement\n"
+            "procedure in docs/zensical/admin-guide/upgrade.md.\n"
+            % (self.dir, migrated_path, self.legacy_path)
         )
         try:
             d = os.path.dirname(self.legacy_path) or "."

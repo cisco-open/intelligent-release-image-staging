@@ -1600,6 +1600,53 @@ def test_dynamic_lease_renewal_window_boundaries(delta, expected, tmp_path,
     assert _raw_stamp(cat)["instr_serial"] == (1 if delta < 0 else 2)
 
 
+@pytest.mark.parametrize("delete_role", [False, True])
+def test_return_to_cached_role_bounds_reused_peer_expiry(tmp_path, delete_role):
+    paths, fleet, cat, producer, _marker, *_ = _setup(tmp_path)
+    assert producer.stamp_device("device-1") == "updated"
+    cached_default = _raw_stamp(cat)
+
+    device_id = "device-2"
+    fleet.rows[device_id] = {
+        "device_id": device_id, "platform": "guestshell",
+        "registered_at": NOW + 100,
+    }
+    store = secrets_store.load(paths.secrets)
+    store["devices"][device_id] = {
+        "instr_key": _record(value="02" * 32, created_at=NOW + 100)}
+    secrets_store.save(store, paths.secrets)
+    document = peer_policy.base_document()
+    document["revision"] = 2
+    document["roles"] = {
+        "defs": {"temporary": {"restricted": False,
+                                "peers": ["temporary"], "origin": True}},
+        "role_of": {device_id: "temporary"},
+        "qos_default": {}, "qos_device": {},
+    }
+    _write_policy(paths, document)
+    producer.now = lambda: NOW + 100
+    assert producer.stamp_device(device_id) == "updated"
+    previous = cat._policies.get(device_id)["instr"]
+    assert previous["part"]["peers"]["allowed_expires_at"] > \
+        cached_default["expires_at"]
+
+    document["revision"] += 1
+    document["roles"]["role_of"] = {}
+    if delete_role:
+        document["roles"]["defs"] = {}
+    _write_policy(paths, document)
+    producer.now = lambda: NOW + 101
+    assert producer.stamp_device(device_id) == "updated"
+    current = cat._policies.get(device_id)["instr"]
+    instructions.validate_stamp(current)
+    assert current["role_gen"] == cached_default["role_gen"]
+    assert current["expires_at"] == cached_default["expires_at"]
+    assert current["part"]["peers"]["allowed_expires_at"] == \
+        current["expires_at"]
+    assert current["instr_serial"] == previous["instr_serial"] + 1
+    assert producer.stamp_device(device_id) == "unchanged"
+
+
 def test_real_openssh_role_signature_and_corrupt_body_or_signature_refuses(
         tmp_path):
     key_paths = instruction_keys.InstructionPaths(

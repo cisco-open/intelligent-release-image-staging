@@ -372,9 +372,11 @@ def test_policy_preflight_schema_distinguishes_unknown_and_zero_without_ids():
         validator = OAS32Validator(schema)
         for count in (None, 0, 2):
             validator.validate({"mode": "preflight", "newly_denied_device_count": count})
+        validator.validate({"mode": "enforce", "newly_denied_device_count": None})
         for bad in (
                 {"mode": "preflight"},
                 {"mode": "enforced", "newly_denied_device_count": 0},
+                {"mode": "enforce", "newly_denied_device_count": 0},
                 {"mode": "preflight", "newly_denied_device_count": 0,
                  "newly_denied_device_ids": []},
                 *[{"mode": "preflight", "newly_denied_device_count": value}
@@ -479,14 +481,29 @@ def test_tracker_state_schemas_validate_mutations_presence_pairs_and_published_e
                         "effective_ceiling": 4, "runtime_request_zero": "disabled",
                         "constraint_source": "pinned-aria2-client"}})
         leecher = dict(legacy, tracker_state="leecher", tracker_qos={
-            "announce_min_interval_s": {"value": 45, "source": "role-state:boat:leecher",
-                                       "peerless_leecher_floor_s": 120,
-                                       "constraint_source": "pinned-aria2-client"},
+            "announce_min_interval_s": {"value": 45, "source": "role-state:boat:leecher"},
             "numwant": {"value": 150, "source": "global-state:leecher",
                         "effective_ceiling": 50, "runtime_request_zero": "disabled",
                         "constraint_source": "pinned-aria2-client"}})
         effective.validate(seeder)
         effective.validate(leecher)
+        # The native client honors tracker intervals even without peers. Do
+        # not publish a made-up 120-second floor in either API projection.
+        for state in ("seeder", "leecher"):
+            for interval in (10, 30, 120, 300):
+                current = copy.deepcopy(leecher if state == "leecher" else seeder)
+                row = current["tracker_qos"]["announce_min_interval_s"]
+                row["value"] = interval
+                effective.validate(current)
+                row["peerless_leecher_floor_s"] = 120
+                assert list(effective.iter_errors(current))
+        # Scalar QoS explanations intentionally permit extension fields. Check
+        # that neither their published properties nor examples claim the floor;
+        # the tier tests independently assert the exact emitted response.
+        scalar_interval = effective.schema["properties"]["qos"]["properties"][
+            "announce_min_interval_s"]
+        assert set(scalar_interval["properties"]) == {"value", "source"}
+        assert set(legacy["qos"]["announce_min_interval_s"]) == {"value", "source"}
         for body in (dict(legacy, tracker_state="seeder"),
                      dict(legacy, tracker_qos=seeder["tracker_qos"]),
                      dict(seeder, tracker_state="unknown"),
@@ -540,13 +557,7 @@ def test_tracker_state_schemas_validate_mutations_presence_pairs_and_published_e
         assert numwant["constraint_source"] == "pinned-aria2-client"
         assert set(numwant) == {"value", "source", "effective_ceiling",
                                 "runtime_request_zero", "constraint_source"}
-        if state == "leecher":
-            assert interval["peerless_leecher_floor_s"] == 120
-            assert interval["constraint_source"] == "pinned-aria2-client"
-            assert set(interval) == {"value", "source", "peerless_leecher_floor_s",
-                                     "constraint_source"}
-        else:
-            assert set(interval) == {"value", "source"}
+        assert set(interval) == {"value", "source"}
 
 
 def test_onboard_and_undeploy_log_opt_in_is_an_optional_boolean():

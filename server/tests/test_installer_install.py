@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import shlex
 import sys
 from types import SimpleNamespace
 
@@ -337,8 +338,12 @@ def test_resume_cannot_bypass_interrupted_credential_maintenance(installation, m
     monkeypatch.setattr(installation, 'verify_inputs', lambda: called.append('must-not-run'))
     (installation.base / 'credential-operation.json').write_text(json.dumps({
         'phase': phase, 'instance_id': installation.journal.document['id']}))
-    with pytest.raises(InstallError, match='host maintenance UI'):
+    with pytest.raises(InstallError, match='irisctl maintenance') as error:
         installation.resume()
+    message = str(error.value)
+    assert '--state-dir ' + shlex.quote(str(installation.base)) + ' status' in message
+    assert 'recover --job-id <operation-id> --allow-downtime' in message
+    assert 'maintenance UI' not in message
     assert called == []
 
 
@@ -353,7 +358,7 @@ def test_resume_rejects_untrusted_credential_authority(installation, monkeypatch
         target.symlink_to(installation.base / 'missing-authority')
     else:
         target.write_text(json.dumps({'phase': 'rotated', 'instance_id': 'another-deployment'}))
-    with pytest.raises(InstallError, match='maintenance UI'):
+    with pytest.raises(InstallError, match='irisctl maintenance'):
         installation.resume()
     assert called == []
 
@@ -373,7 +378,7 @@ def test_resume_terminal_maintenance_requires_no_mutation_refusal(installation, 
             installation.resume()
         assert called == ['allowed']
     else:
-        with pytest.raises(InstallError, match='maintenance UI'):
+        with pytest.raises(InstallError, match='irisctl maintenance'):
             installation.resume()
         assert called == []
 
@@ -487,7 +492,23 @@ def test_package_allowlist_excludes_agent_notes_and_credentials():
     for path in ("agentinfo/HANDOFF.md", "AGENTS.md", "creds/password", "fleet/real.csv"):
         assert not module.selected(path)
     assert module.selected("fleet/devices.csv.example")
+    assert module.selected("lab/guest-publish.py")
     assert module.selected("tools/iris_installer/deploy.py")
+
+
+def test_release_source_contains_every_committed_installer_input():
+    spec = importlib.util.spec_from_file_location("installer_package", REPO / "tools/build-installer-package.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    recipe = (REPO / 'tools/make-release.sh').read_text()
+    allowlist = shlex.split(recipe.split('SHIP=(', 1)[1].split('\n)', 1)[0], comments=True)
+    tracked = subprocess.check_output(['git', '-C', str(REPO), 'ls-files', '-z']).decode().split('\0')
+    shipped = set(subprocess.check_output(
+        ['git', '-C', str(REPO), 'ls-files', '-z', '--', *allowlist]).decode().split('\0'))
+    required = {name for name in tracked if name and module.selected(name)}
+    # The release recipe recreates this empty marker explicitly.
+    assert subprocess.check_output(['git', '-C', str(REPO), 'cat-file', '-s', 'HEAD:bin/.gitkeep']).strip() == b'0'
+    assert required - shipped <= {'bin/.gitkeep'}
 
 
 def test_finish_exports_public_browser_certificate_and_leaves_owner_unclaimed(installation):
@@ -545,6 +566,9 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
                     ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(REPO / "tools/irisctl", repo / "tools/irisctl")
     shutil.copy2(REPO / "tools/iris-key-setup", repo / "tools/iris-key-setup")
+    (repo / "lab").mkdir()
+    for name in ("guest-publish.py", "iris-ssh-policy.sh"):
+        shutil.copy2(REPO / "lab" / name, repo / "lab" / name)
     (repo / "docs/dev").mkdir(parents=True)
     (repo / "docs/dev/installer.md").write_text("Candidate installer\n")
     for name, content in (("VERSION", "2026.09.23"), ("LICENSE", "Apache-2.0"), ("NOTICE", "Notices")):
@@ -562,12 +586,20 @@ def test_actual_deb_contains_runnable_installer_not_untracked_secrets(tmp_path):
     extracted = tmp_path / "extracted"
     subprocess.run(["dpkg-deb", "--extract", str(artifact), str(extracted)], check=True)
     assert not (extracted / "usr/lib/iris-installer/source/server/.env").exists()
+    for name in ("guest-publish.py", "iris-ssh-policy.sh"):
+        assert (extracted / "usr/lib/iris-installer/source/lab" / name).read_bytes() == (REPO / "lab" / name).read_bytes()
     assert (extracted / "usr/lib/iris-installer/iris_installer/cli.py").stat().st_mode & 0o777 == 0o644
     assert (extracted / "usr/lib/iris-installer").stat().st_mode & 0o777 == 0o755
     result = subprocess.run([str(extracted / "usr/bin/irisctl"), "install", "--help"],
                             capture_output=True, text=True)
     assert result.returncode == 0
     assert "--recovery-recipient" in result.stdout
+    result = subprocess.run([str(extracted / "usr/bin/irisctl"), "setup", "--help"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "--key-directory" in result.stdout
+    assert "docker-split" in result.stdout and "kubernetes" in result.stdout
+    assert (extracted / "usr/lib/iris-installer/iris_installer/local_setup.py").is_file()
     helper = extracted / "usr/bin/iris-key-setup"
     assert helper.stat().st_mode & 0o777 == 0o755
     environment = {key: value for key, value in os.environ.items()

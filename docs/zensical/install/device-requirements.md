@@ -44,6 +44,11 @@ for the other clock symptoms.
 - Budget for every image you want resident at once.
 - Remove a file whose size and hash do not match the catalog. Guest Shell adopts a matching one.
 
+The Catalyst 9000 series IOx path requires an app-hosting SSD exposing
+`usbflash1:iox_host_data_share`. Onboarding mounts that folder into the app at
+`/mnt/share` for image placement. The share must be writable; a missing mount
+stops staging. Use Guest Shell if this SSD/share requirement is not met.
+
 ## 3. Make the device reachable
 
 1. Give the device a management address the server can reach, then assign it a credential profile in the Console.

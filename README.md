@@ -23,7 +23,7 @@ https://cisco-open.github.io/intelligent-release-image-staging/docs/.
   order for each guide.
 - [Installation Guide](docs/zensical/install/index.md) — deploy IRIS and stage
   your first image, using the Ubuntu managed package or manual provisioning.
-- [Administration Guide](docs/zensical/admin-guide/index.md) — upgrades,
+- [Administration Guide](docs/zensical/admin-guide/index.md) — new releases,
   backups, credentials, signing keys, and recovery.
 - [User Guide](docs/zensical/user-guide/index.md) — everyday tasks,
   monitoring, and troubleshooting.

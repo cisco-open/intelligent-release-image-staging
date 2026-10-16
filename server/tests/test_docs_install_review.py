@@ -75,6 +75,13 @@ def test_first_sign_in_establishes_trust_before_password_entry():
     assert "certificates-and-tokens.md#default-browser-identity" in page
 
 
+def test_browser_certificate_guidance_allows_multiple_addresses():
+    page = " ".join((INSTALL / "certificates-and-tokens.md").read_text().split())
+    assert "cover every DNS name or IP address operators use" in page
+    assert "unless it already covers the new address" in page
+    assert "tied to one address" not in page
+
+
 def test_split_install_prepares_environment_before_build():
     page = (INSTALL / "separate-docker-hosts.md").read_text()
     for service in ("server", "console"):

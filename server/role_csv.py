@@ -20,9 +20,14 @@ ROLE_QOS_FIELDS = (
     "overall_down_bps", "max_concurrent", "request_peer_speed_limit_bps",
     "announce_min_interval_s", "numwant", "handout_budget",
     "catalog_tick_s", "telemetry_every_ticks", "telemetry_pause")
+ROLE_STATE_FIELDS = {
+    "%s_%s" % (state, key): (state, key)
+    for state in ("seeder", "leecher")
+    for key in ("announce_min_interval_s", "numwant")
+}
 ROLE_CSV_FIELDS = (
     "role", "restricted", "peers", "origin", "nets", "on_stale",
-    *ROLE_QOS_FIELDS)
+    *ROLE_QOS_FIELDS, *ROLE_STATE_FIELDS)
 
 
 class RolesCsvError(ValueError):
@@ -116,6 +121,13 @@ def parse_roles_csv(text):
                 qos[field] = parse_qos_value(field, value)
         if qos:
             definition["qos"] = qos
+        qos_state = {}
+        for field, (state, key) in ROLE_STATE_FIELDS.items():
+            value = row.get(field)
+            if value is not None and str(value).strip():
+                qos_state.setdefault(state, {})[key] = parse_qos_value(field, value)
+        if qos_state:
+            definition["qos_state"] = qos_state
         definitions[name] = definition
     # Validate all cross-role references before a store exists or changes.
     candidate = peer_policy.base_document()
@@ -147,5 +159,7 @@ def export_roles_csv(document):
         for key, value in definition.get("qos", {}).items():
             if key in ROLE_QOS_FIELDS:
                 row[key] = str(value).lower() if isinstance(value, bool) else value
+        for field, (state, key) in ROLE_STATE_FIELDS.items():
+            row[field] = definition.get("qos_state", {}).get(state, {}).get(key, "")
         writer.writerow(row)
     return output.getvalue()

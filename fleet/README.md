@@ -44,10 +44,10 @@ schedule is stage-only: its `kind` is `assign` or `onboard`, and neither
 installs, activates, or reloads. Weekday numbering is Monday=0. See
 [Scheduling](../docs/zensical/user-guide/scheduling.md#scheduling).
 
-`iris-role export` writes the same scalar-only schema as `roles.csv.example` and
-omits `qos_state`; restore it with `iris-role import FILE`. `iris-role define`
-removes state from the role it replaces, and `iris-role import FILE` removes
-state from every definition it replaces. The CLI validates the whole file,
+`iris-role export` writes the schema in `roles.csv.example`, including the four
+seeder/leecher columns for `qos_state`. `iris-role import FILE` restores these
+overrides; blank or missing columns remove them from each replaced definition.
+`iris-role define` clears state from the role it replaces. The CLI validates the whole file,
 duplicate rows, peer references, network prefixes, and QoS units before
 writing. Use `--dry-run` on define, delete, set, bulk, and import changes.
 Rates are bytes per second and intervals are seconds; role rows cannot carry the

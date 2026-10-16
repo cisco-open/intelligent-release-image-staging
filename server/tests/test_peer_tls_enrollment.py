@@ -5,14 +5,17 @@
 import http.client
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import threading
 import time
+import uuid
 
 import pytest
 import catalog
 import peer_tls_issuer
+import peer_tls_revocations
 import secrets_store
 
 spec = importlib.util.spec_from_file_location('device_peer_tls',
@@ -23,6 +26,7 @@ spec.loader.exec_module(peer)
 
 @pytest.fixture
 def enrollment(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / 'device/agent'))
     key = tmp_path / 'age.key'
     subprocess.run(['age-keygen', '-o', str(key)], check=True, capture_output=True)
     recipient = subprocess.check_output(['age-keygen', '-y', str(key)]).decode().strip()
@@ -41,6 +45,11 @@ def enrollment(tmp_path, monkeypatch):
             if self.unavailable:
                 raise RuntimeError('offline')
             return issuer.issue(device, csr)
+
+        def get_peer_revocations(self, device, nonce):
+            if self.unavailable:
+                raise RuntimeError('offline')
+            return issuer.revocation_snapshot(nonce)
 
     cfg = {'peer_tls_mode': 'required', 'device_id': 'switch-a',
            'stage_dir': str(tmp_path / 'device')}
@@ -61,6 +70,71 @@ def test_enroll_reuse_and_encrypted_ca_recovery(enrollment):
     assert issuer.prepare().read_bytes() == original
     root = Path(cfg['stage_dir']) / 'peer-tls'
     assert (root / 'node.key').stat().st_mode & 0o077 == 0
+
+
+@pytest.fixture
+def flash_enrollment(enrollment, tmp_path, monkeypatch):
+    import peer_revocations as rev
+    cfg, client, issuer = enrollment
+    alias, storage = tmp_path / 'flash', tmp_path / 'bootflash'
+    storage.mkdir()
+    alias.symlink_to(storage)
+    monkeypatch.setattr(rev, '_FLASH_ALIAS', alias)
+    monkeypatch.setattr(rev, '_FLASH_STORAGE', storage)
+    original = Path.lstat
+    def system_metadata(path):
+        value = original(path)
+        if path in (alias, tmp_path):
+            fields = list(value)
+            fields[4] = 0
+            return os.stat_result(fields)
+        return value
+    monkeypatch.setattr(Path, 'lstat', system_metadata)
+    cfg['stage_dir'] = str(alias / 'guest-share' / 'iris')
+    return cfg, client, storage / 'guest-share' / 'iris' / 'peer-tls'
+
+
+def test_flash_alias_enrolls_real_identity_and_launches_canonical_watcher(flash_enrollment, monkeypatch, capsys):
+    import agent_config
+    import catalog_client
+    import peer_revocations as rev
+    cfg, client, root = flash_enrollment
+    fragment = peer.ensure(cfg, client)
+    entries = dict(line.split('=', 1) for line in fragment.splitlines())
+    for key in ('bt-peer-tls-cert', 'bt-peer-tls-key', 'bt-peer-tls-ca', 'bt-peer-tls-revocations'):
+        assert Path(entries[key]).resolve() == Path(entries[key])
+        assert str(root) in entries[key]
+    assert (root / 'revocations.txt').is_file()
+    assert peer.ensure(cfg, client) == fragment and client.calls == 1
+    cfg.update(catalog_url='https://catalog.invalid', catalog_token='unit-token', catalog_ca='public-ca')
+    monkeypatch.setattr(agent_config, 'load', lambda _: dict(cfg))
+    monkeypatch.setattr(catalog_client, 'CatalogClient', lambda *_, **__: client)
+    monkeypatch.setattr(peer.ssl, 'create_default_context', lambda **_: object())
+    launched = []
+    monkeypatch.setattr(rev.subprocess, 'Popen', lambda *args, **kwargs: launched.append((args, kwargs)))
+    # Reuse the real enrolled identity here; only detached process creation is
+    # observed. Enrollment/chain validation above used real OpenSSL and issuer.
+    monkeypatch.setattr(peer, 'ensure', lambda *args: fragment)
+    monkeypatch.setattr('sys.argv', ['peer_tls.py', '--conf', str(root.parent / 'iris-agent.conf'), '--start-revocation-watch'])
+    assert peer.main() == 0
+    assert capsys.readouterr().out == fragment
+    argv = launched[0][0][0]
+    assert argv[argv.index('--root') + 1] == str(root)
+    assert launched[0][1]['start_new_session'] is True
+
+
+@pytest.mark.parametrize('linked', ['peer-directory', 'generation', 'ca'])
+def test_flash_alias_does_not_hide_linked_private_state(flash_enrollment, linked):
+    cfg, client, root = flash_enrollment
+    peer.ensure(cfg, client)
+    generation = json.loads((root / 'current.json').read_text())['generation']
+    selected = root if linked == 'peer-directory' else root / generation if linked == 'generation' else root / generation / 'ca.crt'
+    original = selected.with_name(selected.name + '-original')
+    selected.rename(original)
+    selected.symlink_to(original)
+    with pytest.raises(peer.PeerTLSError):
+        peer.ensure(cfg, client)
+    assert client.calls == 1
 
 
 def test_renewal_outage_only_allows_valid_matching_identity(enrollment, monkeypatch):
@@ -184,6 +258,47 @@ def test_renewal_rotates_certificate_but_keeps_local_key(enrollment, monkeypatch
     monkeypatch.setattr(peer, '_identity_valid', original)
     assert peer.ensure(cfg, client) == after
     assert client.calls == 2
+
+
+def test_revoked_identity_stays_blocked_and_fresh_onboarding_uses_new_key(enrollment):
+    cfg, client, issuer = enrollment
+    peer.ensure(cfg, client)
+    root = Path(cfg['stage_dir']) / 'peer-tls'
+    ledger = peer_tls_revocations.Ledger(issuer.config.parent)
+    old_identities = []
+    for _ in range(2):
+        before = json.loads((root / 'current.json').read_text())
+        old_key = (root / before['key']).read_bytes()
+        with ledger.locked() as state:
+            current_revision = state['revision']
+        revoked = ledger.revoke(cfg['device_id'], expected_revision=current_revision,
+            expected_identity_sha256=before['identity_sha256'],
+            request_id=str(uuid.uuid4()), actor='unit-test')
+        old_identities.append(before['identity_sha256'])
+        with pytest.raises(peer.PeerTLSError):
+            peer.ensure(cfg, client)
+        assert (root / before['key']).read_bytes() == old_key
+        assert json.loads((root / 'current.json').read_text()) == before
+        pending = ledger.prepare_reenrollment(cfg['device_id'],
+            expected_revision=revoked['revision'],
+            expected_identity_sha256=before['identity_sha256'],
+            request_id=str(uuid.uuid4()), actor='unit-test')
+        assert pending['state'] == 'reenrollment-required'
+        with pytest.raises(peer.PeerTLSError):
+            peer.ensure(cfg, client)
+        # Only production's credential minter activates this after persisting
+        # a new bearer. This issuer fixture has no credential store/network.
+        with ledger.locked() as state:
+            ledger._activate_enrollment(state, cfg['device_id'])
+        fragment = peer.ensure(cfg, client)
+        after = json.loads((root / 'current.json').read_text())
+        assert after['identity_sha256'] not in old_identities
+        assert (root / after['key']).read_bytes() != old_key
+        assert not (root / before['key']).exists()
+        assert 'bt-peer-tls-key=' + str(root / after['key']) in fragment
+        assert peer.ensure(cfg, client) == fragment
+        with ledger.locked() as state:
+            assert all(identity in state['revoked'] for identity in old_identities)
 
 
 def test_unexpected_ca_change_is_not_adopted(enrollment, monkeypatch, tmp_path):

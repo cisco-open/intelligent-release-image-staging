@@ -638,7 +638,9 @@ def test_bulk_fence_preserves_exact_pending_before_after_authority(tmp_path, app
     assert (tmp_path / "kube-update.json").read_bytes() == authority_bytes
 
 
-def test_failed_new_writer_can_be_stopped_for_same_transaction_recovery(tmp_path):
+def test_failed_new_writer_can_be_stopped_for_same_transaction_recovery(tmp_path, monkeypatch):
+    from iris_installer import kube_restore_images
+    monkeypatch.setattr(kube_restore_images, "protect_runtime", lambda installation: None)
     obj = install(tmp_path)
     obj.pin_runtime = lambda: None
     obj.get = lambda *args: {"spec": {"replicas": 1}}
@@ -652,7 +654,9 @@ def test_failed_new_writer_can_be_stopped_for_same_transaction_recovery(tmp_path
     assert scaled == [("console", 0), ("iris", 0)]
 
 
-def test_initial_backup_refuses_unready_writer_without_clean_authority(tmp_path):
+def test_initial_backup_refuses_unready_writer_without_clean_authority(tmp_path, monkeypatch):
+    from iris_installer import kube_restore_images
+    monkeypatch.setattr(kube_restore_images, "protect_runtime", lambda installation: None)
     obj = install(tmp_path)
     obj.pin_runtime = lambda: None
     obj.get = lambda *args: {"spec": {"replicas": 1}}

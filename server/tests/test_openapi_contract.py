@@ -62,6 +62,31 @@ def test_openapi_is_generated_from_exact_runtime_route_registry():
     assert doc == openapi_contract.build_document()
 
 
+def test_audit_position_cursor_schema_preserves_time_filters():
+    doc = openapi_contract.build_document()
+    operation = doc["paths"]["/api/v1/audit"]["get"]
+    params = {item["name"]: item for item in operation["parameters"]}
+    assert {"cursor", "before_ts", "after_ts", "category", "limit"} <= params.keys()
+    assert params["cursor"]["schema"]["maxLength"] == 256
+    media = operation["responses"]["200"]["content"]["application/json"]
+    schema = media["schema"]
+    if "$ref" in schema:
+        schema = doc["components"]["schemas"][schema["$ref"].rsplit("/", 1)[1]]
+    assert schema["properties"]["next_cursor"]["type"] == ["string", "null"]
+    assert "next_cursor" in schema["required"]
+
+
+def test_backup_summary_includes_restore_and_restore_recovery():
+    document = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        operation = document["paths"][prefix + "/settings/backups"]["post"]
+        assert "restore" in operation["summary"].lower()
+        assert "recovery" in operation["summary"].lower()
+        variants = operation["requestBody"]["content"]["application/json"]["schema"]["oneOf"]
+        assert any(variant["properties"]["action"].get("enum") ==
+                   ["restore", "recover-restore"] for variant in variants)
+
+
 def test_audit_export_password_documents_conditional_recovery_requirement():
     document = openapi_contract.build_document()
     for prefix in ("/api/v1", "/internal/v1"):
@@ -73,6 +98,17 @@ def test_audit_export_password_documents_conditional_recovery_requirement():
         assert "interrupted save/clear" in password["description"]
         assert "only when the existing configuration is valid" in password["description"]
         assert "password" not in schema["required"]  # retained-secret edits remain valid
+
+
+def test_subprocess_credential_fields_document_nul_exclusion():
+    document = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        for path, fields in (("/credentials", ("device_user", "device_pass", "enable_secret")),
+                             ("/settings/audit-export", ("password",))):
+            schema = document["paths"][prefix + path]["post"][
+                "requestBody"]["content"]["application/json"]["schema"]
+            for field in fields:
+                assert "U+0000 (NUL)" in schema["properties"][field]["description"]
 
 
 def test_devices_target_expression_and_projection_are_public_contracts():
@@ -824,10 +860,10 @@ def test_console_read_query_contract_matches_runtime_filters_and_limits():
         assert devices["limit"]["schema"]["maximum"] == 1000
         assert "__none" in devices["platform"]["schema"]["enum"]
         expected = {
-            "/audit": {"limit", "before_ts", "after_ts", "category"},
+            "/audit": {"limit", "before_ts", "after_ts", "category", "cursor"},
             "/audit/histogram": {
                 "category", "buckets", "window", "since_ts", "until_ts"},
-            "/install-options": {"model"},
+            "/install-options": {"model", "management_type"},
             "/swarm": {"limit", "offset"},
             "/deploy-logs": {"device_id", "after_ts", "before_ts"},
             "/deploy-logs/histogram": {
@@ -919,6 +955,10 @@ def test_settings_and_optional_success_shapes_match_runtime():
         setup = doc["paths"][
             prefix + "/settings/setup-status"]["get"]["responses"]["200"][
                 "content"]["application/json"]
+        assert setup["example"]["telemetry"]["source"] == "env"
+        assert setup["example"]["telemetry"]["enabled"] is True
+        assert {row["name"] for row in setup["example"]["packages"]["items"]} == {
+            "iris-amd64.tar", "iris-arm64.tar", "iris-xr.rpm", "iris-agent.tgz"}
         fingerprint = setup["schema"]["properties"]["packages"][
             "properties"]["reference_fingerprint"]
         assert fingerprint["type"] == ["string", "null"]
@@ -1355,6 +1395,23 @@ def test_schedule_contract_has_all_tier_routes_and_conditional_headers():
             assert "schedule_state_unavailable" in operation["responses"]["503"]["x-iris-problem-codes"]
             if suffix != "/schedules":
                 assert "schedule_not_found" in operation["responses"]["404"]["x-iris-problem-codes"]
+
+
+def test_projection_wait_refusal_is_documented_only_on_affected_gets():
+    spec = json.loads(SPEC.read_text())
+    expected = {prefix + suffix for prefix in ("/api/v1", "/internal/v1")
+                for suffix in ("/devices", "/overview", "/peer-policy")}
+    actual = set()
+    for path, operations in spec["paths"].items():
+        for method, operation in operations.items():
+            if not isinstance(operation, dict):
+                continue
+            response = operation.get("responses", {}).get("503", {})
+            if "projection-busy" in response.get("x-iris-problem-codes", []):
+                assert method == "get"
+                assert "Retry-After" in response["headers"]
+                actual.add(path)
+    assert actual == expected
 
 
 def test_schedule_container_installs_timezone_data_and_executable_cli():

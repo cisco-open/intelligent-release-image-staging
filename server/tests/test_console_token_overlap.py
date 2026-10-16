@@ -17,6 +17,7 @@ import pytest
 
 import api_problem
 import gui_server
+from native_listener_fixture import https_fixture_url
 
 
 CURRENT = "new-management-token-" + "n" * 48
@@ -99,7 +100,7 @@ def overlap(tmp_path, monkeypatch):
     backend.socket = context.wrap_socket(backend.socket, server_side=True)
     threading.Thread(target=backend.serve_forever, daemon=True).start()
     monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
-    url = "https://localhost:%d" % backend.server_address[1]
+    url = https_fixture_url(backend)
     console = gui_server.make_server(
         "127.0.0.1", 0, url, str(current), str(cert),
         previous_token_file=str(previous))
@@ -305,11 +306,12 @@ def test_transport_failures_do_not_try_another_credential(overlap, tmp_path, mon
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        with pytest.raises(gui_server.ConsoleConfigurationError):
-            gui_server.fetch_console_certificate(
-                "https://localhost:%d" % port, str(overlap.current),
-                str(overlap.cert), str(tmp_path / "unused.pem"),
-                previous_token_file=str(overlap.previous))
+            # Keep the exact refused destination reserved, without listening.
+            with pytest.raises(gui_server.ConsoleConfigurationError):
+                gui_server.fetch_console_certificate(
+                    "https://127.0.0.1:%d" % port, str(overlap.current),
+                    str(overlap.cert), str(tmp_path / "unused.pem"),
+                    previous_token_file=str(overlap.previous))
     assert len(connects) == 1
     assert overlap.calls == []
 

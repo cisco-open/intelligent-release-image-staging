@@ -48,6 +48,7 @@ BUNDLE="iris-agent.tgz"
 IOS_ROOT="bootflash:guest-share"
 IOS_STAGE="bootflash:guest-share/iris"
 STAGE="/bootflash/guest-share/iris"
+GUEST_INPUT_ROOT="/bootflash/guest-share"
 CATALOG_CA="$STAGE/iris-catalog.pem"
 IRIS_CRT_FILE="${IRIS_CRT_FILE:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -65,6 +66,8 @@ CONF="iris-agent-$DEVICE_ID-$CAP.conf"
 RPC_SECRET_FILE="rpc-secret-$CAP"
 INSTRUCTION_ENVELOPE="iris-instructions-$DEVICE_ID-$CAP.envelope"
 BUNDLE_DIGEST_FILE="bundle-sha256-$CAP"
+# shellcheck source=device/guestshell-publish.sh
+. "$HERE/guestshell-publish.sh"
 
 MODEL="${MODEL:-}"
 EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
@@ -205,18 +208,7 @@ if [ "$DRY" -eq 1 ]; then
   echo "===== Certificate trust ====="; trustpoint_block
   echo "===== Agent configuration ====="; agent_conf
   echo "===== Copy agent files over HTTPS ====="
-  echo "delete /force $IOS_ROOT/bundle.tgz"
-  echo "delete /force $IOS_ROOT/bundle.tgz.sha256"
-  for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
-              "staging/$RPC_SECRET_FILE:rpc-secret" \
-              "iris-catalog.pem:iris-catalog.pem" \
-              "iris-signers.pem:iris-signers.allowed_signers" \
-              "staging/$INSTRUCTION_ENVELOPE:iris-instructions.bootstrap" \
-              "staging/$BUNDLE_DIGEST_FILE:bundle.tgz.sha256" \
-              "$BUNDLE:bundle.tgz"; do
-    src="${pair%%:*}"; dst="${pair##*:}"
-    printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst"
-  done
+  render_guest_inputs
   echo "===== Start Guest Shell ====="
   echo "guestshell enable"
   echo "===== Save startup-config ====="
@@ -505,29 +497,7 @@ artifact_preflight() {
 if ! artifact_preflight; then
   exit 1
 fi
-# Preserve the live work directory, its instruction state, and its last-known
-# runnable agent. Only stale root-level incoming archive evidence is removed.
-printf 'delete /force %s/bundle.tgz\ndelete /force %s/bundle.tgz.sha256\n' \
-  "$IOS_ROOT" "$IOS_ROOT" \
-  | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
-for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
-            "staging/$RPC_SECRET_FILE:rpc-secret" \
-            "iris-catalog.pem:iris-catalog.pem" \
-            "iris-signers.pem:iris-signers.allowed_signers" \
-            "staging/$INSTRUCTION_ENVELOPE:iris-instructions.bootstrap" \
-            "staging/$BUNDLE_DIGEST_FILE:bundle.tgz.sha256" \
-            "$BUNDLE:bundle.tgz"; do
-  src="${pair%%:*}"; dst="${pair##*:}"; ok=0
-  for attempt in 1 2 3; do
-    out="$(printf 'copy https://%s:8000/%s %s/%s\n' \
-      "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst" \
-      | "$HERE/../lab/device-run.sh" "$DEVICE_IP" || true)"
-    case "$out" in *"bytes copied"*) ok=1; break ;; esac
-    echo "  copy of $src failed (attempt $attempt/3), retrying..."; sleep 10
-  done
-  [ "$ok" -eq 1 ] \
-    || { echo "ERROR: copy of $src failed after 3 attempts" >&2; exit 1; }
-done
+publish_guest_inputs || exit 1
 
 echo "[6/6] verify configuration and save startup-config"
 RUN="$HERE/../lab/device-run.sh"

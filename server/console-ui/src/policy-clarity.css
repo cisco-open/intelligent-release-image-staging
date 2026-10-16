@@ -1,0 +1,37 @@
+/* Copyright 2026 Cisco Systems, Inc. and its affiliates
+ * SPDX-License-Identifier: Apache-2.0 */
+
+/* Saved intent and confirmed effect share one quiet surface; proposals retain
+   the existing blue review border. All colors and type inherit the IRIS theme. */
+.iris-react-shell .policy-workspace .page-description { max-width: 76ch; }
+.iris-react-shell .policy-workspace .policy-sharing-table td[colspan] { text-align: left; }
+.iris-react-shell .policy-workspace .origin-current { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 32px; padding: 20px; border: 1px solid var(--iris-rule); border-radius: var(--radius-card); background: var(--surface); }
+.iris-react-shell .policy-workspace .origin-current dt { color: var(--iris-muted); font-size: 12px; margin-bottom: 6px; }
+.iris-react-shell .policy-workspace .origin-current dd { margin: 0; font-size: 16px; line-height: 24px; font-weight: 500; overflow-wrap: anywhere; }
+.iris-react-shell .policy-workspace .origin-next { max-width: 84ch; margin: 16px 0 24px; }
+.iris-react-shell .policy-workspace .origin-next strong { margin-right: 6px; }
+.iris-react-shell .policy-workspace .origin-change-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 16px; margin: 24px 0 16px; }
+.iris-react-shell .policy-workspace .origin-change-heading h4 { margin: 0; }
+.iris-react-shell .policy-workspace .origin-enforcement-preview h4 { margin: 0 0 8px; }
+.iris-react-shell #view-policies .policy-workspace .origin-enforcement-preview .policy-counts { grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); padding: 16px 0; border: 0; border-radius: 0; background: transparent; }
+.iris-react-shell .policy-workspace .policy-scope { border-top: 1px solid var(--iris-rule); margin-top: 24px; padding-top: 16px; }
+.iris-react-shell .policy-workspace .policy-scope summary { cursor: pointer; font-weight: 500; }
+.iris-react-shell .policy-workspace .policy-scope-facts { display: grid; gap: 16px; margin: 20px 0; }
+.iris-react-shell .policy-workspace .policy-scope-facts dt { font-weight: 500; margin-bottom: 4px; }
+.iris-react-shell .policy-workspace .policy-scope-facts dd { margin: 0; max-width: 84ch; }
+.iris-react-shell .policy-workspace .role-sharing-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-top: 20px; }
+.iris-react-shell .policy-workspace .role-sharing-fields fieldset { min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--iris-rule); border-radius: var(--radius-card); }
+.iris-react-shell .policy-workspace .role-sharing-fields legend { padding: 0 6px; font-weight: 600; }
+.iris-react-shell .policy-workspace .role-sharing-fields .field { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
+.iris-react-shell .policy-workspace .role-sharing-fields input[type="text"],
+.iris-react-shell .policy-workspace .role-sharing-fields .field input { width: 100%; min-width: 0; box-sizing: border-box; }
+.iris-react-shell .policy-workspace .role-sharing-fields .muted { margin-bottom: 0; }
+.iris-react-shell .policy-workspace .policy-expiry { margin: 16px 0 24px; padding: 16px; border: 1px solid var(--iris-rule); border-radius: var(--radius-control); background: var(--surface); }
+.iris-react-shell .policy-workspace .policy-expiry h4 { margin-top: 0; }
+.iris-react-shell .policy-workspace .policy-expiry .field { display: flex; flex-direction: column; gap: 6px; max-width: 420px; }
+.iris-react-shell .policy-workspace .policy-expiry select { width: 100%; min-width: 0; }
+@media (max-width: 640px) {
+  .iris-react-shell .policy-workspace .origin-current,
+  .iris-react-shell .policy-workspace .role-sharing-fields { grid-template-columns: minmax(0, 1fr); }
+  .iris-react-shell .policy-workspace .origin-current { padding: 16px; gap: 16px; }
+}

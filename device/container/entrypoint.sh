@@ -171,6 +171,8 @@ if [ "${IRIS_CONTAINER_TESTING:-0}" != 1 ]; then
   [ -z "${IRIS_AGENT_CONF:-}" ] || fatal "IRIS_AGENT_CONF is test-only in a device container"
   [ -z "${IRIS_AGENT_STATE:-}" ] || fatal "IRIS_AGENT_STATE is test-only in a device container"
   [ -z "${IRIS_CATALOG_CA:-}" ] || fatal "IRIS_CATALOG_CA is test-only; the trust anchor derives from IRIS_DEVICE_PLATFORM"
+  # Keep the runtime working directory without a Dockerfile WORKDIR layer.
+  cd /opt/iris || fatal "cannot enter the device runtime directory"
 fi
 
 case "$DEVICE_PLATFORM" in
@@ -821,7 +823,7 @@ start_aria2c() {
   # above, so reusing $@ here is safe.
   set --
   if [ "${peer_mode:-disabled}" = required ]; then
-    set -- --bt-peer-tls=required
+    set -- --bt-peer-tls=required --bt-peer-tls-revocations="$STAGE_DIR/peer-tls/revocations.txt"
   fi
   case "${HOOK:-}" in ?*) set -- "$@" "--on-bt-download-complete=$HOOK" ;; esac
   # --log is added only when an operator explicitly opts in (IRIS_LOG=on);
@@ -1039,7 +1041,7 @@ while true; do
   peer_fragment=""
   case "${peer_mode:-disabled}" in
     disabled) ;;
-    required) peer_fragment="$(python3 "$(dirname "$AGENT")/peer_tls.py" --conf "$CONF")" || peer_ok=0 ;;
+    required) peer_fragment="$(python3 "$(dirname "$AGENT")/peer_tls.py" --conf "$CONF" --start-revocation-watch)" || peer_ok=0 ;;
     *) peer_ok=0 ;;
   esac
   if [ "$peer_ok" -ne 1 ]; then

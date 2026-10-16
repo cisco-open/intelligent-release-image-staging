@@ -12,6 +12,7 @@ import hashlib
 import os
 from pathlib import Path
 import ssl
+import stat
 import subprocess
 import tempfile
 import time
@@ -41,13 +42,42 @@ def _row(name, label, impact):
             "renew_at": None, "refuse_at": None, "impact": impact}
 
 
+def _public_certificate_bytes(path):
+    """Snapshot a configured public observation, including a projected Secret.
+
+    Kubernetes publishes certificate files through generation symlinks. Resolve
+    that public input only; the existing regular-file reader still refuses a
+    substituted symlink or special file. A changed generation is unknown until
+    a later observation, never a stale successful read. This is not used for
+    private keys, renewal approvals or trust admission.
+    """
+    configured = Path(path)
+    try:
+        selected = configured.resolve(strict=True)
+        before = selected.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise keys.InstructionKeyError('certificate unavailable')
+        content = keys._read_regular(selected, 2 * 1024 * 1024,
+                                     unavailable='certificate unavailable',
+                                     too_large='certificate too large')
+        after = selected.lstat()
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_mode,
+                                 info.st_uid, info.st_gid, info.st_nlink,
+                                 info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if (identity(before) != identity(after)
+                or configured.resolve(strict=True) != selected):
+            raise keys.InstructionKeyError('certificate changed during observation')
+        return content
+    except RuntimeError as exc:
+        # Path.resolve raises RuntimeError for symlink loops on older Python.
+        raise keys.InstructionKeyError('certificate unavailable') from exc
+
+
 def x509_row(name, label, path, impact, now):
     row = _row(name, label, impact)
     try:
         # Combined PEM may contain a key. Pass ONLY the public leaf to openssl.
-        content = keys._read_regular(path, 2 * 1024 * 1024,
-                                     unavailable="certificate unavailable",
-                                     too_large="certificate too large")
+        content = _public_certificate_bytes(path)
         blocks = trust.split_pem_certs(content.decode("ascii"))
         if not blocks:
             return row

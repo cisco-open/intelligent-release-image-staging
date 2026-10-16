@@ -145,8 +145,8 @@ device running in install mode the sweep is limited to the agent's own
 reserved temporary name. It is reclaimed only after the file passes its size
 and digest checks, and only once IOS confirms the name is gone. The agent
 tries the reclaim once per acquisition cycle. Republishing that image, a
-successful placement, or an image returning from park re-arms it; park means
-keeping an unassigned image on the device in case it is assigned again.
+successful placement, or an image returning from
+[park](../reference/glossary.md#park) re-arms it.
 
 ## A restarted agent keeps seeding
 

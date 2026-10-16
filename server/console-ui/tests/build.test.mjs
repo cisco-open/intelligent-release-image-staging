@@ -5,11 +5,31 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import test from 'node:test';
+// Use the already-locked build parser so UI text is not mistaken for imports.
+import {parseAst} from 'rolldown/parseAst';
 
 const bundle = readFileSync(new URL('../dist/console.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
 const internalUiReference = /@(?:harbor|magnetic)(?:\/|\b)|\bhbr[-A-Z]|\bagentinfo\b|boilerplate-web-main/i;
+function moduleSpecifiers(source) {
+  const result = [];
+  function visit(node) {
+    if (!node || typeof node !== 'object') return;
+    if (['ImportDeclaration', 'ImportExpression', 'ExportNamedDeclaration', 'ExportAllDeclaration'].includes(node.type)
+      && typeof node.source?.value === 'string') result.push(node.source.value);
+    if (node.type === 'CallExpression' && node.callee?.name === 'require' && typeof node.arguments[0]?.value === 'string') result.push(node.arguments[0].value);
+    Object.values(node).forEach(value => Array.isArray(value) ? value.forEach(visit) : visit(value));
+  }
+  visit(parseAst(source, {lang: 'jsx'}));
+  return result;
+}
+
+test('dependency scanner distinguishes the image import endpoint from a module import', () => {
+  assert.deepEqual(moduleSpecifiers("post('/api/v1/images/import', {path}); error('Import failed');"), []);
+  assert.deepEqual(moduleSpecifiers('<div aria-label="Images available for import"><table className="tbl" /></div>'), []);
+  assert.deepEqual(moduleSpecifiers("import'x'; import ('y'); import z from 'z'; require('q');"), ['x', 'y', 'z', 'q']);
+});
 
 test('header keeps the product name without the repeated stage-only label', () => {
   assert.match(bundle, /Intelligent Release/);
@@ -68,8 +88,7 @@ test('shell sources use independent components and local or React imports', () =
   for (const [path, source] of readSources(new URL('../src/', import.meta.url))) {
     assert.doesNotMatch(source, internalUiReference, path);
     assert.doesNotMatch(source, /(?:https?:)?\/\/[^\s/'"]*(?:artifactory|registry)[^\s/'"]*/i, path);
-    const imports = source.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)['"]([^'"]+)['"]/g);
-    for (const [, specifier] of imports) {
+    for (const specifier of /\.(?:m?js|jsx)$/.test(path) ? moduleSpecifiers(source) : []) {
       assert.match(specifier, /^(?:\.{1,2}\/|react(?:-dom)?(?:\/|$))/, `${path}: ${specifier}`);
     }
   }

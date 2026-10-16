@@ -15,15 +15,81 @@ check.
 
 ## Before you cut a release
 
-Complete the release qualification record before creating `v<VERSION>`. The
-tag starts `.github/workflows/release.yml` on a GitHub-hosted Ubuntu runner. The
-workflow checks the tag against `VERSION`, builds the Ubuntu installer and
-source archive, verifies the pinned aria2 corresponding source and binaries,
-and creates GitHub artifact attestations for every publication asset. It verifies
-the attestations against the exact repository, workflow, tag and source commit
-before creating the public release. Publication refuses an existing release;
-changed bytes require a new version. It needs repository `contents: write`,
-`attestations: write` and GitHub OIDC `id-token: write` workflow permissions.
+Review the source and run the local checks before creating `v<VERSION>`.
+The tag starts `.github/workflows/release.yml` on a GitHub-hosted Ubuntu runner.
+It checks the tag against `VERSION`, builds the Ubuntu installer and source
+archive, verifies the pinned aria2 source and both binaries, and authenticates
+every asset with GitHub artifact attestations. The signed `release-stage.json`
+also binds the files to that workflow run and attempt.
+
+The tag workflow exports `iris-authenticated-<run-id>-<attempt>` and stops.
+It does not publish a release. Its permissions are repository `contents: read`,
+`actions: read`, `attestations: write` and GitHub OIDC `id-token: write`.
+Tag pushes authenticate source-only builds. A manual run on the exact tag can
+authenticate an explicitly selected prebuilt profile as described below.
+
+Download and verify the exact stage for qualification using the reviewed local
+`tools/release-stage.py acquire` helper. Supply the tag, full commit, run ID,
+attempt, artifact ID and independently recorded raw ZIP SHA-256; use `--help`
+for the options. The helper checks the successful run, immutable artifact,
+attestations and exact file inventory without executing downloaded code.
+
+Qualify those same files before publication. Record installer/source agreement,
+source and notice review, single and split Docker, single-node and multi-node
+Kubernetes, both device architectures, native admission and lifecycle checks.
+The `iris-release-qualification-v1` JSON record binds each passed check's evidence
+hash to the stage, every asset and the reviewer. It is a reviewer's statement,
+not a claim that the publication helper ran those tests.
+
+For prebuilt inputs, first complete the source companions and independently
+approved review, then [prepare the unsigned output](installer.md#prepare-prebuilt-authentication-inputs).
+The owner supplies a separate existing draft intake, then uses the documented
+`tools/prebuilt-intake.py plan` and explicitly confirmed `upload` commands.
+Both commands require `GH_TOKEN` in the environment for the same independently
+authenticated repository identity; keep its value out of arguments and history.
+Plan needs draft-read access; upload also needs contents-write access.
+The local helper retains pending intent and reconciles an unknown upload without
+repeating it. The manifest is uploaded last; no draft, tag or final release is
+created, overwritten, deleted or published by the helper.
+
+Run `.github/workflows/prepare-prebuilt.yml` on the exact release tag with the
+selected draft/manifest IDs and independent hashes. It repeats full validation
+and exports an unsigned immutable Actions artifact, recording its actual IDs
+and digest in the workflow summary. It has no signing or publication permission.
+Record actual hosted-token draft access as qualification, not a modeled-test result.
+Source-only tag builds remain available independently. Record these selections
+for the unsigned artifact before separately authorizing authentication.
+Independently record its run, attempt, artifact ID and raw ZIP SHA-256, plus the
+candidate-evidence, review, Debian keyring and pip source hashes. Artifact API
+metadata binds the run and digest; its unsigned stage record binds the selected
+attempt. Neither source-review authority nor validation roots come from the ZIP.
+
+Run `release.yml` manually on the exact release tag, select `prepared-host` or
+`ubuntu-dependencies`, and supply those identities and hashes. Confirm
+`authenticate <tag> <candidate-evidence SHA256>`. The hosted helper rechecks the
+complete candidate, shipped Git source, source companions and independently
+supplied validation pins before attestation. It preserves the approved payloads
+and review and records both incoming and current hosted context. This step
+authenticates the output; it does not qualify or publish it.
+
+Acquire the new authenticated run using `tools/release-stage.py acquire` and an
+explicit `--profile prepared-host` or `--profile ubuntu-dependencies`.
+Publication requires a
+`iris-release-qualification-v2` record that also binds the kit, image identities,
+source review and preparation evidence. The source-review check must name the
+exact staged review file's hash. Selecting a profile during acquisition or
+publication does not authenticate previously unsigned inputs.
+
+An authorized repository contributor can then manually run
+`.github/workflows/publish-release.yml` from `main`. Select the matching profile;
+the default is `source-only`. Supply the same stage identities, the literal
+qualification JSON and its SHA-256, and the confirmation
+`publish <tag> <release.json SHA256>`. The record's `reviewed_by` must match the
+person triggering publication. The workflow re-verifies a private snapshot and
+publishes those exact files without rebuilding. It retains the qualification and
+publication binding separately. This workflow needs `actions: read` and
+`contents: write`, not signing permission. Existing releases are refused; changed
+bytes require a new version.
 
 After publication, download all assets into a fresh directory and follow
 [download and authentication](../zensical/install/managed-package.md#download-and-authenticate).
@@ -46,7 +112,8 @@ deployment, or the device's running software.
 
 Any change under the shared agent code needs a fresh build of every package
 before it ships. Build the Guest Shell bundle, both IOx tars, and the IOS-XR
-rpm from the same source and the same pinned aria2c binary. For the full
+rpm from the same reviewed source, using the matching checksum-pinned aria2c
+client for each architecture. For the full
 build and publish steps, including the ARM64 IOx package, see
 [Build and publish the device packages](../zensical/install/device-packages.md#build-and-publish-the-arm64-iox-package).
 
@@ -58,7 +125,7 @@ provenance manifest next to them, not whether the source has changed.
 
 Before publishing aria2c binaries, build and verify the matching source
 archive with [aria2c source distribution](../../tools/aria2c-source/README.md).
-The `aria2c-2.5.6-p10-source.tar.gz` asset contains upstream source, the ten
+The `aria2c-2.5.6-p12-source.tar.gz` asset contains upstream source, the twelve
 local patches, build scripts, dependency sources and license files. Keep
 precompiled clients available beside that source archive.
 

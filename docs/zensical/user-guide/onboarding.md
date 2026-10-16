@@ -25,6 +25,11 @@ Each device needs:
 
 ## Prepare the inventory
 
+In **Add device**, choose the model series and management type first. **Agent
+install** lists their compatible choices after the server checks them. For
+Catalyst 8000 series, choose **Router routed** or **Router NAT** for either
+Guest Shell or IOx. If the check is unavailable, reopen the form to retry.
+
 Add devices one at a time in the Console, or import a CSV file. Use
 `fleet/devices.csv.example` as the template. The header row is validated:
 
@@ -42,6 +47,11 @@ Read the file before you import it. Check the `management_type` of each row,
 and for inband rows check that the VLAN, the SVI (switch virtual interface) and
 the gateway you name already exist.
 
+In **Inventory → CSV**, choose **Import CSV** and select the file. The result
+stays below the toolbar while the table refreshes. Device edits wait until the
+import finishes. If the result is uncertain, check Inventory before retrying.
+**Export CSV** saves your inventory; **Download example** saves a template.
+
 !!! warning
 
     Keep passwords, tokens and image binaries out of `fleet/devices.csv`.
@@ -49,11 +59,26 @@ the gateway you name already exist.
 
 ### Assign a credential profile
 
+Open **Inventory → Manage credentials** to create a profile. Enter its id,
+device username and password, then choose **Save profile**. To change a profile,
+choose **Edit** and re-enter the device password. **New** starts another profile.
+Closing the panel or leaving the tab clears entered passwords.
+
+If the list is unavailable, **Refresh profiles** checks it again. The last
+successful list stays visible. An unknown save or delete result means the
+response was lost or incomplete; refresh and check before trying again.
+
 An imported device cannot be onboarded until you give it a profile.
 
 1. Open **Inventory** and select the imported rows.
-2. Pick a profile in the *credential for selected* dropdown.
-3. Press **Apply**. The rows become onboardable at once.
+2. Open **More actions → Set credential** and pick a profile.
+3. Check **reviewed devices**, then press **Apply**. This list stays fixed while
+   the dialog is open.
+
+The result counts saved changes and names any refusals. If the result is
+unknown, check the refreshed device rows before trying again. Choosing
+**no credential** asks you to confirm clearing these assignments; it keeps
+the profiles.
 
 A re-import replaces a device's network fields and keeps its credential
 profile. A CSV that lists a `device_id` twice is rejected as a whole.
@@ -74,8 +99,14 @@ profile. A CSV that lists a `device_id` twice is rejected as a whole.
    [Supported devices and platforms](../install/supported-devices.md#which-delivery-path-each-device-family-uses).
 5. For Router routed and Router NAT, fill in the VirtualPortGroup number and
    the app addressing. Router NAT also asks for the outside interface.
-6. Select the device and press **Onboard**. The job starts and streams its
+6. Choose a credential profile and press **Save device**. If the profile list
+   is unavailable, you can save with **no credential** and assign one later.
+7. Select the device and press **Onboard**. The job starts and streams its
    progress.
+
+The form keeps your entries during Inventory refreshes. If the save outcome
+is unknown, check Inventory before saving again. Closing a form does not cancel
+a save already sent to the server.
 
 A device with no management type reads:
 
@@ -120,12 +151,26 @@ job confirms `Detailed logs enabled.`, and `aria2c.log` is turned on for IOx
 and IOS-XR. Guest Shell logging is set through `iris_log`; see
 [Device agent configuration](../reference/device-configuration.md).
 
+The Onboard and Undeploy dialogs keep the devices you reviewed when you opened
+them. Expand **reviewed devices** to check the list. Start uses those devices
+and the options shown, even if the table selection changes.
+
 ### Device activity
 
 **Inventory → Activity** opens recent jobs in a side panel. Choose **log** on a
-job to read its output; **Close** or **Esc** closes the viewer. **Abort** asks
-for confirmation, then cancels a queued job or stops a running installer, which
-can leave the agent partly configured: onboard the device again or undeploy it.
+job to read its output. Active jobs refresh every two seconds while Inventory
+is visible. Returning to a hidden tab refreshes the list; choose **Reconnect
+log** to resume output. **Close** or **Esc** closes the viewer and leaves jobs
+running.
+
+**Cancel queued** asks for confirmation and cancels only queued jobs in the
+displayed list. **Abort** asks for confirmation, then cancels a queued job or
+requests a stop for a running installer. During connection checks, it waits for
+those checks to finish and prevents the installer from starting.
+Stopping an installer can leave the agent partly configured: onboard the device
+again or undeploy it. Wait for the job's final status before another action.
+If a request's outcome is unknown, close and reopen Activity to check the job
+before trying again.
 
 ### Deployment logs
 
@@ -133,12 +178,15 @@ can leave the agent partly configured: onboard the device again or undeploy it.
 onboard and undeploy job on the server. The newest 200 are kept.
 
 The table lists each log's finish time, device, action, result and size. A
-histogram bins them over the window you pick: 24h, 7d (the default), 30d, 90d
-or All. Drag a range across it to filter the table, narrow it further with the
+histogram bins them over the window you pick: 24h, 7d (the default), 30d or 90d.
+Drag a range across it to filter the table, narrow it further with the
 search box and the Action and Result pickers, and choose **view** to read a
 log. Widen the range if a job you expect is missing. The same list, filtered to
 one device, sits on that device's panel; see
 [Work with many devices at once](devices.md).
+
+You can also focus the graph and use arrow keys to move the time selection,
+or Shift + arrow to change its width. **Clear** removes the selection.
 
 Each line starts with its elapsed offset from the start of the job:
 

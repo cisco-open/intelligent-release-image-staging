@@ -6,6 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # tools/api-exercise.py
 
+For a separate sustained mixed-workload qualification, use
+[Sustained API qualification](api-soak.md). This exercise keeps its short
+smoke-test limits.
+
 `tools/api-exercise.py` exercises the public Console API against a test
 deployment of IRIS. It discovers the routes the server registers, checks
 their authentication and CSRF guards, and reports each operation's outcome
@@ -156,6 +160,25 @@ a successful end-to-end test. Trust changes, real-device jobs, image
 uploads, and external exports still need their own controlled scenarios.
 These checks confirm the API path works; they do not establish production
 capacity or justify a rate-limit change.
+
+Overview reads current inventory, assignment, heartbeat and onboarding-job state
+without building the targeting and instruction details used by Inventory.
+Inventory keeps those checks. Unfiltered page counts use the same server-owned
+OS and role data as the full projection, without classifying off-page models.
+Regression tests compare complete Overview responses with the detailed path and
+check that changed state is visible and failed source reads remain errors.
+
+Inventory, Overview and sharing-policy GETs share a FIFO read queue within one
+server instance. They read fresh authorities after entry; there is no response
+cache. Mutations, heartbeats, sessions and response transmission do not join
+this queue. A waiting read times out after ten seconds with 503
+`projection-busy` and `Retry-After`. This bounds waiting, not filesystem I/O or
+execution time. The existing HTTP worker pool bounds the number of waiters.
+The queue neither makes multi-file reads atomic nor changes API rate budgets.
+
+Keep comparison results in [Dated lab evidence](validation-records.md#fleet-api-projection-comparisons-2026-10-08).
+Short paired runs help find regressions; they do not establish sustained
+capacity or justify raising the request budget.
 
 ## Related
 

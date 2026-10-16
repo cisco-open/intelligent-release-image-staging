@@ -130,3 +130,52 @@ B
   run grep -F '/proc/sys/fs/binfmt_misc/qemu-aarch64' "$HELPER"
   [ "$status" -eq 0 ]
 }
+
+@test "finalized arm64 staging forwards pinned inputs without Docker emulation or downloads" {
+  STUB="$BATS_TEST_TMPDIR/finalized-stage"
+  mkdir -p "$STUB/tools" "$STUB/bin" "$STUB/device/iox"
+  ln -s "$HELPER" "$STUB/tools/stage-iox-package.sh"
+  export FORBIDDEN_LOG="$BATS_TEST_TMPDIR/forbidden.log" ARGS_LOG="$BATS_TEST_TMPDIR/args.log"
+  for path in "$STUB/bin/docker" "$STUB/tools/get-ioxclient.sh"; do
+    printf '#!/bin/sh\necho forbidden >> "$FORBIDDEN_LOG"\nexit 99\n' > "$path"
+    chmod +x "$path"
+  done
+  cat > "$STUB/device/iox/build.sh" <<'B'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$ARGS_LOG"
+for output in "$@"; do :; done
+printf 'finalized wrapper\n' > "$output/$PACKAGE_NAME"
+printf 'finalized provenance\n' > "$output/$PACKAGE_NAME.manifest"
+B
+  chmod +x "$STUB/device/iox/build.sh"
+  sha="$(printf '%064d' 0)"
+  run env PATH="$STUB/bin:$PATH" IOXCLIENT=/bin/true \
+    bash "$STUB/tools/stage-iox-package.sh" --arch arm64 --artifacts-dir "$ART" \
+    --finalized-dir "$TMP/finalized" --finalization-sha256 "$sha" --ioxclient-sha256 "$sha"
+  [ "$status" -eq 0 ]
+  grep -qx -- '--finalized-dir' "$ARGS_LOG"
+  grep -qx -- '--finalization-sha256' "$ARGS_LOG"
+  grep -qx -- '--ioxclient-sha256' "$ARGS_LOG"
+  [ "$(cat "$ART/iris-arm64.tar")" = "finalized wrapper" ]
+  [ ! -e "$FORBIDDEN_LOG" ]
+}
+
+@test "finalized staging refuses missing local ioxclient without fetching a replacement" {
+  sha="$(printf '%064d' 0)"
+  run env PATH="$NODOCKER:$PATH" IOXCLIENT="$TMP/absent" bash "$HELPER" \
+    --arch arm64 --artifacts-dir "$ART" --finalized-dir "$TMP/finalized" \
+    --finalization-sha256 "$sha" --ioxclient-sha256 "$sha"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"existing local ioxclient; nothing was downloaded"* ]]
+  [ ! -e "$TMP/absent" ]
+}
+
+@test "finalized staging requires an explicit local tool and paired hashes" {
+  sha="$(printf '%064d' 0)"
+  run env -u IOXCLIENT bash "$HELPER" --finalized-dir "$TMP/finalized" \
+    --finalization-sha256 "$sha" --ioxclient-sha256 "$sha"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"IOXCLIENT to name a local executable"* ]]
+  run env IOXCLIENT=/bin/true bash "$HELPER" --finalized-dir "$TMP/finalized"
+  [ "$status" -eq 2 ]
+}

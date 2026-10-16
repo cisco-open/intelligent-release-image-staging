@@ -41,7 +41,7 @@ is missing with your own approved method.
 | Everything | `id -nG \| grep -w docker` | membership in `docker`, or every command needs `sudo` |
 | Encrypted server state | `command -v age age-keygen` | `age` |
 | Package tools and checksums | `command -v git curl ssh-keygen sha256sum file python3 tar` | `git`, `curl`, `openssh-client`, `coreutils`, `file`, `python3`, `tar` |
-| The arm64 IOx package | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static` |
+| Source-built server helpers and the arm64 IOx package | `grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64 && echo ready` | `qemu-user-static`, `binfmt-support` |
 | IOx and IOS-XR packaging | `command -v skopeo` | `skopeo` |
 | The IOS-XR appmgr RPM | `command -v rpmbuild` | `rpm` |
 

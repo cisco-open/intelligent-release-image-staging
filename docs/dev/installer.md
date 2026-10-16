@@ -6,9 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Production installer development
 
-The Ubuntu 24.04 amd64 `.deb` contains the source-build installation engine,
-managed maintenance service, terminal key and recovery tools, and runtime
-diagnostics. It supports single-host Docker, split Docker and Kubernetes.
+The Ubuntu 24.04 amd64 `.deb` contains deployment, maintenance, key, recovery and
+diagnostic tools. It supports single-host Docker, split Docker and Kubernetes.
 
 ## Build the Ubuntu installer
 
@@ -21,18 +20,36 @@ python3 tools/build-installer-package.py --out /path/to/candidate-output
 The package includes only allowlisted committed source, both committed aria2c
 architectures, notices and a file inventory. It has no maintainer hooks that
 deploy services, generate keys or create accounts. Local output is unauthenticated.
-The public `release.yml` workflow builds the tagged commit and authenticates every
-asset with GitHub artifact attestations. It publishes the `.deb`, its committed
-source inventory, the source archive and member manifest, matching aria2 binaries
-and corresponding source, and an authenticated release inventory. Follow
+The public `release.yml` workflow authenticates the tagged commit's assets with
+GitHub artifact attestations: the `.deb`, source inventories and archive,
+matching aria2 binaries, corresponding source and release inventory. Follow
 [download and authentication](../zensical/install/managed-package.md#download-and-authenticate)
 before installing a public package. The publisher identity is the public GitHub
 repository and tagged release workflow, separate from deployment instruction roots.
 
-On an isolated Ubuntu 24.04 amd64 test host, install the reviewed package with
-`sudo apt install ./iris-installer_<version>_amd64.deb`. Then:
+On an isolated Ubuntu test host, run `sudo apt install ./iris-installer_<version>_amd64.deb`.
 
-Run `sudo irisctl install` for prompts, or supply the same public inputs explicitly:
+Run `irisctl setup` without sudo for automatic local keys by default
+(`--key-mode automatic`). Its four steps cover settings review, key/server
+preparation, trusted approval/package completion, and opening the Console.
+It creates protected signing roots and a recovery identity outside deployment
+storage, then invokes the matching privileged installer with public inputs only.
+Each root has its own strong random passphrase in a mode-0600 file inside the
+owner's mode-0700 key folder. OpenSSH receives it through `SSH_ASKPASS`, never
+through secret arguments, environment values or logs. The default folder is
+`~/.local/share/iris-setup-keys/<instance>`; `--key-directory` selects another.
+
+Automatic approval checks the exact pending request against the deployment's
+pinned public roots and its recorded managed keys. Resume preserves those keys
+and the recorded configuration. Existing manual keys require `--key-mode manual`
+and their original passphrases; automatic mode never replaces or unlocks them.
+Manual local setup retains OpenSSH prompts and explicit request approval.
+Operating-system sudo authentication and the owner-chosen Console password are
+separate. Keeping keys with their passphrases does not protect against full host
+compromise. Keep a secure independent copy of the entire key folder, including
+passphrase files and the recovery identity; deployment backups exclude it.
+
+For separate holders, run `sudo irisctl install` for prompts, or supply public inputs:
 
 ```bash
 sudo irisctl install --state-dir /var/lib/iris-installer/my-instance \
@@ -53,18 +70,20 @@ The default peer TLS policy is required. The Console binds loopback by default;
 set `--console-bind` and `--console-port` explicitly for approved management
 network exposure. Restrict first-claim access before deployment. A named,
 installer-owned Compose project isolates containers, images, volumes and state.
-Existing instances are refused, not adopted. Private offline roots stay with
-their custodians. The installer generates deployment identities, including age,
-online signing and TLS keys, but never generates an offline signing root.
+Existing instances are refused, not adopted. The deployment engine generates
+online signing, age and TLS identities; root creation is handled by the chosen
+local or separate-holder helper. Private setup keys are outside the deployment
+snapshot and backup. Keep an independent recovery copy and protect local custody.
 
 Docker installs accept `--image-root` for a dedicated host import folder.
-`irisctl image-root` can connect one to an existing one-host deployment while
-its previous import folder is empty. The recorded folder is mounted read-only
-and included in backup and restore alongside the separate uploads volume.
-Folder changes retain a recovery record until restart and backup checks pass.
+`irisctl image-root` can change it while the previous folder is empty. The folder
+is mounted read-only and included in backup and restore alongside uploads.
+Changes retain a recovery record until restart and backup checks pass.
 
 The engine pauses with exit 20 and exports `requests/online.pub` below its state
-directory. Take that public file to the offline custodian machine and run:
+directory. Automatic setup approves its matching managed request and resumes;
+manual local setup asks for approval. For separate
+holders, take that public file to the custodian machine and run:
 
 ```bash
 irisctl approve-signing --public-key online.pub --root-key /offline/root-a
@@ -92,9 +111,10 @@ The installer does not complete those approvals automatically. See
 and [backup controls](../zensical/admin-guide/backups.md#console-backup-controls).
 Neither status is a production READY declaration.
 
-The packaged `iris-key-setup` script guides offline key holders through creating
-protected keys, approving public requests and copying only public files. See
-[offline approval](../zensical/install/offline-approval.md).
+`iris-key-setup` guides separate key holders through key creation and approvals,
+copying only public files. Use `iris-key-setup --local` for later approvals with
+locally held keys. Managed roots reuse their saved passphrases; request review
+and SHA256 confirmation remain required. See [offline approval](../zensical/install/offline-approval.md).
 
 The installer also has explicit `docker-split` and `kubernetes` targets; see the
 [managed installation procedure](../zensical/install/managed-package.md).
@@ -112,12 +132,55 @@ backup, verification, isolated extraction and same-deployment restore cutover
 are implemented as described in [Lifecycle development](lifecycle.md).
 Restore requires current security authority and the same credential generation;
 it does not adopt a replacement host or reset missing replay history.
-The source-build package needs network access and is not an offline kit.
-The same scoped worker supports planned credential maintenance, with a verified
-backup prerequisite and `irisctl maintenance` for interrupted-operation
-recovery when the Console is stopped.
-The Kubernetes doctor below is a separate read-only diagnostic command.
+After a worker restart, an unfinished restore requires explicit `recover-restore`
+with the original job and backup IDs. Only a persisted false
+`restore_authority_started` marker permits recovery before the restore record
+was created; missing or damaged started authority remains fenced. That early
+recovery repeats archive authentication before it can stop services or replace data.
+Archive authentication passes two anonymous, mode-0600 public metadata files to
+OpenSSH through inherited descriptors and `/proc/self/fd`. Its POSIX temporary-file
+fallback unlinks the files before use and never uses saved-backup storage.
+Verification and restore preflight stream decryption without creating a directory.
+An interrupted worker therefore leaves no authentication or verification workspace
+in archive inventory. Actual extraction retains its private sibling stage and
+publishes only after signature, ciphertext and file-inventory checks pass.
+Unknown files left by older attempts remain unadopted and block archive mutations;
+read-only history and the appropriate recovery controls remain available.
+The managed worker keeps its Python runtime separate from the deployment source.
+Restore loads distribution-access validation from the verified live source, not
+from the backup. Test this layout in an isolated Python process so checkout
+imports cannot hide a missing runtime dependency.
+Backup capture releases its temporary topology snapshots after success or
+failure. Operation history and encrypted archives remain available for review.
+Managed captures save per-job intent before exports or downtime, including
+the exact worker, services, storage and signing authority. Explicit
+`recover-backup` requests reuse the original job and backup IDs. Recovery
+requires proof that previous writers have stopped, restores recorded service
+state, and accepts only completed authenticated archive pairs. Interrupted
+encryption stages remain private and unverified. The Console and host
+`maintenance recover` command expose the same operation; neither recaptures.
+The worker limits recent history to 100 records and saved backups to 20 pairs
+of deployment and recovery archives. Failed captures without saved files consume
+history, not a saved-backup slot. The Console exposes separate history clearing and archive
+deletion controls through the existing settings/backups API. Both bind an exact
+request ID and reviewed history revision. Retired requests remain recorded to
+prevent replay; unresolved recovery records are protected. Archive deletion has
+its own durable operation record outside the bounded recent history so a full
+history cannot prevent cleanup. Lost responses require read-only reconciliation;
+resuming a partial deletion requires explicit confirmation of the original ID.
+The scoped worker requires a verified backup for credential maintenance;
+`irisctl maintenance` recovers interrupted work while the Console is stopped.
 Keep live qualification evidence separate from unit tests and build results.
+
+Deploying a different server release uses undeploy, removal, a new installation
+and device re-onboarding. There is no public in-place application upgrade command.
+A new managed installation requires a new identity and dedicated state directory;
+it does not adopt old volumes or apply a backup to a different deployment.
+Existing backup, restore, credential rotation and scoped uninstall remain supported.
+Historical operation guards, protected archive readers and worker startup fences
+remain available to preserve existing state and refuse conflicting maintenance.
+They are not a new application replacement engine.
+See [Deploy a new release](../zensical/admin-guide/upgrade.md) for operator steps.
 
 ## Implemented: native-package runtime checks
 
@@ -135,44 +198,386 @@ label selector. Docker optionally accepts `--context` for a selected local or
 remote Docker endpoint. The command uses existing Docker/kubectl authentication;
 it does not install those clients or acquire broader privileges.
 
-Both adapters stream the same Python probe to the server over stdin, without
-copying files or installing software there. The probe uses the running image's
-`setup_status` implementation and refuses any identity other than uid/gid
-10001. Python runs in isolated mode with bytecode writes disabled. The command
-has a configurable timeout (120 seconds by default).
+Both adapters stream the running image's `setup_status` probe over stdin.
+It requires uid/gid 10001 and isolated Python with bytecode writes disabled.
+The configurable timeout defaults to 120 seconds. Both IOx architectures and
+the XR RPM are required; `--optional-xr` permits only an absent XR RPM.
+The Docker freshness helper retains that IOx-only option.
 
-By default both IOx architectures and the XR RPM are required. `--optional-xr`
-only permits an absent XR RPM, never a present but invalid one. The existing
-Docker freshness helper uses this option to preserve its IOx-only contract.
-All failures, including unavailable clients and invalid responses, return 1;
-invalid command arguments return 2. `--format json` emits schema version 1 with
-the scope `native-package-readability-and-provenance`. Only complete evidence
-within that scope returns `checks-passed` and exit 0, never installation READY.
+Failures return 1; invalid arguments return 2. `--format json` emits schema 1
+with scope `native-package-readability-and-provenance`. Complete evidence returns
+`checks-passed` and exit 0, never installation READY. The probe reads wrapper
+bytes, sidecars and the distributed certificate fingerprint. It does not prove
+publisher or native signatures, live TLS, Guest Shell readiness, instruction
+signing or Console ownership. The engine separately checks Guest Shell publication.
+The Docker freshness helper separately compares live and distributed certificates.
+Transport errors are withheld because they can contain authentication material.
 
-The probe reads complete wrapper bytes and their provenance sidecars, and
-fingerprints the distributed catalog certificate. It does not authenticate the
-sidecar, inspect package contents/native signatures, check live TLS endpoints,
-qualify Guest Shell, test instruction signing or establish Console ownership.
-The installation engine separately requires fresh Guest Shell publication
-evidence; the standalone native-package doctor's scope is unchanged.
-The existing Docker freshness helper still performs its separate live versus
-distributed certificate comparison. Errors from transport clients are not
-echoed because they can contain authentication material.
+## Prebuilt input implementation
+
+The default install uses source builds. `install --release-kit` selects local
+prebuilt inputs; `setup` accepts the same options. Supply the independently
+selected `--release-tag` and full `--release-commit`, plus a licensed local
+`--ioxclient` matching the committed checksum. The installer checks these inputs
+before changing the host. A rejected kit never falls back to source builds.
+
+`release_kit.py` authenticates the release inventory and every payload using an
+independently installed GitHub verifier. Offline verification also requires
+independently supplied trust material. A kit cannot provide its own authority.
+Use `--release-verifier` for the independently installed, root-owned GitHub CLI;
+the default is `/usr/bin/gh`. `--offline` requires `--release-trusted-root` and
+keeps release verification local. Retain the release directory and verifier at
+their recorded paths so `resume` can authenticate the same inputs again.
+
+For Kubernetes without an installed client, supply `--kubectl` with the local
+binary matching the installer's pinned version and checksum. This input is
+checked before host changes and copied without downloading. An existing
+`kubectl` or `k3s` client is preserved and still checked against the cluster.
+
+The prepared-host profile checks existing dependencies without installing them.
+The `ubuntu-dependencies` profile additionally binds the local Ubuntu package
+archive and its inner manifest to the authenticated release inventory.
+The separate Ubuntu dependency producer verifies official signed indexes, exact
+package hashes and the complete dependency set. Its apply step checks the
+approved package plan again while apt holds its mutation lock. This module's
+disconnected package tests do not establish complete deployment qualification.
+
+The installer records the accepted dependency plan before applying it. Resume
+can retry an unchanged host or recognize that the exact plan finished before
+its completion was recorded. Partial apt operations and unexpected changes
+stop for inspection with the plan retained. Once complete, ordinary Ubuntu
+security updates are allowed when the required dependencies remain available;
+resume does not silently install a new dependency plan.
+
+Split Docker uses a separate accepted plan for the selected Console host. It
+checks the SSH identity, host identity and Ubuntu signatures there, then installs
+only Docker, Compose, OpenSSL and their required dependencies. Ownership checks
+remain read-only. The remote host needs Python, SSH, sudo and Ubuntu's package
+tools and archive keyring before this step.
+
+Core image imports use installation-owned tags and record intent before changes.
+Resume checks the authenticated kit, matching installed controller and source,
+image configuration digest and Docker image ID. These two image identities can
+differ. The adapters retain their existing remote-transfer and Kubernetes digest
+checks; prebuilt image acquisition disables source builds and image pulls.
+
+The neutral device finalizer validates both architectures, preserves runtime
+content and adds the selected public instruction roots. Its finalization record identifies
+those exact inputs and outputs. This is distinct from native IOx package signing.
+Native wrappers use the finalized image and pinned local packaging tools.
+Completed package bytes are recorded before publication and checked on resume.
+The public packaging-tools archive contains the selected XR builder source and
+its license, not Cisco's ioxclient executable. Source builds keep their existing
+wrapper path and provenance format; finalized wrappers use a distinct format.
+
+The Guest Shell input archive references the matching installer source files,
+both committed aria2 architectures and their notices. It is checked before host
+changes. The server image supplies the compiled helpers, and the runtime
+publisher adds the deployment's public roots and checks the served bundle.
+
+Prebuilt backups include the finalized runtime and the recorded native package
+cache. Same-deployment restore can recover a missing cache from a matching
+backup; it preserves and refuses altered or incomplete existing directories.
+A backup without these caches needs the originals to remain intact. Keep the
+release kit, verifier and independent trust files at their recorded locations.
+
+Root replacement selects a new runtime and package generation for the approved
+request. Resume reuses that generation and keeps the original caches. A completed
+successor can be restored from its own backup without earlier cache directories.
+Before publication completes, recovery still requires the exact predecessor caches.
+
+The hosted authentication workflow supports source-build artifacts and explicitly
+selected prebuilt profiles. Complete kit publication and offline topology
+qualification remain separate release gates. A local candidate does not prove
+publisher authentication or native Cisco signature acceptance.
+
+## Assemble a local candidate
+
+Use a reviewed local commit, the pinned XR builder checkout and an existing
+Buildx builder supporting amd64 and arm64. Build dependencies may need network access.
+
+```bash
+python3 tools/build-release-candidate.py --repo /path/to/iris-checkout \
+  --commit '<full-commit>' --tag 'v<version>' \
+  --appmgr-repository /path/to/xr-appmgr-build \
+  --builder existing-amd64-arm64-builder --output-dir /path/to/new-private-candidate
+```
+
+The helper checks committed source in a private checkout and reuses the package,
+source, image and input builders. It checks installer/source agreement before
+image builds and writes `local-candidate.json` with `authenticated: false`.
+Add `--ubuntu-dependencies /path/to/iris-ubuntu-dependencies.tar.gz` for a prepared
+Ubuntu dependency archive. Use a new output directory within a protected parent.
+
+Add `--aria2-sources /path/to/aria2c-2.5.6-p12-source.tar.gz` to carry the reviewed
+aria2 source companion. Before building, the helper checks the selected commit's
+source checksum, source-input manifest and both client binaries, including ARM64.
+It keeps an immutable private copy and records the binding in `local-candidate.json`.
+Keep this companion with the clients when redistributing them; it covers aria2
+and its bundled dependencies, not every component in the IRIS images.
+
+### Ubuntu source and notice companion
+
+Collect exact source files under a local `pool/...` mirror and prepare an
+`iris-ubuntu-source-inputs-v1` JSON descriptor. Its `indexes` list contains
+`repository`, `suite`, `component`, absolute `inrelease` and `sources` paths,
+and boolean `historical` for each index. Include all six current noble,
+noble-updates and noble-security main/universe indexes; explicitly mark retained
+historical source evidence. Current InRelease bytes must match the binary closure.
+
+```bash
+python3 tools/build-offline-sources.py --binary-closure /path/to/dependency-payload \
+  --manifest-sha256 '<dependency-manifest-sha256>' --indexes /path/to/indexes.json \
+  --source-pool /path/to/source-mirror --out /path/to/iris-ubuntu-sources.tar.gz
+```
+
+The producer verifies Ubuntu signatures, exact Source and Built-Using versions,
+source files, `.dsc` inventories and carried copyright/license bytes. Inputs are
+local; source recipes are not executed. Use `--verify-bundle` instead of `--out`,
+`--indexes` and `--source-pool` to independently recheck an existing companion.
+
+Add `--ubuntu-sources /path/to/iris-ubuntu-sources.tar.gz` together with
+`--ubuntu-dependencies` to candidate assembly. Both archives are privately
+snapshotted and complete source coverage is checked before any builder runs.
+The immutable companion is recorded in `local-candidate.json` with its exact
+dependency binding; it is not an installer asset role. The candidate remains
+unauthenticated. Ubuntu coverage does not establish Docker/Alpine image coverage.
+
+Before publication, review corresponding source and notices for every shipped
+component, including Ubuntu packages, and confirm redistribution permission.
+Cisco's licensed ioxclient remains separately supplied. Candidate checks do not
+create release attestations or satisfy these publication and topology gates.
+
+### Inspect image source requirements
+
+Run `python3 tools/inspect-image-components.py --help` for the input options.
+Supply the exact server, Console and neutral runtime archives, their independently
+recorded SHA-256 values, the full source commit and a new protected output directory.
+The helper reads the images without starting containers or running their programs.
+
+The resulting `image-components.json` lists package versions and incorporated
+sources, runtime components and notice files in each layer and the final image.
+It includes both neutral runtime architectures. Core image revision labels must
+match the selected commit; the neutral image's source-commit binding is not assessed.
+
+This is an inventory, not complete source delivery or release authentication.
+Resolve the listed source requirements and unknown components before publication.
+Keep the record and exact input hashes with the candidate's review evidence.
+
+### Debian image source companion
+
+Use `tools/build-debian-sources.py` with that reviewed inventory and its SHA-256,
+an independently trusted Debian archive keyring, a local source pool and an
+`iris-debian-source-inputs-v1` descriptor. Its three `indexes` entries name
+`repository`, `suite`, `component`, and absolute `inrelease` and `sources` paths:
+Debian trixie/main, Debian trixie-updates/main and security trixie-security/main.
+
+The producer includes exact direct and incorporated source versions from every
+distributed layer. It checks signed indexes and every source file, then writes
+a new archive with `--out`. Use `--verify-bundle` instead to independently check
+an existing archive against the same external inventory and keyring. Neither
+operation runs source recipes. This companion covers Debian source files only;
+other image components and notice preservation need their own review.
+
+For a retained archive whose repository metadata has expired, add
+`--archived-integrity` to `--verify-bundle`. This still checks signatures, exact
+versions and every file hash, but reports archived integrity rather than current
+metadata. It cannot build a new companion or establish publication readiness.
+Installer and apt freshness checks remain unchanged.
+
+### Alpine and core Python companions
+
+`tools/build-alpine-sources.py` takes the reviewed image inventory and its SHA-256,
+a local aports Git repository, a source pool and a new output directory. Name
+each external source input by its complete lowercase SHA-512. The helper retains
+the exact port recipes and checks every listed source and patch, including inputs
+for both architectures. It reads Git objects without fetching or running recipes.
+Its independent validator is `alpine_sources.validate_source_archive()`.
+
+`tools/build-core-python-sources.py` covers the supported server and Console
+CPython/pip versions. Supply the reviewed inventory, exact image configurations,
+local source archives and an independently reviewed pip source checksum. CPython
+is bound to the source pin in those configurations; observed pip source/data
+files must match its archive. Original source archives and notices are retained.
+Use `--verify-bundle` to check an existing companion with the same external inputs.
+Generated bytecode and installed metadata are identified separately, not presented
+as source equality. These companions do not establish complete image coverage.
+
+### Neutral runtime and static helper sources
+
+`tools/build-runtime-sources.py` collects the supported neutral Python/XML and
+static verifier source inputs. Supply the original candidate and image inventory
+with their reviewed hashes, the exact Alpine companion and the local source pool.
+It checks the neutral build context, original source archives, patch and notices,
+and retains the installed Python build configuration for both architectures.
+
+Use `--verify-bundle` to check an existing companion against the same external
+inputs. Keep its referenced Alpine archive alongside it. Source-file matches
+are reported separately from generated binaries; the tool does not establish
+binary reproducibility or publisher authentication.
+
+### Image notices and candidate completion
+
+`tools/build-image-source-notices.py` collects original notices, package ownership
+and exact source references from every image layer and the final filesystems.
+Supply the candidate and inventory with their reviewed hashes, the five image
+source companions with their hashes, and the pinned debuerreotype script and
+license. Use `--verify-bundle` to reconstruct an existing catalogue. Recipe-only
+license declarations remain distinct from original notice text; package ownership
+does not prove a reproducible binary build.
+
+Once the companions are ready, use `tools/complete-release-candidate.py` with the
+original candidate hash, tag, full commit, source companions, notice catalogue,
+independent Debian keyring and reviewed pip source hash. Include Ubuntu sources
+for the dependency profile. The helper rechecks the installer against its source,
+recomputes the image inventory and independently validates each companion.
+
+It writes a new private directory with `candidate-evidence.json`, preserving the
+original candidate bytes. It does not rebuild images or download source. This
+evidence still needs source and redistribution review, release authentication
+and live qualification. See the [release checklist](release-checklist.md) for
+the separate authentication and publication steps.
+
+### Prepare prebuilt authentication inputs
+
+Use `tools/prepare-prebuilt-release.py --check` with `--completed-dir` and its
+independently recorded `--evidence-sha256`. Select a clean local checkout with
+`--repository`, its exact `--tag` and full `--commit`. Supply the independent
+`--debian-keyring` and `--pip-sdist-sha256` used for that candidate.
+This repeats the source checks and verifies every shipped source file against
+Git without building or executing candidate code.
+
+For unsigned release output, replace `--check` with `--output-dir` naming a new
+protected output path. Also supply `--source-review` with `--review-sha256`,
+and `--stage-record` with `--stage-sha256`, using independently recorded hashes.
+The review must identify its reviewer and cover the exact payload and companions.
+The run record must name the selected tag, commit, workflow run and attempt.
+The helper preserves both records and the original candidate, copies the public
+verification helper and clients from checked source, and writes the release
+inventory and checksums.
+It checks the original source manifest rather than replacing it.
+
+These inputs remain unsigned until the authorized hosted workflow authenticates
+them. The helper checks the review's file bindings, not the reviewer's authority.
+For hosted intake, an authorized repository owner first supplies a dedicated
+unpublished draft release in the public repository. Its tag is
+`iris-prebuilt-intake-<first 16 characters of candidate-evidence SHA256>` and its
+target is the full reviewed commit. Keep it separate from the final release tag.
+The intake helper never creates a draft, changes a tag or publishes a release.
+
+Set `GH_TOKEN` in the environment for both local commands, using the same
+independently authenticated GitHub identity for this repository. The plan needs
+draft-read access; upload additionally needs repository contents-write access.
+The helper's GET requests do not read cached `gh auth login` credentials.
+Keep shell tracing disabled and obtain the value without putting it in arguments
+or command history:
+
+```bash
+set +x
+export GH_TOKEN="$(/usr/bin/gh auth token --hostname github.com)"
+```
+
+Prepare a new private upload plan from the completed candidate and independently
+approved review:
+
+```bash
+python3 tools/prebuilt-intake.py plan --completed-dir /path/to/completed \
+  --evidence-sha256 '<candidate-evidence-sha256>' \
+  --source-review /protected/source-review.json --review-sha256 '<review-sha256>' \
+  --repository /path/to/reviewed-checkout --tag 'v<version>' --commit '<full-commit>' \
+  --profile prepared-host --draft-release-id '<existing-draft-id>' \
+  --debian-keyring /protected/debian-keyring.gpg --keyring-sha256 '<keyring-sha256>' \
+  --pip-sdist-sha256 '<independently-reviewed-pip-source-sha256>' \
+  --output-dir /path/to/new-private-upload-plan
+```
+
+This step rechecks the complete candidate and review, snapshots exact bytes and
+reads the existing empty draft. It reports the local plan hash. Upload requires
+separate repository write authority, an independently installed protected GitHub
+CLI, and explicit confirmation:
+
+```bash
+python3 tools/prebuilt-intake.py upload --state-dir /path/to/new-private-upload-plan \
+  --plan-sha256 '<reported-plan-sha256>' \
+  --confirmation 'upload prebuilt intake <reported-plan-sha256>'
+```
+
+Every upload saves intent first. Resume uses the same plan and command: it
+reconciles a pending upload by exact asset ID, hash and size before progressing.
+An unresolved response stops without repeating the POST. Preserve the plan and
+upload state; missing records, foreign assets and changed inputs are refused.
+The manifest is uploaded last and the helper reports its ID and SHA-256.
+The draft is input storage, not authentication or approval; existing assets are
+never overwritten, deleted or published by this helper.
+
+Run `.github/workflows/prepare-prebuilt.yml` manually on the exact release tag.
+Select the draft and manifest IDs/hash, profile, candidate evidence, review and
+independent keyring/pip hashes. Confirm
+`prepare prebuilt intake <tag> <manifest SHA256>`. The read-only workflow repeats
+full source validation and exports `iris-prebuilt-unsigned-<run-id>-<attempt>`.
+Its summary records the real run, attempt, artifact ID and raw ZIP digest.
+Qualify actual hosted `GITHUB_TOKEN` access to the dedicated draft before
+approving this route; modeled local tests do not prove that permission behavior.
+Source-only tag builds remain available independently of this route.
+For the resulting unsigned input artifact, independently record its run,
+attempt, artifact ID and raw ZIP SHA-256. The artifact API binds the run and
+ZIP digest; the selected attempt must also match the unsigned stage record.
+
+An authorized contributor can run `.github/workflows/release.yml` manually on
+the exact release tag. Select `prepared-host` or `ubuntu-dependencies`, supply
+those incoming identities, and independently select the candidate-evidence,
+source-review, Debian keyring and pip source hashes. The confirmation is
+`authenticate <tag> <candidate-evidence SHA256>`. The runner obtains its Debian
+keyring from the operating system, rather than the incoming artifact, and must
+match the selected keyring hash.
+
+`tools/hosted-prebuilt-stage.py` invokes the complete candidate/source validator
+before attestation. It preserves payloads, source companions and the review;
+only the preparation and inventory context advances to the current hosted run.
+`prebuilt-incoming.json` retains the incoming artifact selection and validation
+pins. The workflow attests and exports the resulting stage without publishing.
+Tag pushes retain the source-only route. Qualification and the manual publisher
+still require the explicit profile and matching review record. See the
+[release checklist](release-checklist.md) for acquisition and publication.
+
+## Bootstrap the installer offline
+
+This developer route needs an authenticated `ubuntu-dependencies` kit and its
+matching `.deb`. Start with Ubuntu 24.04 amd64 server, Python 3.12, apt,
+dpkg/dpkg-deb, gpgv and Ubuntu's archive keyring. Independently provision and trust
+the loader, root-owned GitHub CLI and trusted-root file before running anything
+from the kit. A minimal image without Python needs a separately prepared baseline.
+
+Preview the prerequisite plan using a new bootstrap state path:
+
+```bash
+sudo /usr/bin/python3 -I /path/to/trusted/bootstrap-offline.py \
+  --deb '/path/to/kit/iris-installer_<version>_amd64.deb' --release-kit /path/to/kit \
+  --release-tag 'v<version>' --release-commit '<full-commit>' \
+  --release-verifier /usr/bin/gh --release-trusted-root /path/to/independent-root.json \
+  --state-dir /var/lib/iris-offline-bootstrap
+```
+
+Review the plan, then repeat with `--accept-changes`. The loader authenticates
+the private package before importing its controller. The controller records the
+accepted Python, age, CA-certificate and SSH-client dependency plan before applying
+it, then installs the exact local `.deb`. Unrecorded installer packages and unknown
+destination files are refused. Dependencies never fall back to network downloads.
+
+Resume with the original inputs, `--accept-changes` and the same state path.
+Keep bootstrap and deployment journals separate. Missing bootstrap records, partial package
+changes and altered files stop for inspection; preserve that evidence. Deployment
+authentication, approvals and public-kit qualification remain separate requirements.
 
 ## Delivery and qualification contract
 
-Production is the design target. Release qualification covers
-single/split Docker and single-/multi-node Kubernetes, prebuilt and managed
-source-build paths, both device architectures, custody/signing activation,
-resumable operations, upgrades, renewal, backup/restore and failure recovery.
-The server remains single-replica; multi-node scheduling is not multi-writer HA.
-Optional demo mode cannot satisfy production acceptance gates.
+Qualify single/split Docker and single-/multi-node Kubernetes, source and prebuilt
+inputs, both device architectures, signing, resume, replacement, renewal, backup/restore
+and failure recovery. The server remains single-replica. Multi-node scheduling
+and optional demo mode alone do not satisfy high-availability or production acceptance.
 
-The authenticated release workflow publishes the reviewed source and installer.
-Installation resumes from its protected journal after offline approval; the
-managed worker performs backup, credential maintenance and approved restore.
-Existing crypto operations remain the authority; builders receive public roots
-only. Publication requires passing tests and recorded live topology and device
+Builders receive public roots only. Existing crypto approvals remain authoritative.
+Publication requires passing tests and recorded live topology and device
 qualification, not just a successful package build.
 
 ## Tests
@@ -182,10 +587,7 @@ python3 -m pytest server/tests/test_installer_runtime.py -q
 bats server/tests/test_package_freshness.bats device/iox/tests/test_stage_iox_package.bats
 ```
 
-The ordinary suite stubs transports and checks real fixture bytes. For the
-opt-in Docker permission regression, set `IRIS_INSTALLER_DOCKER_TEST_IMAGE` to
-an existing, trusted server image's immutable `sha256:` image ID. It starts one
-isolated container, exposes no ports, mounts only disposable test fixtures,
-tests real service-user EACCES and removes its container afterward. It does not
-contact inventory devices or an existing IRIS deployment. Docker transport
-evidence does not qualify Kubernetes; record its live tests separately.
+Ordinary tests stub transports and check fixture bytes. The optional Docker
+permission test uses `IRIS_INSTALLER_DOCKER_TEST_IMAGE`, an existing trusted image's
+immutable `sha256:` ID. Its temporary container exposes no ports and uses disposable
+fixtures; inventory devices and existing deployments remain untouched.

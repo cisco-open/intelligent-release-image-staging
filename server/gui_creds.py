@@ -45,6 +45,9 @@ class CredentialStore:
         if fields.get("enable_secret") is not None and \
                 not isinstance(fields.get("enable_secret"), str):
             raise ValueError("enable_secret must be a string")
+        for field in ("device_user", "device_pass", "enable_secret"):
+            if "\0" in (fields.get(field) or ""):
+                raise ValueError("%s must not contain NUL" % field)
         rec = {
             "name": fields["name"],
             "device_user": fields["device_user"],
@@ -84,8 +87,12 @@ class CredentialStore:
 
     def set_audit_export_secret(self, password):
         """Set the audit-export SCP password (singleton). Required."""
-        if not str(password or ""):
+        if not isinstance(password, str):
+            raise ValueError("password must be a string")
+        if not password:
             raise ValueError("password is required")
+        if "\0" in password:
+            raise ValueError("password must not contain NUL")
         rec = {"password": password, "updated_at": int(self._now())}
         with secrets_store.store_lock(self.secrets_path):
             store = secrets_store.load(self.secrets_path)

@@ -82,10 +82,28 @@
 .iris-react-shell #dev-rows tr[data-id]:focus-visible { outline: 2px solid var(--iris-action); outline-offset: -2px; }
 .iris-react-shell #dev-rows tr.sel td:first-child { box-shadow: inset 3px 0 var(--iris-action); }
 .iris-react-shell #dev-rows .dev-id .dinfo { font: inherit; font-size: 14px; text-align: left; }
+.device-certificate-details { margin: 12px 0 0; }
+.device-certificate-details dt { color: var(--text-secondary); }
+.device-certificate-details dd { margin: 0 0 8px; overflow-wrap: anywhere; }
 .iris-react-shell #dev-rows .dev-id { min-width: 128px; white-space: nowrap; }
 .iris-react-shell #dev-rows .machine { white-space: nowrap; }
 .iris-react-shell #dev-rows .dev-series { min-width: 144px; white-space: nowrap; }
-.iris-react-shell .drawer { top: 56px; z-index: 105; }
+.iris-react-shell [data-assignments-react] .modal-foot { flex-wrap: wrap; }
+.iris-react-shell [data-assignments-react] .modal-backdrop { z-index: 210; }
+.iris-react-shell [data-assignments-react] .modal-body { overflow-wrap: anywhere; }
+.iris-react-shell [data-inventory-actions-react] .modal-backdrop { z-index: 210; }
+.iris-react-shell [data-inventory-actions-react] .modal-body { overflow-wrap: anywhere; }
+.iris-react-shell [data-inventory-actions-react] .modal-foot { flex-wrap: wrap; }
+.iris-react-shell [data-schedules-react] .modal-backdrop { z-index: 210; }
+.iris-react-shell [data-schedules-react] .modal-body { overflow-wrap: anywhere; }
+.iris-react-shell [data-schedules-react] .modal-foot { flex-wrap: wrap; }
+.iris-react-shell [data-schedules-react] .table-scroll { max-width: 100%; }
+.iris-react-shell [data-schedules-react] .modal-body .field { display: flex; width: 100%; margin-bottom: 12px; }
+.iris-react-shell [data-schedules-react] .modal-body input,
+.iris-react-shell [data-schedules-react] .modal-body select { width: 100%; min-width: 0; max-width: 100%; }
+.iris-react-shell [data-schedules-react] select[multiple] { height: auto; min-height: 96px; }
+.iris-react-shell .assignment-targets { margin-bottom: 12px; }
+.iris-react-shell .drawer, .iris-react-shell #dl-drawer { top: 56px; z-index: 105; }
 .iris-react-shell #activity-panel { width: min(880px, 96vw); }
 .iris-react-shell #activity-panel .drawer-head { padding: 16px 20px; }
 .iris-react-shell #activity-title { margin: 0; font-size: 20px; }
@@ -103,6 +121,16 @@
 }
 .iris-react-shell .iris-skip { position: absolute; left: 12px; top: -80px; padding: 8px 14px; color: var(--iris-header); background: white; z-index: 200; }
 .iris-react-shell .iris-skip:focus { top: 8px; }
+.iris-react-shell .origin-enforcement { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--iris-rule); }
+.iris-react-shell .origin-enforcement h3:focus { outline: 2px solid var(--iris-action); outline-offset: 4px; }
+.iris-react-shell .origin-enforcement-fields { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(2, minmax(120px, 1fr)); gap: 16px; }
+.iris-react-shell .origin-enforcement-fields .field { display: flex; flex-direction: column; min-width: 0; }
+.iris-react-shell .origin-enforcement-fields :is(input,select) { width: 100%; min-width: 0; box-sizing: border-box; }
+.iris-react-shell .origin-enforcement-preview { padding: 16px; margin: 16px 0; border: 1px solid var(--iris-rule); border-left: 3px solid var(--iris-action); background: var(--surface); overflow-wrap: anywhere; }
+.iris-react-shell .origin-enforcement .role-def-actions { flex-wrap: wrap; }
+@media (max-width: 800px) {
+  .iris-react-shell .origin-enforcement-fields { grid-template-columns: minmax(0, 1fr); }
+}
 .iris-react-shell :is(.iris-header,.iris-navigation) :is(a,button):focus-visible { outline: 2px solid #2998fa; outline-offset: -2px; }
 
 /* The selection column is a control gutter, not a text-input column. Keep
@@ -142,6 +170,19 @@
 .iris-react-shell #backup-selected { max-width: 100%; }
 .iris-react-shell .rotation-identities { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; padding: 16px 0; border-block: 1px solid var(--iris-rule); }
 .iris-react-shell .rotation-identities .machine { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell [data-certificate-group] .certificate-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.iris-react-shell [data-certificate-group] .btn { height: auto; min-height: 32px; white-space: normal; text-align: center; }
+.iris-react-shell [data-security-group] .security-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.iris-react-shell [data-worker-group] .worker-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.iris-react-shell [data-worker-group] .btn { height: auto; min-height: 32px; white-space: normal; text-align: center; }
+.iris-react-shell [data-worker-group] .machine { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell [data-worker-group] .worker-field { display: grid; gap: 8px; max-width: 520px; min-width: 0; }
+.iris-react-shell [data-worker-group] .worker-field > :is(input, select) { width: 100%; max-width: 100%; min-width: 0; }
+.iris-react-shell [data-worker-group] .worker-proof { max-width: 56ch; white-space: pre-wrap; overflow-wrap: anywhere; }
+.iris-react-shell [data-security-group] .btn { height: auto; min-height: 32px; white-space: normal; text-align: center; }
+.iris-react-shell [data-security-group] .machine { overflow-wrap: anywhere; white-space: normal; }
+.iris-react-shell [data-security-group] .security-field { display: grid; gap: 8px; max-width: 460px; min-width: 0; }
+.iris-react-shell [data-security-group] .security-field > :is(input, select) { width: 100%; max-width: 100%; min-width: 0; }
 .iris-react-shell #browser-tls-identity { overflow-wrap: anywhere; white-space: normal; }
 .iris-react-shell #browser-tls-approved { max-width: 100%; min-width: 0; }
 .iris-react-shell .maintenance-form { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,240px),1fr)); gap: 16px; margin-block: 24px; align-items: end; }
@@ -165,6 +206,9 @@
 .iris-react-shell #view-settings .field-label { color: var(--iris-text); font-size: 14px; }
 .iris-react-shell #view-settings .inline-form :is(input:not([type="checkbox"]),select,textarea) { width: 100%; font-size: 14px; }
 .iris-react-shell #view-settings .form-actions { padding-top: 8px; }
+.iris-react-shell [data-settings-react] button:disabled { opacity: .55; cursor: not-allowed; }
+.iris-react-shell [data-settings-react] .settings-message { display: block; max-width: 100%; overflow-wrap: anywhere; }
+.iris-react-shell [data-settings-react] .settings-message:empty { display: none; }
 .iris-react-shell #settings-pane-general .setup-cards { display: grid; grid-template-columns: minmax(0,1.25fr) minmax(0,1fr); gap: 24px; align-items: start; }
 .iris-react-shell #settings-pane-general .card:nth-child(2) { grid-column: 2; grid-row: 1 / span 2; }
 .iris-react-shell #settings-pane-general .card:nth-child(3) { grid-column: 1; }
@@ -226,3 +270,30 @@
 @media (prefers-reduced-motion: no-preference) {
   .iris-react-shell .iris-navigation-link { transition: background-color 100ms ease; }
 }
+/* Role review shares Inventory's compact forms and explicit target list. */
+[data-role-actions-react] .modal-backdrop { z-index: 210; }
+[data-role-actions-react] .field { display: flex; width: 100%; }
+[data-role-actions-react] .field select { width: 100%; }
+[data-role-actions-react] .modal-foot { flex-wrap: wrap; }
+[data-role-actions-react] .modal-body { overflow-wrap: anywhere; }
+[data-policies-react] .modal-backdrop { z-index: 210; }
+[data-policies-react] .modal-foot, [data-policies-react] .role-def-actions { flex-wrap: wrap; }
+[data-policies-react] .field { display: flex; width: 100%; }
+[data-policies-react] .field :is(input,select) { width: 100%; }
+[data-policies-react] .modal-body { overflow-wrap: anywhere; }
+/* Setup and verification share their forms with the first-run wizard. */
+[data-setup-packages] .machine { overflow-wrap: anywhere; }
+[data-setup-packages] .wz-steplist-item { width: 100%; min-width: 0; flex-wrap: wrap; }
+[data-setup-packages] .wz-steplist-label { min-width: 0; }
+[data-setup-packages] .wz-content { width: 100%; min-width: 0; }
+[data-setup-packages] #wz-nav { flex-wrap: wrap; }
+[data-setup-packages] #wz-nav button { height: auto; min-height: 36px; max-width: 100%; white-space: normal; }
+[data-setup-packages] .status-pill { white-space: normal; }
+[data-setup-packages] .tbl { min-width: 640px; }
+[data-setup-packages] .tbl :is(th,td):last-child { text-align: left; }
+[data-setup-packages] .tbl td:first-child { white-space: nowrap; }
+#setup-nudge { flex-wrap: wrap; }
+.iris-image-verification { min-width: 0; overflow-wrap: anywhere; }
+.iris-image-verification .iv-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.iris-image-verification button { height: auto; }
+.iris-image-verification .dropzone[aria-disabled="true"] { opacity: .65; cursor: not-allowed; }

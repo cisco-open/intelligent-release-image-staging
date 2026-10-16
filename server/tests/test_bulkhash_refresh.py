@@ -955,6 +955,98 @@ def test_run_refresh_waits_for_turn_then_takes_fresh_snapshot(tmp_path):
     assert settings["last_run"]["source"] == "manual"
 
 
+def test_wait_timeout_preserves_running_owner_and_rejects_old_coverage(tmp_path):
+    state = tmp_path / 'state'
+    store = _store(state)
+    store.save_image(_entry('image1', 'image1.bin'))
+    baseline = bulkhash_refresh.run_refresh(
+        'manual', str(state), store, wait=True,
+        _fetch_fn=lambda *_args: None, _verify_fn=lambda *_args: None,
+        _parse_fn=lambda *_args: {},
+        _reconcile_fn=lambda _rows, images: _not_in_feed(images))
+    assert baseline['outcome'] == 'ok', baseline
+    settings = state / bulkhash_refresh.BASENAME
+    previous_settings = settings.read_bytes()
+    entered, release = threading.Event(), threading.Event()
+    results, waiter_fetches = [], []
+
+    def owner_fetch(*_args):
+        entered.set()
+        assert release.wait(5)
+        raise bulkhash.BulkHashError('owner stopped')
+
+    owner = threading.Thread(target=lambda: results.append(
+        bulkhash_refresh.run_refresh('scheduled', str(state), store,
+                                    _fetch_fn=owner_fetch)))
+    owner.start()
+    try:
+        assert entered.wait(5)
+        store.save_image(_entry('image2', 'image2.bin'))
+        started = time.monotonic()
+        result = bulkhash_refresh.run_refresh(
+            'manual', str(state), store, wait=True, wait_timeout=0.05,
+            _fetch_fn=lambda *_args: waiter_fetches.append(True))
+        assert time.monotonic() - started < 1
+        assert result == {
+            'outcome': 'fail',
+            'detail': 'timed out waiting for another Cisco hash verification',
+            'matched': None, 'mismatched': None, 'not_in_feed': None}
+        assert waiter_fetches == [] and results == []
+        assert settings.read_bytes() == previous_settings
+        assert owner.is_alive()
+    finally:
+        release.set()
+        owner.join(5)
+    assert not owner.is_alive() and results[0]['outcome'] == 'fail'
+
+
+def test_wait_deadline_expired_before_lock_admission_never_starts_refresh(tmp_path, monkeypatch):
+    state = tmp_path / 'state'
+    store = _store(state)
+    computed = threading.Event()
+    now = [100.0]
+    results, calls = [], []
+
+    def clock():
+        value = now[0]
+        computed.set()
+        return value
+
+    monkeypatch.setattr(bulkhash_refresh.time, 'monotonic', clock)
+    worker = threading.Thread(target=lambda: results.append(
+        bulkhash_refresh.run_refresh(
+            'manual', str(state), store, wait=True, wait_timeout=0.05,
+            _fetch_fn=lambda *_args: calls.append(True))))
+    with bulkhash_refresh._RUN_CONDITION:
+        previous_running = bulkhash_refresh._RUNNING
+        assert previous_running is False
+        bulkhash_refresh._RUNNING = True
+        worker.start()
+        assert computed.wait(5)  # Its deadline was calculated before acquire.
+        now[0] = 101.0
+        bulkhash_refresh._RUNNING = False
+    try:
+        worker.join(5)
+        assert not worker.is_alive()
+        assert calls == [] and len(results) == 1
+        assert results[0]['outcome'] == 'fail' and 'timed out waiting' in results[0]['detail']
+        assert not (state / bulkhash_refresh.BASENAME).exists()
+    finally:
+        with bulkhash_refresh._RUN_CONDITION:
+            bulkhash_refresh._RUNNING = previous_running
+            bulkhash_refresh._RUN_CONDITION.notify_all()
+        worker.join(5)
+
+
+@pytest.mark.parametrize('value', [0, -1, True, None, float('inf'), float('nan'), '660'])
+def test_wait_timeout_requires_positive_finite_budget(tmp_path, value):
+    state = tmp_path / 'state'
+    result = bulkhash_refresh.run_refresh('manual', str(state), _store(state),
+                                         wait=True, wait_timeout=value)
+    assert result['outcome'] == 'fail' and result['detail'] == 'invalid hash verification wait timeout'
+    assert not (state / bulkhash_refresh.BASENAME).exists()
+
+
 def _wait_for_wait_generation(after):
     """Wait until another wait=True caller has registered with the runner."""
     deadline = time.monotonic() + 5

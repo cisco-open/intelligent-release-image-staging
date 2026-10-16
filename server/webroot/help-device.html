@@ -44,6 +44,14 @@
     The Swarm Map shows observations for a particular image and participant;
     an idle or unobserved peer is not evidence of a failed download.</p>
 
+    <h2>Missing peer arrows or reported interval</h2>
+    <p>Device-to-device arrows and faster reporting need <strong>Telemetry
+    reports</strong> and <strong>Live telemetry</strong> enabled when you onboard
+    the device. Saving a
+    <strong>Peer telemetry</strong> interval does not turn streaming on.
+    Check the device's reported interval during an active transfer; paused
+    telemetry and resource limits take precedence.</p>
+
     <h2>Guest Shell and router agents</h2>
     <p>The <code>IRIS-AGENT</code> EEM applet runs bootstrap every 60 seconds.
     Check it from IOS-XE:</p>
@@ -60,9 +68,14 @@ show logging | include IRIS</pre>
     <code>iris-agent.conf</code>, the public <code>iris-catalog.pem</code>, and
     any <code>aria2c-launch-failed</code> marker there. Keep configuration and
     secret-file contents out of shared logs.</p>
-    <p>Dropping a fresh <code>bundle.tgz</code> into the guest-share root upgrades
-    the agent on the next tick. Console upgrades use <strong>Undeploy</strong>,
-    then <strong>Onboard</strong>; preflight refuses an already-running agent.</p>
+    <p>The installer uploads temporary files, then checks and publishes complete
+    inputs under the bootstrap lock, with <code>bundle.tgz</code> last. A copy
+    confirmation does not prove runtime startup. The working directory's
+    <code>bundle-outcome.json</code> records the latest bundle acceptance or
+    rejection, a fixed reason, the expected archive hash when available, and
+    the time. Keep it with the job log after a failure, and check the fresh
+    heartbeat separately. Console upgrades use <strong>Undeploy</strong>, then
+    <strong>Onboard</strong>; preflight refuses an already-running agent.</p>
 
     <h2>IOx agents</h2>
     <pre class="log">show app-hosting list</pre>
@@ -98,6 +111,30 @@ dir harddisk:</pre>
     <code>harddisk:iris-catalog.pem</code>. Agent diagnostics appear in the
     appmgr log above. An empty <code>iris-work/</code> directory after a
     successful undeploy is expected.</p>
+    <p>Unassigning an IOS-XR image removes files IRIS downloaded in place.
+    Adopted files and files of unknown origin stay. Undeploy itself leaves
+    any remaining root image files. See
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/user-guide/assignments/#unassigned-image-park" target="_blank" rel="noopener">What happens to an image you unassign</a>.</p>
+
+    <h2>Revoke a device certificate</h2>
+    <p>Open <strong>Inventory</strong>, click the device name, and choose
+    <strong>Revoke device certificate</strong> under <strong>Device
+    certificate</strong>. Review the device before confirming. This withdraws
+    every peer certificate issued for that device identity and cannot be
+    undone. The inventory row and staged images stay in place.</p>
+    <p><strong>Check status</strong> reads the saved result without repeating
+    the revocation. <strong>Revoked</strong> does not confirm enforcement by
+    every peer. Updated peers refresh the revocation list or stop encrypted
+    peer connections when it expires, within five minutes. Clients without
+    this support can still accept the old certificate. For immediate isolation, block
+    the device's network access as well.</p>
+    <p>To return a secured device, keep its inventory row and choose
+    <strong>Allow fresh onboarding</strong>. Its old certificates stay revoked.
+    Close the panel, select the device, and <strong>Undeploy</strong> the agent
+    if it is still installed. Then choose <strong>Onboard</strong> and check
+    the result in <strong>Activity</strong>. Onboarding handles the new
+    credentials, private key and certificate identity; no key files need
+    copying.</p>
 
     <h2>Network and certificate checks</h2>
     <p>All agents need HTTPS to the catalog on TCP <code>8443</code>, HTTPS

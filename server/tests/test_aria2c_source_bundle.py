@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -28,10 +29,12 @@ rebuild = module('rebuild.py')
 
 def test_manifest_pins_complete_inputs():
     manifest = json.loads((DIRECTORY / 'inputs.json').read_text())
-    assert len(manifest['patches']) == 10
+    assert len(manifest['patches']) == 12
     assert len(manifest['components']) == 5
     assert sum(len(c['sources']) for c in manifest['components']) == 60
-    assert manifest['notice_count'] == 38
+    assert manifest['notice_count'] == 49
+    assert set(manifest['current_recipe_sha256']) == {'Dockerfile', 'build.sh', 'rebuild-pinned.py', 'apk-lock.json'}
+    assert manifest['patches'][-1]['path'] == 'patches/0012-isolate-tracker-control-throttle.patch'
     assert bundle.digest(DIRECTORY / 'COPYING3') == manifest['gpl3_sha256']
     for name, digest in manifest['current_recipe_sha256'].items():
         assert bundle.digest(DIRECTORY.parent / 'aria2c-build' / name) == digest
@@ -199,3 +202,78 @@ def test_changed_inputs_fail_before_any_archive_write(tmp_path, monkeypatch, nam
         bundle.build(inputs, upstream, output, tmp_path)
     assert not output.exists()
     assert not (tmp_path / 'release.tar.gz.sha256').exists()
+
+
+@pytest.mark.parametrize('explicit', (False, True))
+def test_reconstruct_preserves_old_patch_location_and_accepts_explicit_candidate(tmp_path, explicit):
+    root = tmp_path / 'bundle'
+    (root / 'upstream').mkdir(parents=True)
+    with tarfile.open(root / 'upstream/aria2-next.tar', 'w') as archive:
+        member = tarfile.TarInfo('hello.txt')
+        member.size = len(b'original\n')
+        archive.addfile(member, io.BytesIO(b'original\n'))
+    relative = 'patches/0011.patch' if explicit else 'original-producer-recipe/patches/0011.patch'
+    path = root / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'diff --git a/hello.txt b/hello.txt\n--- a/hello.txt\n+++ b/hello.txt\n'
+                     b'@@ -1 +1 @@\n-original\n+candidate\n')
+    patch = {'file': '0011.patch', 'sha256': bundle.digest(path)}
+    if explicit:
+        patch['path'] = relative
+    target = tmp_path / 'result'
+    rebuild.reconstruct(root, target, {'patches': [patch]})
+    assert (target / 'hello.txt').read_bytes() == b'candidate\n'
+    assert not (target / '.git').exists()
+
+
+@pytest.mark.parametrize('name', ['../outside.patch', '/outside.patch', 'patches/../../outside.patch'])
+def test_reconstruct_rejects_external_patch_location(tmp_path, name):
+    root = tmp_path / 'bundle'
+    (root / 'upstream').mkdir(parents=True)
+    with tarfile.open(root / 'upstream/aria2-next.tar', 'w'):
+        pass
+    with pytest.raises(ValueError, match='Unsafe patch path'):
+        rebuild.reconstruct(root, tmp_path / 'result', {'patches': [{
+            'file': '0011.patch', 'path': name, 'sha256': '0' * 64}]})
+
+
+@pytest.mark.parametrize('kind', ('hash', 'link'))
+def test_reconstruct_checks_new_patch_bytes_and_links(tmp_path, kind):
+    root = tmp_path / 'bundle'
+    (root / 'upstream').mkdir(parents=True)
+    with tarfile.open(root / 'upstream/aria2-next.tar', 'w'):
+        pass
+    (root / 'patches').mkdir()
+    path = root / 'patches/0011.patch'
+    if kind == 'link':
+        target = tmp_path / 'outside.patch'
+        target.write_bytes(b'changed')
+        path.symlink_to(target)
+    else:
+        path.write_bytes(b'changed')
+    with pytest.raises(ValueError, match='linked patch|checksum mismatch'):
+        rebuild.reconstruct(root, tmp_path / 'result', {'patches': [{
+            'file': '0011.patch', 'path': 'patches/0011.patch', 'sha256': '0' * 64}]})
+
+
+def test_bundled_offline_entrypoint_preserves_exact_source_file_set(tmp_path):
+    source = tmp_path / 'bundle'
+    (source / 'current-recipe').mkdir(parents=True)
+    (source / 'rebuild.py').write_bytes((DIRECTORY / 'rebuild.py').read_bytes())
+    helper = source / 'current-recipe/rebuild-pinned.py'
+    helper.write_text('def build(args):\n'
+        '    assert args.source_directory == SOURCE\n'
+        '    assert args.offline and args.jobs == 4\n'
+        '    assert not list(SOURCE.rglob("__pycache__"))\n'
+        '    return {"passed": True, "architecture": args.architecture}\n')
+    (source / 'SHA256SUMS').write_text(''.join(bundle.digest(source / name) + '  ' + name + '\n'
+        for name in ('rebuild.py', 'current-recipe/rebuild-pinned.py')))
+    environment = dict(os.environ)
+    environment.pop('PYTHONDONTWRITEBYTECODE', None)
+    result = subprocess.run([sys.executable, str(source / 'rebuild.py'), 'aarch64',
+        '--cache', str(tmp_path / 'cache'), '--offline', '--jobs', '4',
+        '--output', str(tmp_path / 'output')], capture_output=True, text=True, env=environment)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {'passed': True, 'architecture': 'aarch64'}
+    assert not list(source.rglob('__pycache__'))
+    assert rebuild.verify(source) == 2

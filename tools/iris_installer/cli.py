@@ -38,18 +38,43 @@ def parser():
     maintenance = commands.add_parser("maintenance", help="check or repair this deployment from the terminal")
     from .maintenance import add_arguments as maintenance_arguments
     maintenance_arguments(maintenance)
+    uninstall = commands.add_parser('uninstall', help='review and remove only this installation; preserve data by default')
+    uninstall_actions = uninstall.add_subparsers(dest='uninstall_action', required=True)
+    for verb in ('plan', 'apply', 'recover', 'status', 'cancel'):
+        action = uninstall_actions.add_parser(verb)
+        action.add_argument('--state-dir', type=Path, required=True)
+        if verb in ('apply', 'recover', 'cancel'):
+            action.add_argument('--operation-id', required=True)
+            action.add_argument('--plan-sha256', required=True)
+        if verb in ('plan', 'apply', 'recover'):
+            action.add_argument('--purge-data', action='store_true', help='delete recorded data volumes, or PVC and credential Secrets')
+        if verb in ('apply', 'recover'):
+            action.add_argument('--allow-downtime', action='store_true')
     install = commands.add_parser("install", help="install a new owned deployment from Ubuntu 24.04")
     install.add_argument("--target", choices=("docker", "docker-split", "kubernetes"), default="docker")
     install.add_argument("--source", type=Path,
                          default=Path(__file__).resolve().parent.parent / "source")
+    kit = install.add_argument_group('Prebuilt release: authenticated local files')
+    kit.add_argument('--release-kit', type=Path, help='complete downloaded release directory; avoids source builds')
+    kit.add_argument('--release-tag', help='independently selected release tag, including v')
+    kit.add_argument('--release-commit', help='full source commit for the selected release')
+    kit.add_argument('--release-verifier', type=Path, help='independently installed, root-owned GitHub CLI; defaults to /usr/bin/gh')
+    kit.add_argument('--release-trusted-root', type=Path, help='independently obtained Sigstore trusted root for offline verification')
+    kit.add_argument('--offline', action='store_true', help='verify the release without network access; requires a trusted root')
+    kit.add_argument('--ioxclient', type=Path, help='licensed local ioxclient executable matching the release pin')
+    kit.add_argument('--kubectl', type=Path, help='optional pinned local Kubernetes client; used only when no client is installed')
     install.add_argument("--state-dir", type=Path)
     install.add_argument("--instance", default="iris")
     install.add_argument("--host", help="device-facing IPv4 address on this host")
+    install.add_argument("--origin-egress-ip", action="append", default=[],
+                         help="fixed outbound origin IPv4 seen by devices; repeat for up to eight addresses")
     install.add_argument("--roots-dir", type=Path, help="exactly two approved PUBLIC roots")
     install.add_argument("--recovery-recipient", help="separately held age PUBLIC recovery recipient")
     install.add_argument("--console-bind", default="127.0.0.1", help="loopback by default; restrict remote access before exposing first claim")
     install.add_argument("--console-port", type=int, default=8080)
     install.add_argument("--peer-tls", choices=("required", "disabled"), default="required")
+    install.add_argument('--observability', action='store_true',
+                         help='enable the authenticated metrics endpoint; off by default')
     install.add_argument('--image-root', type=Path, help='dedicated host image folder for Docker; included in backup and restore')
     image_root = commands.add_parser('image-root', help='connect a host image folder to an existing one-host Docker install')
     image_root.add_argument('--state-dir', type=Path, required=True)
@@ -75,7 +100,7 @@ def parser():
     kube.add_argument('--kube-image-import', choices=('registry', 'k3s'), default='registry')
     kube.add_argument('--kube-node', default='', help='exact local single-node k3s node for explicit image import')
     kube.add_argument('--lifecycle-url', help='verified HTTPS endpoint of this deployment host worker')
-    install.add_argument("--accept-changes", action="store_true", help="approve Ubuntu dependency installation, source builds and new services")
+    install.add_argument("--accept-changes", action="store_true", help="approve required dependencies, package preparation and new services")
     resume = commands.add_parser("resume", help="resume without regenerating identity or resetting state")
     resume.add_argument("--state-dir", type=Path, required=True)
     resume.add_argument("--certificate", type=Path)
@@ -87,6 +112,15 @@ def parser():
         operation.add_argument("--recovery-root", type=Path, help="separate encrypted identity-set storage root")
         operation.add_argument("--recovery-identity", type=Path, help="optional independently held recovery identity made available on this host")
         operation.add_argument("--listen-address", help="explicit bind address for the recorded Kubernetes worker endpoint")
+    local_setup = commands.add_parser(
+        "setup", parents=[install], add_help=False,
+        help="interactive install with locally created signing and recovery keys")
+    local_setup.add_argument("--key-directory", type=Path,
+                             help="private local key folder; defaults to this user's setup folder")
+    local_setup.add_argument("--key-mode", choices=("automatic", "manual"), default="automatic",
+                             help="automatic generates and stores strong key passphrases; manual uses your existing passphrases")
+    public_status = commands.add_parser("setup-status", help="show public setup details for the terminal helper")
+    public_status.add_argument("--state-dir", type=Path, required=True)
     worker_status = commands.add_parser("worker-status", help="inspect the pinned maintenance service and storage")
     worker_status.add_argument("--state-dir", type=Path, required=True)
     worker_service = commands.add_parser("worker-service", help="control only this deployment's maintenance service")
@@ -94,11 +128,11 @@ def parser():
     worker_service.add_argument("--action", choices=("start", "stop", "restart"), required=True)
     managed = commands.add_parser("managed-worker", help=argparse.SUPPRESS)
     managed.add_argument("--state-dir", type=Path, required=True)
-    approve = commands.add_parser("approve-signing", help="run ONLY on the offline custodian machine")
+    approve = commands.add_parser("approve-signing", help="approve a signing request where its private root is held")
     approve.add_argument("--public-key", type=Path, required=True)
     approve.add_argument("--root-key", type=Path, required=True)
     approve.add_argument("--output", type=Path, default=Path("online-cert.pub"))
-    retire = commands.add_parser("approve-keylist", help="approve a public retirement payload ONLY on the offline custodian machine")
+    retire = commands.add_parser("approve-keylist", help="approve a public retirement payload where its private root is held")
     retire.add_argument("--payload", type=Path, required=True)
     retire.add_argument("--root-key", type=Path, required=True)
     retire.add_argument("--output", type=Path, default=Path("keylist.envelope"))
@@ -147,7 +181,7 @@ def install_questions(args, command_parser):
     if missing and not sys.stdin.isatty():
         command_parser.error("interactive installation needs a terminal; otherwise supply --host, --roots-dir and --recovery-recipient")
     if missing:
-        print("This will install the required tools, build IRIS and set up a new deployment.")
+        print("This will prepare IRIS and set up a new deployment.")
         print("Keep private signing keys off this server. Check the package's release signature first.")
         args.host = args.host or input("Server IPv4 address that devices can reach: ").strip()
         args.roots_dir = args.roots_dir or Path(input("Folder with the two public signing keys (root-a.pub and root-b.pub): ").strip())
@@ -165,7 +199,7 @@ def install_questions(args, command_parser):
     if not args.accept_changes and sys.stdin.isatty():
         print("Deployment: " + args.instance + "; settings folder: " + str(args.state_dir))
         print("Peer TLS: " + args.peer_tls + "; Console: " + args.console_bind + ":" + str(args.console_port))
-        args.accept_changes = input("Install the required tools, build IRIS and start its services? Type INSTALL: ") == "INSTALL"
+        args.accept_changes = input("Prepare IRIS and start its services? Type INSTALL: ") == "INSTALL"
     return args
 
 
@@ -260,6 +294,17 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
+            if args.command == 'uninstall':
+                from . import uninstall
+                if args.uninstall_action in ('apply', 'recover'):
+                    return uninstall.apply(args, recovery=args.uninstall_action == 'recover')
+                return getattr(uninstall, args.uninstall_action)(args)
+            if args.command in ("setup", "setup-status"):
+                from . import local_setup
+                if args.command == "setup-status":
+                    print(json.dumps(local_setup.public_status(args.state_dir), sort_keys=True))
+                    return 0
+                return local_setup.run_setup(args)
             if args.command == 'image-root':
                 from .image_storage import change
                 return change(args)

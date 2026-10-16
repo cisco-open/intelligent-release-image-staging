@@ -20,10 +20,11 @@ import re
 import shutil
 import stat
 import tempfile
+import sys
 import time
 import uuid
 
-from . import backup, backup_archive, restore_storage as storage, restore_topology
+from . import backup, backup_archive, prebuilt_backup, restore_storage as storage, restore_topology
 from .credential_maintenance import _consumer_proof, _memory, _pin_runtime, _stop
 from .state import InstallError, Journal, atomic_write, regular_bytes
 
@@ -44,8 +45,13 @@ def signer_path(state_dir):
     return Path(state_dir) / 'restore-custody' / 'signer.pub'
 
 
-def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=None):
+def guard(state_dir, *, operation_id=None, instance_id=None, recovery_record=None,
+          upgrade_operation_id=None):
     """Other maintenance entry points must respect an interrupted restore."""
+    from .lifecycle_history import guard as retention_guard
+    retention_guard(state_dir)
+    from .upgrade_state import guard as upgrade_guard
+    upgrade_guard(state_dir, operation_id=upgrade_operation_id, instance_id=instance_id)
     base = Path(state_dir)
     image_change = base / 'image-root-change.json'
     if image_change.exists() or image_change.is_symlink():
@@ -217,12 +223,94 @@ def _kubernetes_resources(path):
     return resources
 
 
-def state_authority(current, archived):
+def _origin_authority(current, archived, *, source=None):
+    """Overlay current reviewed origin authority into a stopped candidate.
+
+    Use the live installation's verified source schema. Managed workers keep
+    their Python runtime separately from that source snapshot. This requires
+    neither a running service nor an import from the backup's source.
+    Only candidate files change; the stopped current generation stays intact.
+    """
+    if source is None:
+        package = Path(__file__).resolve().parents[1] / 'source/server'
+        source = package if package.is_dir() else Path(__file__).resolve().parents[2] / 'server'
+    source = Path(source)
+    if not source.is_dir() or source.resolve() != source:
+        raise InstallError('Verified distribution access schema is unavailable')
+    prior_path = sys.path[:]
+    try:
+        sys.path.insert(0, str(source))
+        import origin_enforcement as origin
+        if Path(origin.__file__).resolve() != source / 'origin_enforcement.py':
+            raise InstallError('Distribution access schema belongs to a different source generation')
+    except ImportError as exc:
+        raise InstallError('Verified distribution access schema is unavailable') from exc
+    finally:
+        sys.path[:] = prior_path
+
+    try:
+        generations = []
+        for root in (current, archived):
+            paths = tuple(Path(path) for path in origin.paths(root))
+            custody = {}
+            for path, limit in zip(paths, (origin.MAX_BYTES, origin.MAX_APPLICATION_BYTES,
+                                          origin.MAX_BYTES)):
+                if path.exists() or path.is_symlink():
+                    details = path.lstat()
+                    if not stat.S_ISREG(details.st_mode) or details.st_size > limit:
+                        raise InstallError('Distribution access state is not a bounded regular file')
+                    records = storage.inventory(path)
+                    if records[0]['type'] != 'file' or records[0]['size'] > limit:
+                        raise InstallError('Distribution access state is not a bounded regular file')
+                    custody[path.name] = records
+            control = origin.load_control(paths[0])
+            application = origin.load_application_for(control, paths[1])
+            generations.append((paths, control, application, custody))
+    except (origin.OriginError, InstallError, OSError, ValueError) as exc:
+        raise InstallError('Current or archived distribution access authority is unavailable') from exc
+    live_paths, live, application, custody = generations[0]
+    old_paths, old, prior, _ = generations[1]
+    if (live['revision'] < old['revision'] or
+            live['revision'] == old['revision'] and live != old):
+        raise InstallError('Current distribution access review does not dominate this backup')
+    if (application['shared_revision'] < prior['shared_revision'] or
+            application['shared_revision'] == prior['shared_revision'] and
+            not set(prior['shared_ips']) <= set(application['shared_ips'])):
+        raise InstallError('Current distribution shared-address safety history is missing')
+    previous_ack, current_ack = prior['last_applied'], application['last_applied']
+    if previous_ack is not None and (current_ack is None or
+            current_ack['revision'] < previous_ack['revision']):
+        raise InstallError('Current distribution application history is missing')
+    previous_intent, current_intent = prior['intent'], application['intent']
+    if previous_intent is not None:
+        floor = current_intent or current_ack
+        if floor is None or floor['revision'] < previous_intent['revision']:
+            raise InstallError('Current distribution application intent is missing')
+        # A cleared uncertain attempt requires the matching acknowledgement
+        # or a later reviewed generation, not an older same-review success.
+        if current_intent is None and floor['revision'] == previous_intent['revision']:
+            fields = ('control_hash', 'policy_hash', 'ips', 'bindings')
+            if any(floor[field] != previous_intent[field] for field in fields):
+                raise InstallError('Current distribution application intent is unresolved')
+    for live_path, old_path in zip(live_paths[:2], old_paths[:2]):
+        if live_path.name in custody:
+            shutil.copy2(live_path, old_path)
+            storage.apply_metadata(old_path, custody[live_path.name])
+        elif old_path.exists():
+            old_path.unlink()
+    # Neither the backup's nor the stopped process's recent timestamp proves
+    # application in the restarted aria session. The tracker must verify anew.
+    if old_paths[2].exists():
+        old_paths[2].unlink()
+
+
+def state_authority(current, archived, *, source=None):
     """Keep policy, ownership and external trust in the approved generation.
 
     Execution and disclosure records are monotonic authority, while descriptive
     inventory, assignments, job history and content remain backup-authoritative.
     """
+    _origin_authority(current, archived, source=source)
     unchanged = ('peer-policy', 'deployment_records', 'ca-trust-settings',
                  'audit-export-', 'telemetry-destination', 'instance-id', 'schedules.')
     preserved = ('peer-handouts', 'schedule-progress', 'schedule-retired',
@@ -284,8 +372,18 @@ def _config_generation(install, current, archived, identity):
 
     Ciphertext randomness must not make identical credentials look different.
     A new field/file is security significant by default, never an allowlist gap.
+    The exact audit trail is carried forward separately from the fenced primary;
+    ordinary audit activity is not a credential change.
     """
     left, right = storage.inventory(current), storage.inventory(archived)
+    audit = [next((row for row in records if row['name'] == 'audit.jsonl'), None)
+             for records in (left, right)]
+    if any(row is not None and row['type'] != 'file' for row in audit):
+        raise InstallError('Audit history must be a regular file')
+    if audit[1] is not None and audit[0] is None:
+        raise InstallError('Current audit history is missing; restore refused')
+    left, right = ([row for row in records if row['name'] != 'audit.jsonl']
+                   for records in (left, right))
     index = {row['name']: row for row in right}
     if {row['name'] for row in left} != set(index):
         raise InstallError('Backup belongs to a different credential generation')
@@ -305,6 +403,26 @@ def _config_generation(install, current, archived, identity):
                                  archived / row['name']], capture=True)
         if actual != prior:
             raise InstallError('Backup would roll credentials or revocations backward')
+
+
+def _audit_overlay(current, archived):
+    """Preserve the fenced primary's exact audit bytes and file custody."""
+    source, destination = current / 'audit.jsonl', archived / 'audit.jsonl'
+    if not source.exists() and not source.is_symlink():
+        if destination.exists() or destination.is_symlink():
+            raise InstallError('Current audit history is missing; restore refused')
+        return
+    records = storage.inventory(source)
+    if len(records) != 1 or records[0]['type'] != 'file':
+        raise InstallError('Audit history must be a regular file')
+    if destination.exists() or destination.is_symlink():
+        prior = storage.inventory(destination)
+        if len(prior) != 1 or prior[0]['type'] != 'file':
+            raise InstallError('Archived audit history must be a regular file')
+    shutil.copy2(source, destination)
+    storage.apply_metadata(destination, records)
+    if storage.inventory(source) != records or storage.inventory(destination) != records:
+        raise InstallError('Audit history changed while preparing restore')
 
 
 def _history(root, *, allow_empty=False):
@@ -439,7 +557,7 @@ def _fence(install, containers, recovery):
     # Re-resolve resource ownership and every foreign writable Docker mount.
     # Kubernetes assert_writers_stopped checks PVC consumers and object UIDs.
     if install.config['target'] != 'kubernetes':
-        backup.capture_plan(install)
+        backup.capture_plan(install, allow_missing_prebuilt=True)
 
 
 def _start(install):
@@ -525,7 +643,9 @@ class Transaction:
             guard(self.base, operation_id=self.id if self.record is not None else None,
                   instance_id=journal.document['id'])
             install.restore_operation_id = self.id
-            sources, volumes, containers = backup.capture_plan(install)
+            sources, volumes, containers = backup.capture_plan(install, allow_missing_prebuilt=True)
+            if self.record is not None and self.record.get('plan'):
+                prebuilt_backup.assert_restore_authority(install, self.record.get('prebuilt_cache_authority'))
             # Both authenticated sets and topology are checked before downtime.
             data = backup_archive.read(self.backups / self.backup_id, self.identity, self.signer)
             keys = backup_archive.read(self.recoveries / self.backup_id, self.identity, self.signer)
@@ -572,6 +692,9 @@ class Transaction:
                 raise InstallError('Approved restore backup bytes changed')
             if on_authority_started is not None:
                 on_authority_started()
+            prepare_runtime = getattr(install, 'prepare_restore_runtime', None)
+            if prepare_runtime:
+                prepare_runtime(self, data)
             install.credential_transaction = self
             install.credential_recovery = recovery
             self.save('stopping')
@@ -584,7 +707,9 @@ class Transaction:
                     self.record['mutations_admitted'] = True
                     self.save('publishing')
                     for item in self.record['plan']:
-                        if item.get('pvc'):
+                        if item.get('prebuilt_cache'):
+                            prebuilt_backup.publish_missing(install, item, self.record['prebuilt_cache_authority'], self.id)
+                        elif item.get('pvc'):
                             restore_topology.publish(install, self.id, item['pvc'], item['before'], item['after'])
                         else:
                             storage.publish(item['target'], item['staged'], item['retained'], item['before'], item['after'])
@@ -645,6 +770,8 @@ class Transaction:
             for field in ('config', 'source_manifest', 'root_digests'):
                 if archived_journal.get(field) != current.get(field):
                     raise InstallError('Deployment or trust inputs changed since this backup')
+            cache_authority, cache_plan = prebuilt_backup.prepare_restore(
+                install, extracted, archived_journal, self.id, lambda name: _records(extracted, name))
             for name in ('deployment', 'environment', 'source', 'roots'):
                 if not _same_tree(sources[name], extracted / name):
                     raise InstallError('Restore requires the same deployment and source generation')
@@ -665,11 +792,15 @@ class Transaction:
                     raise InstallError('Kubernetes topology or Secret authority changed since this backup')
             # Restore original archive custody before adding live producer
             # members, so old metadata cannot overwrite the overlay's modes.
+            storage.apply_metadata(extracted / 'volume-iris-config', _records(extracted, 'volume-iris-config'))
+            _audit_overlay(sources['volume-iris-config'], extracted / 'volume-iris-config')
             storage.apply_metadata(extracted / 'volume-iris-state', _records(extracted, 'volume-iris-state'))
-            state_authority(sources['volume-iris-state'], extracted / 'volume-iris-state')
+            state_authority(sources['volume-iris-state'], extracted / 'volume-iris-state',
+                            source=install.source / 'server')
             proof = replay_overlay(sources['volume-iris-state'], extracted / 'volume-iris-state')
             proof.update(authority)
-            plan = []
+            proof['audit_history'] = 'current-fenced-primary'
+            plan = list(cache_plan)
             components = [name for name in sources if name.startswith('volume-') or name in ('images', 'artifacts')]
             if generated_ca:
                 # This public projection is regenerated from the unchanged
@@ -678,8 +809,9 @@ class Transaction:
             for name in components:
                 source = extracted / name
                 records = _records(extracted, name)
-                if name == 'volume-iris-state':
-                    # Overlay above may add live producer files absent in backup.
+                if name in ('volume-iris-state', 'volume-iris-config'):
+                    # Overlays may add current producer or audit files absent
+                    # in the backup, with current custody rather than old modes.
                     records = storage.inventory(source)
                 else:
                     storage.apply_metadata(source, records)
@@ -698,7 +830,7 @@ class Transaction:
                         raise InstallError('Insufficient space for restore candidate and retained original')
                     storage.candidate(source, staged, records)
                     plan.append(dict(target=str(live), staged=str(staged), retained=str(retained), before=before, after=after))
-            self.record.update(plan=plan, security_proof=proof)
+            self.record.update(plan=plan, security_proof=proof, prebuilt_cache_authority=cache_authority)
             self.save('staged')
 
 

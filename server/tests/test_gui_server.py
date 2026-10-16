@@ -4,6 +4,7 @@
 import inspect
 import json
 import os
+from pathlib import Path
 import re
 
 import management_api as gui_server
@@ -115,425 +116,74 @@ management_api._serve_with_shutdown(
 
 def test_role_column_panel_and_modal_are_scoped_and_accessible():
     html, js, css = (_webroot(n) for n in ("index.html", "app.js", "styles.css"))
-    assert '<th>Device</th><th>Role</th>' in html
-    assert '<td class="dev-role">' in js and 'dash(d.role)' in js
-    assert 'colspan="12"' in js
-    assert html.count('id="dev-filter-role"') == 1
-    assert html.count('id="dev-filter-peer"') == 1
-    assert "peer-intent badge" in js and "Quarantined intent" in js
-    assert 'id="set-role-selected">Set role…</button>' in html
-    modal = html.split('id="role-modal"', 1)[1].split('id="img-picker"', 1)[0]
+    component = _react_shell("inventory.jsx")
+    assert "['Device', 'Role', 'IP'" in component
+    assert '<td className="dev-role">{device.role' in component
+    assert 'colSpan={12}' in component
+    assert "['role', 'role'" in component and "['peer', 'peer'" in component
+    assert "peer-intent badge" in component and "Quarantined intent" in component
+    assert "bulkButton('set-role-selected', 'Set role…')" in component
+    modal = _react_shell('role-actions.jsx')
+    assert 'id="iris-role-actions-root" data-role-actions-react' in html
     assert 'role="dialog" aria-modal="true" aria-labelledby="role-modal-title"' in modal
-    for cid in ('role-modal-title', 'role-selected', 'role-modal-msg',
-                'role-preview', 'role-modal-cancel', 'role-modal-x', 'apply-role-selected'):
+    for cid in ('role-modal-title', 'role-selected', 'role-modal-msg', 'role-preview', 'role-modal-cancel', 'role-modal-x', 'apply-role-selected'):
         assert 'id="%s"' % cid in modal
     assert 'aria-live="polite"' in modal
-    assert "wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);" in js
-    assert "'role-modal'" in js.split('var BULK_MODALS = [', 1)[1].split(']', 1)[0]
+    assert "controller.close()" in modal and "event.key === 'Escape'" in modal
+    assert "wireModal('role-modal'" not in js and "BULK_MODALS" not in js
     assert "'apply-role-selected'" in js.split('var BULK_BTNS = [', 1)[1].split(']', 1)[0]
     assert "'set-role-selected'" in js.split('var BULK_OPENERS = [', 1)[1].split(']', 1)[0]
-    assert 'id="peer-policy-panel"' in html and 'id="role-capability-banner"' in html
-    panel = html.split('id="peer-policy-panel"', 1)[1].split('</details>', 1)[0]
+    panel = _react_shell('policy-dialogs.jsx')
+    assert 'id="peer-policy-panel"' in panel
+    assert 'id="role-capability-banner"' in _react_shell('policies.jsx')
     assert '<textarea' not in panel and '<textarea' not in modal
     assert '.policy-counts' in css and 'minmax(' in css
-    workflow = js.split('// ---- Role workflow ----', 1)[1].split(
-        '// ---- End role workflow ----', 1)[0]
-    assert workflow.count("'/api/v1/devices/bulk-role'") == 1
-    assert 'forSelected(' not in workflow and "method: 'PUT'" not in workflow
+    assert _react_shell('role-actions-controller.mjs').count("'/api/v1/devices/bulk-role'") == 1
+    assert "'/api/v1/devices/bulk-role'" not in js
 
 
-def _run_role_console_js(script):
-    """Execute the actual scoped Console code with a small DOM/fetch double.
-
-    This is a request/state-machine check, not a browser-layout claim.
-    """
+def _run_policies_node(pattern):
+    """Run shipped controller regressions, never a duplicate state machine."""
     import subprocess
-    js = _webroot('app.js')
-    assert '// ---- Role workflow ----' in js
-    code = js.split('// ---- Role workflow ----', 1)[1].split(
-        '// ---- End role workflow ----', 1)[0]
-    result = subprocess.run(['node', '-'], input=r'''
-const assert = require('node:assert/strict');
-const elements = new Map();
-function el(id) {
-  if (!elements.has(id)) elements.set(id, {
-    value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
-    listeners: {}, addEventListener(k, f) { this.listeners[k] = f; },
-    focus() { this.focused = true; }
-  });
-  return elements.get(id);
-}
-var document = {getElementById: el, querySelectorAll: () => [], querySelector: () => null};
-var confirmPrompts = [], confirmAnswers = [];
-function confirm(text) { confirmPrompts.push(text); return confirmAnswers.length ? confirmAnswers.shift() : true; }
-async function downloadCsv(url, name) { calls.push({url, download: name}); }
-var peerPolicy = {revision: 7, roles_supported: true, roles: {members: {boat: 2}}};
-var peerPolicyReadOk = true, bulkBusy = false, devStatus = el('dev-status');
-var selection = ['on-page', 'off-page'];
-function selectedIds() { return selection.slice(); }
-function setBulkBusy(b) { bulkBusy = b; }
-function claimSelection() { if (bulkBusy) return null; setBulkBusy(true); return selectedIds(); }
-function openModal(id) { el(id).hidden = false; }
-function closeModal(id) { el(id).hidden = true; if (id === 'role-modal') cancelRoleDialog(); if (id === 'role-def-modal') cancelRoleDefinitionDialog(); }
-function csrfHdr(h) { return {...h, 'X-CSRF-Token': 'test-csrf'}; }
-function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
-function fmtDate(v) { return 'time:' + v; }
-var refreshes = 0;
-async function refreshDevices() { refreshes++; }
-var calls = [], replies = [];
-async function fetch(url, opts) {
-  calls.push({url, ...opts, body: opts && opts.body !== undefined ? JSON.parse(opts.body) : undefined});
-  const next = replies.shift();
-  if (next instanceof Error) throw next;
-  if (typeof next === 'function') return await next();
-  return {ok: next.status < 400, status: next.status, json: async () => next.body,
-          headers: {get: (k) => (next.headers || {})[k] || null}};
-}
-function reply(body, status = 200) { replies.push({status, body}); }
-function preview(extra = {}) {
-  return {ok: true, applied: 2, failed: {}, dry_run: true, revision: 8,
-    candidate_revision: 8, confirm_token: 'preview-token', requires_confirmation: true,
-    member_delta: 2, origin_access_lost: 1, empty_permitted_sets: 0,
-    role_pairs_stopped: 1, qos_changed: true, ...extra};
-}
-''' + code + '\n(async () => {\n' + script + '\n})().catch(e => {console.error(e); process.exit(1);});',
-        text=True, capture_output=True, timeout=10)
+    tests = Path(gui_server.WEBROOT).parent / "console-ui/tests/policies.test.mjs"
+    result = subprocess.run(
+        ["node", "--test", "--test-reporter=tap", "--test-name-pattern", pattern, str(tests)],
+        text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert re.search(r"# pass [1-9][0-9]*", result.stdout), result.stdout
 
 
 def test_role_definition_editor_previews_then_commits_with_the_preview_token():
-    """#222: the editor follows the Set role contract exactly -- one dry run
-    on the pre-preview revision, then one commit carrying that preview's
-    token on the SAME revision even when polling has moved on."""
-    _run_role_console_js(r'''
-await el('role-def-new').listeners.click();
-assert.equal(el('role-def-modal').hidden, false);
-el('rd-name').value = 'Bad Name';
-await el('role-def-save').listeners.click();
-assert.equal(calls.length, 0, 'invalid input never reaches the server');
-assert.match(el('role-def-msg').textContent, /Role name must/);
-el('rd-name').value = 'boat';
-el('rd-peers').value = 'fiber, boat';
-el('rd-nets').value = '10.20.0.0/16';
-el('rd-restricted').checked = true;
-el('rd-origin').checked = false;
-el('rd-on-stale').value = 'keep';
-reply(preview({member_delta: 0, origin_access_lost: 0, role_pairs_stopped: 0}));
-await el('role-def-save').listeners.click();
-assert.equal(calls.length, 1);
-assert.equal(calls[0].method, 'PUT');
-assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
-assert.deepEqual(calls[0].body, {restricted: true, peers: ['boat', 'fiber'], origin: false,
-  nets: ['10.20.0.0/16'], on_stale: 'keep'});
-assert.equal(calls[0].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(calls[0].headers['X-CSRF-Token'], 'test-csrf');
-assert.equal(el('role-def-preview').hidden, false);
-assert.match(el('role-def-preview').textContent, /Create role boat/);
-assert.match(el('role-def-preview').textContent, /QoS policy changed: yes/);
-assert.equal(el('role-def-save').textContent, 'Save role');
-peerPolicy.revision = 99; // polling must not replace the preview's base revision
-reply({ok: true, dry_run: false, revision: 8, candidate_revision: 8});
-reply({revision: 8, roles: {boat: {restricted: true, peers: ['boat', 'fiber'], origin: false}}});
-await el('role-def-save').listeners.click();
-assert.equal(calls.length, 3);
-assert.equal(calls[1].url, '/api/v1/peer-policy/roles/boat');
-assert.equal(calls[1].body.confirm_token, 'preview-token');
-assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(calls[2].url, '/api/v1/peer-policy/roles', 'definitions re-read after the write');
-assert.equal(el('role-def-modal').hidden, true);
-assert.match(el('role-def-status').textContent, /Role boat saved at policy revision 8/);
-assert.equal(peerPolicy.revision, 8);
-assert.equal(refreshes, 1, 'the Set role dropdown and Role filter follow the device refresh');
-await new Promise(r => setTimeout(r, 0)); // the definitions re-read renders after the dialog closed
-assert.match(el('role-def-rows').innerHTML, /data-role="boat"/);
-assert.match(el('role-def-rows').innerHTML, /fiber/);
-''')
+    _run_policies_node("definition create previews|definition commit")
 
 
 def test_role_definition_editor_edit_discards_a_stale_preview_and_carries_qos_state():
-    _run_role_console_js(r'''
-roleDefinitions = {boat: {restricted: true, peers: ['boat'], qos: {seed_up_bps: 12500000},
-  qos_state: {seeder: {numwant: 4}}}};
-roleDefinitionsRevision = 7;
-roleDefinitionsOk = true;
-openRoleDefinitionEditor('boat');
-assert.equal(el('rd-name').disabled, true);
-assert.equal(el('role-def-modal-title').textContent, 'Edit role boat');
-reply(preview());
-await el('role-def-save').listeners.click();
-assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
-assert.deepEqual(calls[0].body.qos_state, {seeder: {numwant: 4}}, 'a full replacement keeps the tracker overlay');
-assert.match(el('role-def-preview').textContent, /Replace role boat/);
-el('role-def-modal').listeners.input({target: {}});
-assert.equal(el('role-def-preview').hidden, true, 'editing after a preview discards it');
-assert.equal(el('role-def-save').textContent, 'Preview change');
-assert.match(el('role-def-msg').textContent, /Preview again/);
-reply({code: 'revision_conflict', revision: 9}, 409);
-await el('role-def-save').listeners.click();
-assert.equal(calls.length, 2, 'a second click previews again rather than committing');
-assert.match(el('role-def-msg').textContent, /Peer policy changed/);
-reply({code: 'role_isolated', role: 'boat'}, 409);
-await el('role-def-save').listeners.click();
-assert.match(el('role-def-msg').textContent, /permit itself/);
-''')
+    _run_policies_node("existing editor holds|editing after preview")
 
 
 def test_role_definition_delete_and_import_preview_then_confirm():
-    _run_role_console_js(r'''
-reply(preview({role_pairs_stopped: 1}));
-replies.push({status: 204, body: null, headers: {ETag: '"iris-peer-policy-9"'}});
-reply({revision: 9, roles: {}});
-await deleteRoleDefinition('boat');
-assert.equal(calls[0].method, 'DELETE');
-assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
-assert.match(confirmPrompts[0], /Delete role boat/);
-assert.match(confirmPrompts[0], /Role pairings stopped: 1/);
-assert.equal(calls[1].url, '/api/v1/peer-policy/roles/boat');
-assert.equal(calls[1].body.confirm_token, 'preview-token');
-assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(peerPolicy.revision, 9, 'a 204 carries the revision only in its ETag');
-assert.match(el('role-def-status').textContent, /Role boat deleted at policy revision 9/);
-calls.length = 0; confirmPrompts.length = 0;
-// A declined confirmation commits nothing.
-confirmAnswers.push(false);
-reply(preview({roles: 2}));
-await importRoleDefinitions('role\nboat\nfiber\n', 'roles.csv');
-assert.equal(calls.length, 1);
-assert.equal(calls[0].url, '/api/v1/peer-policy/roles/import-csv?dry_run=1');
-assert.deepEqual(calls[0].body, {csv: 'role\nboat\nfiber\n'});
-assert.match(confirmPrompts[0], /Replace every role definition with the 2 role\(s\) in roles\.csv/);
-assert.match(confirmPrompts[0], /Roles missing from the file are removed/);
-assert.match(el('role-def-status').textContent, /cancelled; nothing changed/);
-calls.length = 0;
-reply(preview({roles: 2}));
-reply({ok: true, dry_run: false, revision: 10, candidate_revision: 10, roles: 2});
-reply({revision: 10, roles: {boat: {peers: ['boat']}, fiber: {peers: ['fiber']}}});
-await importRoleDefinitions('role\nboat\nfiber\n', 'roles.csv');
-assert.equal(calls[1].url, '/api/v1/peer-policy/roles/import-csv');
-assert.equal(calls[1].body.confirm_token, 'preview-token');
-assert.match(el('role-def-status').textContent, /Imported 2 role definition\(s\) from roles\.csv at policy revision 10/);
-calls.length = 0;
-reply({code: 'invalid_roles_csv', detail: 'unknown roles CSV field: bogus'}, 422);
-await importRoleDefinitions('role,bogus\nx,1\n', 'bad.csv');
-assert.equal(calls.length, 1, 'a refused preview never commits');
-assert.match(el('role-def-status').textContent, /Import refused: unknown roles CSV field: bogus/);
-reply({code: 'role_in_use', roles: ['boat']}, 409);
-await importRoleDefinitions('role\nfiber\n', 'drop.csv');
-assert.match(el('role-def-status').textContent, /declared roles missing from the file: boat/);
-await el('role-def-export').listeners.click();
-assert.deepEqual(calls[calls.length - 1], {url: '/api/v1/peer-policy/roles/export-csv', download: 'roles.csv'});
-''')
+    _run_policies_node("delete |CSV |role exports")
 
 
 def test_role_definition_controls_follow_the_capability_banner():
-    _run_role_console_js(r'''
-peerPolicy.roles_supported = false;
-renderPeerPolicyPanel();
-for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.equal(el(id).disabled, true, id);
-await el('role-def-new').listeners.click();
-assert.equal(calls.length, 0);
-assert.match(el('role-def-status').textContent, /cannot confirm.*role support/i);
-await importRoleDefinitions('role\nboat\n', 'roles.csv');
-await deleteRoleDefinition('boat');
-assert.equal(calls.length, 0, 'no preview while the banner shows');
-peerPolicy.roles_supported = true;
-renderPeerPolicyPanel();
-for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.equal(el(id).disabled, false, id);
-''')
+    _run_policies_node("capability, degraded policy")
 
 
-def test_role_bulk_action_uses_one_aggregate_preview_and_commit():
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 0, 'untouched picker must be a no-op');
-el('role-selected').value = 'boat';
-reply(preview());
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 1);
-assert.equal(calls[0].url, '/api/v1/devices/bulk-role?dry_run=1');
-assert.deepEqual(calls[0].body, {device_ids: selection, role: 'boat'});
-assert.equal(calls[0].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(calls[0].headers['X-CSRF-Token'], 'test-csrf');
-assert.equal(bulkBusy, true, 'retain selection lock while the operator reviews');
-assert.match(el('role-preview').textContent, /origin/i);
-assert.match(el('role-preview').textContent, /QoS policy changed: yes/);
-peerPolicy.revision = 99; // polling must not replace the preview's base revision
-reply({ok: true, applied: 2, failed: {}, revision: 8, role_drift: {count: 0}});
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 2);
-assert.equal(calls[1].url, '/api/v1/devices/bulk-role');
-assert.deepEqual(calls[1].body, {device_ids: selection, role: 'boat', confirm_token: 'preview-token'});
-assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
-assert.equal(bulkBusy, false);
-assert.match(devStatus.textContent, /2\/2/);
-assert.equal(el('role-modal').hidden, true);
-assert.ok(refreshes);
-''')
-
-
-@pytest.mark.parametrize('status,code', [
-    (412, 'precondition_failed'), (428, 'confirmation_required'),
-    (409, 'operation_backlog_full'), (503, 'policy_unavailable')])
-def test_role_bulk_commit_error_discards_preview_and_never_retries(status, code):
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-el('role-selected').value = '__none';
-reply(preview());
-await el('apply-role-selected').listeners.click();
-assert.equal(calls[0].body.role, null);
-reply({error: CODE, unacknowledged: 256, capacity: 256}, STATUS);
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 2);
-assert.equal(bulkBusy, false);
-assert.equal(el('apply-role-selected').textContent, 'Preview change');
-assert.ok(el('role-modal-msg').textContent.length > 10);
-assert.equal(el('role-modal').hidden, false);
-'''.replace('CODE', repr(code)).replace('STATUS', str(status)))
-
-
-def test_role_bulk_cancellation_partial_and_network_outcomes():
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-reply(preview({applied: 1, failed: {'off-page': 'role_shadowed_by_assignment'}}));
-await el('apply-role-selected').listeners.click();
-assert.match(el('role-preview').textContent, /off-page/);
-closeModal('role-modal');
-assert.equal(bulkBusy, false);
-assert.equal(calls.length, 1, 'cancel must never commit');
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-reply(preview());
-await el('apply-role-selected').listeners.click();
-reply({error: 'fleet_write_failed', partial: true, applied: 1,
-  failed: {'off-page': 'write_failed'}, role_drift: {count: 1}}, 503);
-await el('apply-role-selected').listeners.click();
-assert.match(devStatus.textContent, /1\/2/);
-assert.match(devStatus.textContent, /off-page/);
-assert.match(devStatus.textContent, /drift.*1|1.*drift/i);
-reply(preview());
-await el('apply-role-selected').listeners.click();
-replies.push(new Error('offline'));
-await el('apply-role-selected').listeners.click();
-assert.match(el('role-modal-msg').textContent, /may have been saved/);
-assert.equal(bulkBusy, false);
-''')
-
-
-def test_role_bulk_pending_cancel_and_changed_choice_invalidate_preview():
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-let resolvePreview;
-replies.push(() => new Promise(resolve => {resolvePreview = resolve;}));
-const pending = el('apply-role-selected').listeners.click();
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 1, 'double click must not send a second preview');
-closeModal('role-modal');
-assert.equal(bulkBusy, true, 'retain lock until cancelled preview returns');
-resolvePreview({ok: true, status: 200, json: async () => preview()});
-await pending;
-assert.equal(bulkBusy, false);
-assert.equal(el('role-preview').hidden, true);
-assert.equal(el('role-modal').hidden, true);
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-reply(preview({requires_confirmation: false, confirm_token: null, qos_changed: false}));
-await el('apply-role-selected').listeners.click();
-assert.match(el('role-preview').textContent, /QoS policy changed: no/);
-el('role-selected').value = '__none';
-el('role-selected').listeners.change();
-assert.equal(bulkBusy, false);
-assert.equal(el('apply-role-selected').textContent, 'Preview change');
-reply(preview());
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.at(-1).url, '/api/v1/devices/bulk-role?dry_run=1');
-assert.equal(calls.at(-1).body.role, null);
-''')
-
-
-def test_role_bulk_all_failed_preview_cannot_commit_and_labels_the_refusal():
-    _run_role_console_js(r'''
-await el('set-role-selected').listeners.click();
-el('role-selected').value = 'boat';
-reply({ok: false, applied: 0, failed: {'off-page': 'role_shadowed_by_assignment'}});
-await el('apply-role-selected').listeners.click();
-assert.equal(calls.length, 1);
-assert.equal(bulkBusy, false);
-assert.equal(el('apply-role-selected').textContent, 'Preview change');
-assert.match(el('role-modal-msg').textContent, /explicit ACL assignment shadows the role/);
-assert.equal(el('role-preview').hidden, true);
-''')
+def test_role_actions_execute_captured_targets_and_checked_response_regressions():
+    """Use the shipped controller, not a second implementation of its behavior."""
+    import subprocess
+    from pathlib import Path
+    tests = Path(gui_server.WEBROOT).parent / "console-ui/tests/role-actions.test.mjs"
+    result = subprocess.run(["node", "--test", str(tests)], text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_peer_policy_panel_distinguishes_unknown_preflight_from_zero():
-    _run_role_console_js(r'''
-peerPolicy = {roles_supported: true, roles_present: true,
-  enforcement: {stale: true, mutual_origin: {mode: 'preflight'}}};
-for (const count of [null, undefined, false, '0', -1, NaN]) {
-  peerPolicy.enforcement.mutual_origin.newly_denied_device_count = count;
-  renderPeerPolicyPanel();
-  const text = el('policy-mutual-origin').textContent;
-  assert.match(text, /preflight count unavailable/i);
-  assert.doesNotMatch(text, /newly denied devices/);
-  assert.match(text, /restriction is not active/);
-  assert.match(text, /Tracker status is stale/);
-}
-peerPolicy.enforcement.mutual_origin.newly_denied_device_count = 0;
-renderPeerPolicyPanel();
-assert.match(el('policy-mutual-origin').textContent, /0 newly denied devices/);
-delete peerPolicy.enforcement.mutual_origin;
-renderPeerPolicyPanel();
-assert.match(el('policy-mutual-origin').textContent, /status unavailable/);
-''')
+    _run_policies_node("preflight diagnostics")
 
 
 def test_peer_policy_panel_count_only_and_capability_banner_behavior():
-    _run_role_console_js(r'''
-peerPolicy = {revision: 7, roles_supported: true, roles_present: true,
-  roles: {defined: 1, restricted: 1, members: {'boat<script>': 2}, nets: ['192.0.2.4']},
-  role_drift: {count: 3, device_ids: ['192.0.2.5']}, outbox: {unacknowledged: 9, capacity: 256},
-  origin_qos: {state: 'enforced', target_download_count: 4, applied_download_count: 4,
-    last_reconciled_at: 1000, addresses: ['192.0.2.6']},
-  enforcement: {mutual_origin: {mode: 'preflight', newly_denied_device_count: 2}}};
-renderPeerPolicyPanel();
-let rendered = [...elements.values()].map(e => e.textContent + e.innerHTML).join(' ');
-assert.match(rendered, /9\/256/);
-assert.match(rendered, /boat&lt;script>/);
-assert.doesNotMatch(rendered, /192\.0\.2\./);
-assert.match(rendered, /preflight/i);
-assert.equal(el('role-capability-banner').hidden, true);
-peerPolicy.roles_supported = false;
-renderPeerPolicyPanel();
-assert.equal(el('role-capability-banner').hidden, false);
-assert.match(el('role-capability-banner').textContent, /cannot confirm.*role support/i);
-assert.equal(el('set-role-selected').disabled, true);
-assert.equal(el('apply-role-selected').disabled, true);
-delete peerPolicy.roles_supported; // genuinely older response, no capability flag
-delete peerPolicy.roles_present;
-renderPeerPolicyPanel();
-let roleWarning = el('role-capability-banner').textContent.toLowerCase();
-assert.match(roleWarning, /cannot confirm.*role support/i);
-let normalizedRoleWarning = roleWarning.replace(/\s+/g, ' ');
-assert.match(normalizedRoleWarning,
-  /independent (?:peer )?quarantine.{0,100}(?:not enforced|ignored|not sufficient|insufficient).{0,100}(?:older|predating) servers?.{0,180}(?:containment|compatibility).{0,100}downgrad/);
-assert.doesNotMatch(roleWarning, /pre-d/);
-assert.doesNotMatch(roleWarning,
-  /quarantine restricted devices before (?:a|any)? ?downgrade/);
-peerPolicy.roles_supported = true;
-peerPolicy.degraded = true;
-renderPeerPolicyPanel();
-assert.match(el('role-capability-banner').textContent, /degraded/i);
-peerPolicy.fail_closed = true;
-renderPeerPolicyPanel();
-assert.match(el('role-capability-banner').textContent, /fail.closed/i);
-peerPolicyReadOk = false;
-renderPeerPolicyPanel();
-assert.match(el('role-capability-banner').textContent, /unavailable/i);
-await el('set-role-selected').listeners.click();
-assert.equal(calls.length, 0);
-''')
+    _run_policies_node("diagnostics keep|capability warnings")
 
 
 def test_role_policy_startup_signal_identifies_lost_state_without_addresses(tmp_path, capsys):
@@ -593,167 +243,120 @@ def test_login_page_does_not_disclose_first_run_credentials():
 
 def test_no_orphaned_control_ids():
     """Owner constraint for the toolbar rework: every element id referenced
-    from app.js must exist in index.html. A relocated-but-unwired control
+    from app.js must exist in HTML or a mounted component. An unwired control
     would silently do nothing; a deleted element with a live binding would
     throw at load and kill every later binding."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
+    assert 'id="iris-device-details-root"' in html
+    assert 'mountDeviceDetails();' in _react_shell("main.jsx")
+    html += _react_shell("device-details.jsx")
+    assert 'id="iris-activity-root"' in html
+    assert 'mountActivity();' in _react_shell("main.jsx")
+    html += _react_shell("activity.jsx")
+    assert 'id="iris-inventory-root"' in html
+    html += _react_shell("inventory.jsx")
+    assert 'id="iris-certificates-root"' in html
+    assert 'mountCertificates();' in _react_shell("main.jsx")
+    html += _react_shell("certificates.jsx")
     ids = set(re.findall(r"getElementById\('([^']+)'\)", js))
     ids |= set(re.findall(r"querySelector(?:All)?\('#([A-Za-z0-9_-]+)", js))
-    assert len(ids) > 30, "id extraction matched too little — patterns drifted"
+    # The adapter shrinks as views move to React. Pin actual cross-owner
+    # references rather than demanding an arbitrary number of legacy IDs.
+    assert {'view-swarm', 'view-devices', 'settings-pane-certificates'} <= ids
     missing = sorted(i for i in ids if ('id="%s"' % i) not in html)
     assert not missing, \
         "app.js references ids missing from index.html: %s" % missing
 
 
 def test_csv_download_buttons_and_multiselect_onboard_wired():
-    """Source guards for two console fixes:
-    (1) Export/Example CSV must be plain <button>s, not <a download> anchors —
-        Chrome blocks download-attribute navigations over connections with
-        certificate errors (self-signed labs), which made the old anchors dead.
-    (2) The devices table supports selecting multiple rows and bulk-onboarding
-        them via a shared 'Onboard selected' button."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert '<button class="menu-item menu-close" id="export-csv">' in html
-    assert '<button class="menu-item menu-close" id="example-csv">' in html
-    assert 'id="export-csv" href' not in html
-    assert 'id="example-csv" href' not in html
-    assert 'download' not in html.split('id="example-csv"')[1].split('>')[0]
-    assert 'id="onboard-selected"' in html
-    assert 'id="mark-all"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "function downloadCsv(" in js
-    assert "'export-csv'" in js and "'example-csv'" in js
-    assert "#dev-rows .cred" in js
-    assert "/credential'" in js or '/credential"' in js
-    assert "onboard-selected" in js
-    assert "#dev-rows tr[data-id]" in js
-    assert "function toggleDeviceRow(row)" in js
-    assert "getElementById('dev-rows').addEventListener('keydown'" in js
+    component, js = _react_shell("inventory.jsx"), _webroot("app.js")
+    csv = component.split('id="csv-menu"', 1)[1].split('</div>', 1)[0]
+    for action in ('import-csv', 'export-csv', 'example-csv'):
+        assert "['" + action + "'," in csv
+        assert "onInventoryAction('" + action + "'," in js
+    assert '<button key={id} type="button"' in csv and 'href=' not in csv and 'download=' not in csv
+    assert "bulkButton('onboard-selected'" in component and 'id="mark-all"' in component
+    assert 'function downloadCsv(' in js
+    assert "controller.edit(id, 'credential', event.target.value)" in component
+    assert 'onKeyDown={event =>' in component and 'controller.toggle(id)' in component
+    assert 'post: jpost' in js
 
 
 def test_devices_toolbar_regrouped():
-    """Option-A layout (2026-08-12 spec S1-S4) as revised by the Magnetic
-    action-layout pass (2026-09-01): bulk actions live in a selection bar that
-    is hidden in static HTML; the three CSV controls live inside the CSV menu;
-    the telemetry checkboxes live inside the onboard MODAL (Magnetic Dropdown
-    forbids a menu whose items need "another button to submit or apply", and
-    names modals as the bulk bar's own escape hatch); Delete is a destructive
-    item in the overflow dropdown (Dropdown > Types); the per-row action-links
-    column is gone."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert '<div class="selbar" id="sel-bar" hidden>' in html
-    csv_menu = html.split('id="csv-menu"')[1].split('</div>')[0]
-    for cid in ('id="import-csv"', 'id="export-csv"', 'id="example-csv"'):
-        assert cid in csv_menu, cid + " must live inside the CSV menu"
-    modal = html.split('id="onboard-modal"')[1].split('id="undeploy-modal"')[0]
-    for cid in ('id="onboard-telemetry"', 'id="onboard-telemetry-stream"',
-                'id="onboard-confirm"'):
-        assert cid in modal, cid + " must live inside the onboard modal"
-    # the onboard/undeploy options are not reachable from a dropdown any more
+    html, component, js = _webroot("index.html"), _react_shell("inventory.jsx"), _webroot("app.js")
+    assert 'className="selbar" id="sel-bar" hidden={!state.selected.size}' in component
+    modal = _react_shell('inventory-actions.jsx')
+    for cid in ('onboard-telemetry', 'onboard-telemetry-stream'):
+        assert "'%s'" % cid in modal
+    assert "id={action + '-confirm'}" in modal
     assert 'id="onboard-pop"' not in html and 'id="undeploy-pop"' not in html
-    assert 'class="menu-item danger menu-close" type="button" id="delete-selected"' in html
-    devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
-    # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
-    # only real header cells.
-    assert devices_thead.count('<th>') == 12, \
-        "Role and Instructions remain; row selection needs no checkbox column"
-    assert devices_thead.count('<th>Role</th>') == 1
-    assert devices_thead.count('<th>Instructions</th>') == 1
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "function wireMenu(" in js and "function updateSelBar(" in js
-    assert "#dev-rows .onboard" not in js and "#dev-rows .adopt" not in js \
-        and "#dev-rows .del'" not in js, "per-row action links must be gone"
-    assert "function startOnboard(" not in js, "dead single-row path removed"
-    assert "onclick=" not in js and "onclick=" not in html
+    assert "bulkButton('delete-selected', 'Delete…', 'menu-item danger menu-close')" in component
+    headers = component.split("{['Device',", 1)[1].split('].map(label', 1)[0]
+    assert len(re.findall(r"'[^']+'", headers)) == 10  # plus Device and Status
+    assert "'Role'" in headers and "'Instructions'" in headers and '<th>Status' in component
+    assert 'function wireMenu(' not in js and 'function updateSelBar(' in js
+    for old in ('#dev-rows .onboard', '#dev-rows .adopt', "#dev-rows .del'", 'function startOnboard('):
+        assert old not in js
+    assert 'onclick=' not in js + html + component
 
 
 def test_peer_policy_console_controls_are_typed_and_safe():
-    """Device inventory gets one CSRF-protected quarantine/release action; it
-    exposes intent separately from count-only tracker enforcement, never a
-    generic ACL/seeder editor or IP-derived legacy identity."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert '<th>Peer policy</th>' in html
-    assert 'id="legacy-peer-warning" hidden' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    # refreshDevices owns the policy snapshot, so an older peer-policy request
-    # cannot overwrite the generation that rendered the device table.
+    html, js = _webroot("index.html"), _webroot("app.js")
+    component, controller, model = (_react_shell(name) for name in ('inventory.jsx', 'inventory-controller.mjs', 'inventory-model.mjs'))
+    assert "'Peer policy'" in component
+    assert 'id="legacy-peer-warning" hidden' in _react_shell('swarm-view.jsx')
     assert "function refreshPeerPolicy()" not in js
-    assert "fetch('/api/v1/peer-policy', { signal: signal })" in js
-    assert "'/api/v1/peer-policy/quarantine/' + encodeURIComponent(id)" in js
-    assert "method: 'PUT', headers: csrfHdr" in js
-    assert "if_revision: peerPolicy.revision" in js
-    assert "r.status === 409" in js and "operation_backlog_full" in js
-    assert "Existing device-to-device transfers may continue" in js
-    assert "Device software is unchanged" in js
-    assert "Quarantined intent" in js and "desired_ip_count" in js and "conflict_types" in js
-    assert "participant_class === 'legacy_unattributed'" in js
-    assert "p.tracker" in js and "device_ip" not in js.split("function refreshSwarm()")[1].split("// ---- Settings ----")[0]
-    assert "otlp_export.signals" in js and "dropped_total" in js
-    policy_area = js.split("function setQuarantine(")[1].split("async function refreshDevices")[0]
-    assert "method: 'DELETE'" not in policy_area and "acl" not in policy_area.lower()
+    assert "'/api/v1/peer-policy'" in controller
+    assert "'/api/v1/peer-policy/quarantine/' + encodeURIComponent(id)" in controller
+    assert "method: 'PUT', headers: this.services.headers" in controller
+    assert 'if_revision: policy.revision' in controller
+    assert 'Existing device-to-device transfers may continue' in controller and 'Device software is unchanged' in controller
+    assert 'Quarantined intent' in component and 'desired_ip_count' in model and 'conflict_types' in model
+    swarm = _react_shell('swarm-view-model.mjs')
+    assert "tracker.principal_type === 'legacy'" in swarm
+    assert 'const tracker = peer.tracker' in swarm and 'device_ip' not in swarm.split('export function')[1]
+    assert 'otlp_export.signals' in js and 'dropped_total' in js
+    assert "method: 'DELETE'" not in controller and 'acl' not in controller.lower()
 
 
 def test_import_from_disk_panel_wired():
     """Source guards for importing images already on disk: an Images-view panel
     fed by GET /api/images/importable, a per-row import posting the candidate's
     exact path with the CSRF header, and reuse of the existing publish poll."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert 'id="import-panel"' in html
-    assert 'id="import-rows"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "'/api/v1/images/importable'" in js or '"/api/v1/images/importable"' in js
-    assert "/api/v1/images/import'" in js or '/api/v1/images/import"' in js
-    assert "#import-rows .do-import" in js
-    # the exact discovered path is echoed back — the server authorizes on
-    # candidate identity, so the client must not reconstruct or edit it
-    assert "data-path" in js
-    # the import POST carries the CSRF header, like every other mutating call
-    post_call = js.split("/api/v1/images/import'")[1][:400]
-    assert "csrfHdr(" in post_call
-    # publish progress reuses the upload path's poller rather than a second one
-    assert "pollJob((await res.json()).job_id)" in js
-    # the panel stays hidden only when there is nothing to show at all
-    assert "cands.length === 0 && skipped.length === 0" in js
-    # the distinguishing path is rendered — two roots can hold one basename
-    assert "esc(c.path)" in js
-    # deleting a catalogued image makes its name importable again
-    assert "refreshImages(); refreshImportable();" in js
+    component = _react_shell("images.jsx")
+    controller = _react_shell("images-controller.mjs")
+    js = _webroot("app.js")
+    assert 'id="import-panel"' in component and 'id="import-rows"' in component
+    assert 'data-path={item.path}' in component
+    assert 'onClick={() => controller.importFile(item.path)}' in component
+    assert '>{item.path}</td>' in component
+    assert 'hidden={!state.importAvailable || (!state.importable.length && !state.skipped.length)}' in component
+    assert "this.services.post('/api/v1/images/import', {path})" in controller
+    assert "this.pollJob(body.job_id" in controller
+    assert 'post: jpost' in js  # shared authenticated/CSRF transport
+    shared_post = js.split('async function jpost(url, body)', 1)[1].split('\n  }', 1)[0]
+    assert "headers: csrfHdr({ 'Content-Type': 'application/json' })" in shared_post
+    assert 'else await this.refreshLists();' in controller
+    assert "Promise.all([this.refresh(), this.refresh('importable')])" in controller
 
 
 def test_publish_jobs_surface_automatic_hash_verification():
     """Both disk imports and uploads show the new verifying phase and verdict."""
-    js = _webroot("app.js")
-    result = js.split("function publishedJobText(job) {", 1)[1].split(
-        "\n  function pollJob", 1)[0]
+    result = _react_shell("image-model.mjs")
     assert "job.verification" in result
     assert "verified against Cisco Bulk Hash" in result
     assert "Cisco hash mismatch — quarantined" in result
     assert "not found in Cisco Bulk Hash feed" in result
     assert "Cisco hash verification incomplete" in result
-    disk_poll = js.split("function pollJob(jobId) {", 1)[1].split(
-        "\n  // Images already on disk", 1)[0]
-    assert "j.state === 'verifying'" in disk_poll
-    assert "checking Cisco Bulk Hash" in disk_poll
-    upload_poll = js.split("function pollUploadJob(jobId, ui) {", 1)[1].split(
-        "\n  function upload(file)", 1)[0]
-    assert "j.state === 'verifying'" in upload_poll
-    assert "ui.verifying()" in upload_poll
-    assert "ui.done(publishedJobText(j))" in upload_poll
+    controller = _react_shell("images-controller.mjs")
+    assert "this.pollJob(job.job_id" in controller  # uploads
+    assert "this.pollJob(body.job_id" in controller  # disk imports
+    assert "job.state === 'verifying'" in controller
+    assert "checking Cisco Bulk Hash" in controller
+    assert "ui.done(publishedJobText(job))" in controller
 
 
 def test_bulk_row_actions_wired():
@@ -764,31 +367,33 @@ def test_bulk_row_actions_wired():
     delete, so there is exactly one confirm(delWarning(...)) call site."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    for el in ('id="adopt-selected"', 'id="delete-selected"',
-               'id="cred-selected"', 'id="apply-cred-selected"'):
-        assert el in html, el
+    for action in ('adopt-selected', 'delete-selected'):
+        assert "bulkButton('" + action + "'" in _react_shell('inventory.jsx')
+    assert 'id="cred-selected"' in _react_shell('assignments.jsx')
+    assert "'apply-cred-selected'" in _react_shell('assignments.jsx')
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "'adopt-selected'" in js and "'delete-selected'" in js
     assert "'apply-cred-selected'" in js
-    assert "/adopt'" in js and "acknowledge_adopt: true" in js
+    controller = _react_shell('inventory-actions-controller.mjs')
+    assert "/adopt'" in controller and "acknowledge_adopt: true" in controller
     # the per-row credential dropdown still uses the single-device route...
-    assert "'/credential'" in js or "+ '/credential'" in js
+    assert "controller.edit(id, 'credential', event.target.value)" in _react_shell('inventory.jsx')
     # ...but the bulk credential action (issue #125) posts ONE request
     # carrying every selected id, not one per-device request each --
     # see bulkApply and gui_server.py's /api/devices/bulk-credential.
-    assert "'/api/v1/devices/bulk-credential'" in js
-    assert "function bulkApply(" in js
+    assert "'/api/v1/devices/bulk-credential'" in _react_shell('assignments-controller.mjs')
+    assert "bulkCredentialResult(response" in _react_shell('assignments-controller.mjs')
     # the single delete path confirms first
-    assert "function delWarning(" in js
-    assert js.count("confirm(delWarning(") == 1
+    assert controller.count("confirm(actionConfirmation(action, ids))") == 1
     # the warning must say deletion is not an undeploy — the dangerous part
-    assert "does NOT " in js and "undeploy" in js
+    assert "does NOT undeploy" in _react_shell('inventory-actions-model.mjs')
     # creating or deleting a profile re-renders the device rows, so a device
     # imported before any profile existed becomes assignable immediately
-    assert js.count("renderCreds(); refreshDevices();") == 2
-    assert "function syncCredSelected(" in js
+    assert "await this.refreshCredentials(); await this.refreshInventory();" in _react_shell('device-forms-controller.mjs')
+    assert "inventory.update(state);" in js
+    assert "assignments.prerequisites(inventory.snapshot())" in js
 
 
 def test_all_selected_actions_share_one_busy_lock():
@@ -814,43 +419,44 @@ def test_all_selected_actions_share_one_busy_lock():
     for el in ("onboard-selected", "undeploy-selected", "set-cred-selected"):
         assert el in openers, "%s is not disabled while a bulk action runs" % el
     assert "BULK_BTNS.concat(BULK_OPENERS).forEach" in js
-    # Every action claims the lock rather than reading another button's state.
-    # Counted against BULK_BTNS itself rather than a fixed number, so a new bulk
-    # action cannot be added without also claiming the lock -- quarantine and
-    # release are the two exceptions, guarded inside bulkQuarantine instead.
-    claimers = [a for a in actions
-                if a not in ("quarantine-selected", "release-selected")]
-    assert js.count("claimSelection()") == len(claimers), (
-        "%d actions but %d claim the lock"
-        % (len(claimers), js.count("claimSelection()")))
+    # Controllers claim the common adapter lock, never another button's state.
+    assert "claimSelection()" not in js
+    for name in ('assignments', 'inventory-actions', 'schedules', 'role-actions'):
+        owner = _react_shell(name + '-controller.mjs')
+        assert "this.services.claimBulk(" in owner and "this.services.releaseBulk()" in owner
+    assert "roleActions.quarantine(selectedIds(), true)" in js
+    assert "roleActions.quarantine(selectedIds(), false)" in js
     assert "onBtn.disabled" not in js and "unBtn.disabled" not in js
-    # a declined confirmation must release the lock, not wedge the toolbar
-    assert js.count("setBulkBusy(false); return;") >= 2
+    # Migrated actions all claim the same lock through their controller.
+    controller = _react_shell('inventory-actions-controller.mjs')
+    assert "this.services.claimBulk()" in controller and "this.services.releaseBulk()" in controller
+    assert "inventoryActions.act('delete', selectedIds())" in js
+    assert "inventoryActions.act('adopt', selectedIds())" in js
 
 
 def test_batch_onboard_panel_wired():
     """Source guards for parallel onboarding: bulk-onboard opens a batch panel
     with per-device live status (polled from GET /api/onboard/jobs), a per-row
     log action reusing the SSE log panel, and a cancel-queued control."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
+    html = _react_shell("activity.jsx")
     assert 'id="batch-panel"' in html
     assert 'id="batch-rows"' in html
     assert 'id="batch-summary"' in html
     assert 'id="batch-cancel"' in html
 
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
+    js = _react_shell("activity-controller.mjs")
     assert "'/api/v1/onboard/jobs'" in js or '"/api/v1/onboard/jobs"' in js
     assert "/api/v1/onboard/cancel-queued" in js
-    assert "batch-rows" in js and "batch-cancel" in js
+    assert "controller.cancelQueued()" in html and "controller.openLog(job.id)" in html
     # cancel is SCOPED to this panel's jobs — a bare cancel-all would nuke
     # other sessions' queued batches
-    assert "job_ids: Object.keys(batchJobs)" in js
+    assert "{job_ids: ids}" in js
+    assert "activityRows(this.state).filter(job => job.state === 'queued')" in js
     # durations come from the server clock in the listing, not Date.now()
-    assert "listing.now" in js
+    assert "now: body.now ?? null" in js
+    assert "job.finished_at ?? state.now" in _react_shell("activity-model.mjs")
     # a reload re-attaches to still-running onboards instead of losing them
-    assert "restoreBatch" in js
+    assert "async setVisible(visible)" in js and "return this.refresh()" in js
 
 
 def test_undeploy_and_status_ui_wired():
@@ -860,15 +466,15 @@ def test_undeploy_and_status_ui_wired():
     deployed/staging indicator in the devices table."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
-    assert 'id="undeploy-selected"' in html
+    assert "bulkButton('undeploy-selected'" in _react_shell('inventory.jsx')
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "undeploy-selected" in js
-    assert "startBatch('undeploy')" in js        # button fires the undeploy action
-    assert "confirm(" in js                      # destructive: must confirm
-    assert "j.action" in js                      # batch rows show the action
-    assert "queuePos" in js                      # queued rows show #N in line
+    assert "inventoryActions.open('undeploy', selectedIds())" in js
+    assert "action === 'undeploy' && !await this.services.confirm" in _react_shell('activity-controller.mjs')
+    assert "actionLabel(job.action)" in _react_shell("activity.jsx")
+    assert "queued.indexOf(job) + 1" in _react_shell("activity-model.mjs")
     assert "deployed" in js                      # devices tab staged indicator
     # job-aware statuses: post-onboard boot gap must not read as "not enrolled"
     assert "waiting for heartbeat" in js
@@ -911,71 +517,43 @@ def test_status_display_map_covers_every_status():
 
 
 def test_monitoring_timeline_wired():
-    """Source guards for the Monitoring time-travel timeline:
-    (1) index.html has the timeline container + range-preset chips.
-    (2) app.js talks to /api/audit/histogram, builds bars from it, and the
-        audit code has no inline on*= handlers (nonce-only CSP in console
-        mode forbids them -- everything must go through addEventListener)."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert 'id="audit-timeline"' in html
-    assert 'id="audit-range-chips"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "/api/v1/audit/histogram" in js
-    assert "addEventListener" in js
-    # No inline event handler attributes anywhere in the audit/timeline code
-    import re
-    assert not re.search(r'\bon[a-z]+\s*=\s*["\']', js)
+    """React owns Monitoring; its narrow bridge shares authenticated polling."""
+    assert 'id="iris-monitoring-root"' in _webroot("index.html")
+    assert "mountMonitoring();" in _react_shell()
+    component = _react_shell("monitoring.jsx")
+    assert '<Timeline kind="audit"' in component
+    assert '<Timeline kind="deploylogs"' in component
+    assert 'id={`${id}-range-chips`}' in component
+    assert "dangerouslySetInnerHTML" not in component
+    js = _webroot("app.js")
+    assert "await monitoringCommand('connect', {fetch: fetch});" in js
+    assert "poll = pollMonitoring;" in js
+    assert "document.getElementById('audit-" not in js
+    assert "document.getElementById('dl-" not in js
 
 
 def test_monitoring_brush_wired():
-    """Source guards for the draggable time brush (#19):
-    (1) index.html carries the two-layer SVG (bars layer re-rendered per fetch,
-        persistent brush overlay layer) plus the clear affordance.
-    (2) app.js drives the brush with Pointer Events registered via
-        addEventListener (nonce CSP forbids inline on*=), refetches the
-        histogram with since_ts/until_ts on selection change, auto-rezooms
-        via pickBucketCount, and clears the selection on Escape."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert 'id="audit-bars"' in html
-    assert 'id="audit-brush"' in html
-    assert 'id="audit-clear-selection"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    for ev in ("'pointerdown'", "'pointermove'", "'pointerup'",
-               "'pointercancel'", "'lostpointercapture'"):
-        assert "addEventListener(" + ev in js, ev
-    assert "setPointerCapture" in js and "releasePointerCapture" in js
-    # selection refetch uses the explicit-window contract + auto-rezoom
-    assert "since_ts=" in js and "until_ts=" in js
-    assert "function pickBucketCount(" in js
-    assert "bucket_seconds" in js
-    # selection lifecycle: commit/clear plumbing + Escape
-    assert "function commitSelection(" in js and "function clearSelection(" in js
-    assert "'Escape'" in js
-    # bars render into their own layer so the brush overlay survives refetches
-    assert "barsG.innerHTML" in js
-    import re
-    assert not re.search(r'\bon[a-z]+\s*=\s*["\']', js)
+    """Shared React brush retains independent bar/selection layers and cancel."""
+    component = _react_shell("monitoring.jsx")
+    for suffix in ("bars", "brush", "clear-selection"):
+        assert 'id={`${id}-%s`}' % suffix in component
+    for handler in ("onPointerDown", "onPointerMove", "onPointerUp",
+                    "onPointerCancel", "onLostPointerCapture", "onKeyDown"):
+        assert handler in component
+    assert "setPointerCapture" in component and "releasePointerCapture" in component
+    assert "'Escape'" in component
+    model = _react_shell("monitoring-model.mjs")
+    assert "histogram.set('since_ts'" in model and "histogram.set('until_ts'" in model
+    assert "bucketCount(state.selection.end - state.selection.start)" in model
+    assert "bucket_seconds" in _react_shell("monitoring-controller.mjs")
 
 
 def test_audit_message_composer_wired():
-    """Source guards for the operator-readable audit table (#19): 4-column
-    layout (Time | Actor | Message | Result), a verb map covering console
-    events plus the legacy broker shapes (mint/refresh/auth_fail carry
-    device_id instead of actor/target/detail), colored category tags and
-    result badges — everything composed through esc()."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert "<th>Time</th><th>Actor</th><th>Message</th><th>Result</th>" in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "function auditVerb(" in js
+    """Audit text is rendered as React text, with all existing event verbs."""
+    component = _react_shell("monitoring.jsx")
+    assert "['Time', 'Actor', 'Message', 'Result']" in component
+    js = _react_shell("monitoring-model.mjs")
+    assert "function auditMessage(" in js
     # verb coverage: console + legacy broker events
     for ev in ("login_fail", "password_change_fail", "revoke_other_sessions",
                "device_csv_import", "device_credential_change",
@@ -984,14 +562,13 @@ def test_audit_message_composer_wired():
                "mint", "refresh_fail", "auth_fail", "revoke"):
         assert ev in js, ev
     # legacy fallbacks: device_id fills actor/target; token rotation detail
-    assert "'device:' + e.device_id" in js
-    assert "e.secret_name" in js and "e.old_id" in js and "e.new_id" in js
-    # badges + category tags come from esc()'d helpers, relative time on hover
-    assert "badge-ok" in js and "badge-fail" in js
-    assert "cat-tag" in js
-    assert "function fmtAgo(" in js
+    assert "`device:${event.device_id}`" in js
+    assert "event.secret_name" in js and "event.old_id" in js and "event.new_id" in js
+    assert "badge-ok" in component and "badge-fail" in component
+    assert "cat-tag" in component
+    assert "function formatAgo(" in js
     # empty non-append result shows the empty state AND resets the pager cursor
-    assert "No events in this range." in js
+    assert "No events in this range." in component
 
     with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
         css = f.read()
@@ -1011,118 +588,48 @@ def test_buttons_have_tactile_states():
 
 
 def test_device_form_has_model_field():
-    """Source guard: the add-device form must expose a model input (used for
-    platform auto-detection; see gui_onboard.resolve_platform) and post it."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    assert 'id="df-model"' in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "df-model" in js
-    assert "model:" in js
+    """The explicit series input bounds install choices and is sent on save."""
+    form = _react_shell('device-forms.jsx')
+    assert 'id="df-model"' in form
+    assert "controller.setDevice('model', event.target.value)" in form
+    assert 'model: form.model.trim()' in _react_shell('device-forms-model.mjs')
 
 
 def test_settings_tls_trust_and_destination_sections_wired():
-    """Source guards for the 2026-08-19 TLS/trust/telemetry-destination spec:
-    the Settings view gains three sections — Certificate (replace/revert the
-    console cert), Trusted CAs (install/remove CA PEMs + public-bundle
-    download with job polling), Telemetry destination (editable OTLP
-    override). Conventions pinned: jpost + csrfHdr on every mutation, one
-    solid .btn per form (the ca-form has none — Add CA is that section's
-    primary), danger links confirm with consequence-naming text, no inline
-    handlers/styles, key material never echoed or left in the DOM."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    # section headings, in the Settings view
-    settings = html.split('id="view-settings"')[1].split("</section>")[0]
-    assert "<h3>Console certificate</h3>" in settings
-    assert "<h3>Trusted certificate authorities</h3>" in settings
-    assert "<h3>Telemetry destination</h3>" in settings
-    # element inventory (the global orphan guard checks the JS side)
-    for el in ('id="cert-status"', 'id="cert-form"', 'id="cert-pem"',
-               'id="cert-key"', 'id="cert-msg"', 'id="cert-revert"',
-               'id="trust-tbl"', 'id="trust-rows"', 'id="trust-form"',
-               'id="trust-pem"', 'id="trust-msg"', 'id="ca-form"',
-               'id="ca-url"', 'id="ca-auto"', 'id="ca-msg"',
-               'id="ca-refresh"', 'id="td-status"', 'id="td-form"',
-               'id="td-endpoint"', 'id="td-enabled"', 'id="td-msg"',
-               'id="td-revert"'):
-        assert el in settings, el
-    # revert affordances start hidden — no flash before the first render
-    assert 'id="cert-revert" hidden' in settings
-    assert 'id="td-revert" hidden' in settings
-    # one solid button per form; auxiliaries are ghost or linkish.
-    # ('class="btn"' does NOT substring-match 'class="btn ghost"'.)
-    cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
-    assert cert_form.count('class="btn"') == 1            # Replace certificate
-    assert 'class="linkish danger-link"' in cert_form     # Use built-in cert
-    trust_form = settings.split('id="trust-form"')[1].split('</form>')[0]
-    assert trust_form.count('class="btn"') == 1           # Add CA
-    ca_form = settings.split('id="ca-form"')[1].split('</form>')[0]
-    assert ca_form.count('class="btn"') == 0              # no second primary
-    assert ca_form.count('class="btn ghost"') == 2        # Save + Download now
-    td_form = settings.split('id="td-form"')[1].split('</form>')[0]
-    assert td_form.count('class="btn"') == 1              # Save
-    assert 'class="linkish danger-link"' in td_form       # Revert to default
-    # trust table columns: subject/expiry/fingerprint/source/count
-    assert ("<th>Subject</th><th>Expires</th><th>SHA-256</th>"
-            "<th>Source</th><th>Certs</th>") in settings
-    # the operator is told the key is write-only and that the bundle URL
-    # gates both download paths
-    assert "never returned by the server" in settings
-    assert "over HTTPS" in settings
-    # CSP: still no inline styles or handlers anywhere in the page
+    """React owns these forms, their state and guarded writes; the router
+    only selects a pane and supplies authenticated services. Runtime tests
+    exercise labels, confirmations, bounded requests and uncertain replies."""
+    html, js = _webroot("index.html"), _webroot("app.js")
+    component = _react_shell("settings.jsx")
+    model = _react_shell("settings-model.mjs")
+    controller = _react_shell("settings-controller.mjs")
+    for name in ("general", "tls", "audit"):
+        assert 'id="iris-settings-%s"' % name in html
+    assert "mountSettings();" in _react_shell()
+    assert "settings.connect({" in js and "fetch: fetch, headers: csrfHdr" in js
+    for endpoint in ("gui-cert", "trust", "ca-trust", "ca-trust/refresh",
+                     "telemetry-destination", "audit-export", "password",
+                     "sessions/revoke-others", "peer-tls"):
+        assert "'" + endpoint + "'" in model
+    assert "this.services.headers(" in controller
+    assert "checkedSettingsResult(request, response, body)" in controller
+    assert "this.clearSecrets(group)" in controller
+    assert "this.state.unknown[group]" in controller
+    for old in ("mountSettingsForm(", "wireTelemetryForm(", "pollCaRefresh(",
+                "getElementById('cert-form')", "getElementById('pw-form')"):
+        assert old not in js
+    assert "never returned by the server" in component
+    assert "no longer trust it" in model
+    assert "certificate and key will be removed" in model
+    assert "uses deployment settings from the next sample" in model
+    assert "createPortal(telemetry," in component
     assert " style=" not in html and "onclick=" not in html
-
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    # endpoint literals — POST via jpost (csrfHdr inside), DELETE via fetch
-    assert js.count("'/api/v1/settings/gui-cert'") == 2       # POST + DELETE
-    assert "'/api/v1/settings/trust'" in js                   # POST add
-    assert "'/api/v1/settings/trust/' + encodeURIComponent(" in js   # DELETE row
-    assert "'/api/v1/settings/ca-trust'" in js                # POST config
-    assert "'/api/v1/settings/ca-trust/refresh'" in js        # POST job start
-    assert "'/api/v1/settings/ca-trust/refresh/' + encodeURIComponent(" in js
-    assert js.count("'/api/v1/settings/telemetry-destination'") == 2
-    # Settings mutations share error handling and keep CSRF on both methods.
-    helper = js.split("async function settingsWrite(", 1)[1].split("// Drag-and-drop", 1)[0]
-    assert "fetch(url, { method: 'DELETE', headers: csrfHdr() })" in helper
-    assert "await jpost(url, body)" in helper
-    for endpoint in ("gui-cert", "telemetry-destination"):
-        assert "settingsWrite('/api/v1/settings/" + endpoint + "', null, msg, 'DELETE')" in js
-    assert "settingsWrite('/api/v1/settings/trust/' + encodeURIComponent(name), null, msg, 'DELETE')" in js
-    # per-row remove is a danger link rendered into the trust table
-    assert "#trust-rows .trust-del" in js
-    assert "danger-link trust-del" in js
-    # destructive paths confirm with consequence-naming messages
-    assert "Deletes the uploaded certificate and key" in js   # cert revert
-    assert "no longer trust certificates from this CA" in js  # trust remove
-    assert "uses the deployment settings from the next sample" in js # dest revert
-    # download-now polls the job like the image publish poller
-    assert "function pollCaRefresh(" in js
-    assert "j.state === 'failed'" in js
-    # settings render consumes the new GET blocks; the old read-only
-    # Observability row is gone (superseded by the editable block)
-    assert "s.gui_cert" in js and "s.trust" in js and "s.ca_trust" in js
-    assert "s.telemetry_destination" in js
-    assert "effective_endpoint" in js and "fingerprint_sha256" in js
-    assert "['Observability'" not in js
-    # key hygiene: submit posts the PEMs, success wipes the textareas
-    assert "cert_pem" in js and "key_pem" in js
-    assert "getElementById('cert-form').reset()" in js
-    # all 8 new audit events have human verbs (keys quoted — hyphens)
-    verbs = js.split("var AUDIT_VERBS = {")[1].split("};")[0]
-    for ev in ("gui-cert-replace", "gui-cert-revert", "trust-add",
-               "trust-remove", "ca-trust-config", "ca-trust-refresh",
-               "telemetry-destination-set", "telemetry-destination-clear"):
-        assert "'%s'" % ev in verbs, ev
-    # no inline on*= crept into the new JS-built markup
-    assert not re.search(r'\bon[a-z]+\s*=\s*["\']', js)
-
-    with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
-        css = f.read()
-    assert ".inline-form textarea" in css
+    verbs = _react_shell("monitoring-model.mjs").split("const verbs = {")[1].split("};")[0]
+    for event in ("gui-cert-replace", "gui-cert-revert", "trust-add", "trust-remove",
+                  "ca-trust-config", "ca-trust-refresh", "telemetry-destination-set",
+                  "telemetry-destination-clear"):
+        assert "'%s'" % event in verbs
+    assert ".inline-form textarea" in _webroot("styles.css")
 
 
 def _react_shell(name="main.jsx"):
@@ -1171,23 +678,23 @@ def test_device_packages_have_a_persistent_settings_view():
     """Package readiness remains inspectable after first-run setup closes."""
     html = _webroot("index.html")
     js = _webroot("app.js")
-    assert 'href="#settings/packages"' in html
+    component = _react_shell('setup-packages.jsx')
+    controller = _react_shell('setup-packages-controller.mjs')
+    model = _react_shell('setup-packages-model.mjs')
+    assert 'href="#settings/packages"' in component
     assert "['packages', 'Device packages'," in _react_shell("settings-navigation.jsx")
     assert 'id="settings-pane-packages" hidden' in html
-    assert 'id="device-packages-table"' in html
-    assert 'id="device-packages-recheck"' in html
+    assert 'id="iris-device-packages"' in html
+    assert 'prefix="device-packages"' in component
+    assert "recheck('device-packages-recheck'" in component
     assert "SETTINGS_SUBS.push('packages')" in js
-    assert "if (sub === 'packages') refreshDevicePackages();" in js
-    refresh = js.split("async function refreshDevicePackages() {", 1)[1].split(
-        "\n  document.getElementById('device-packages-recheck')", 1)[0]
-    assert "'/api/v1/settings/setup-status'" in refresh
-    assert "renderPackageStatus(s.packages" in refresh
-    # Setup, wizard and the operational view all use one row/remedy renderer.
-    assert js.count("renderPackageStatus(") >= 5
-    assert "if (i.state !== 'ok' && i.remedy" in js
-    assert "i.detail || i.reason || ''" in js
-    assert "deployment-neutral" in html
-    assert "pins this server's certificate when they are built" not in html
+    assert "setupPackages.select(sub === 'setup' || sub === 'packages' ? sub : null)" in js
+    assert "'/api/v1/settings/setup-status'" in model and 'read(setupURL, setupStatus)' in controller
+    assert component.count('<PackageTable pkg=') == 3
+    assert 'row.detail || row.reason' in component and 'packageRemedy(pkg)' in component
+    assert 'deployment-neutral' in component
+    assert 'does not authenticate that manifest or verify native package signatures' in component
+    assert "pins this server's certificate when they are built" not in component
 
 
 def test_read_version_env_handling(monkeypatch):
@@ -2275,16 +1782,21 @@ def test_credentials_crud_never_leaks_password(tmp_path):
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        st, _, _ = _req(host, port, "POST", "/api/credentials",
+        st, _, saved = _req(host, port, "POST", "/api/credentials",
                         {"id": "lab", "name": "Lab", "device_user": "admin",
                          "device_pass": "topsecret"}, headers=hh)
         assert st == 200
+        assert json.loads(saved)["profile"]["id"] == "lab"
+        assert b"topsecret" not in saved
         st, _, b = _req(host, port, "GET", "/api/credentials", headers={"Cookie": ck})
         body = b.decode()
         assert "lab" in body and "admin" in body
         assert "topsecret" not in body     # password NEVER returned
-        st, _, _ = _req(host, port, "DELETE", "/api/credentials/lab", headers=hh)
+        st, _, deleted = _req(host, port, "DELETE", "/api/credentials/lab", headers=hh)
         assert st == 200
+        assert json.loads(deleted) == {"deleted": True}
+        st, _, deleted = _req(host, port, "DELETE", "/api/credentials/lab", headers=hh)
+        assert st == 200 and json.loads(deleted) == {"deleted": False}
     finally:
         stop()
 
@@ -5083,6 +4595,8 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
         assert set(("state", "items", "remedy")) <= set(pkgs)
         # +2: the IOS-XR RPM plus the verified Guest Shell agent bundle.
         assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES) + 2
+        assert {item['name'] for item in pkgs['items']} == {
+            'iris-amd64.tar', 'iris-arm64.tar', 'iris-xr.rpm', 'iris-agent.tgz'}
         for item in pkgs["items"]:
             assert "name" in item and "state" in item
     finally:
@@ -5356,10 +4870,8 @@ def test_swarmmap_injects_cfg_nonce_and_csp(tmp_path, monkeypatch):
 
 
 def test_swarmmap_serves_real_file_with_nonced_csp(tmp_path):
-    # Against the checked-in server/swarmmap.html (single-source file). Only
-    # the nonce/CSP mechanics are asserted here — the CFG substitution is
-    # covered by the fixture test above, so this stays green whether or not
-    # the swarmmap.html client-side task has landed yet.
+    # Serve the real generated React map with the native nonce/CSP boundary.
+    # Run npm ci && npm run build in server/console-ui before Python tests.
     host, port, _cat, stop = _serve_reports(tmp_path)
     try:
         ck, _csrf = _auth(host, port)
@@ -5367,6 +4879,7 @@ def test_swarmmap_serves_real_file_with_nonced_csp(tmp_path):
         assert st == 200 and "text/html" in hd.get("Content-Type", "")
         assert "script-src 'nonce-" in hd.get("Content-Security-Policy", "")
         assert b'<script nonce="' in b and b'<style nonce="' in b
+        assert b'iris-swarm-map-root' in b
     finally:
         stop()
 
@@ -5409,6 +4922,14 @@ def test_request_report_session_csrf_and_429(tmp_path):
         assert st == 200
         res = json.loads(b)
         assert res["ok"] is True and res["expires_at"] > time.time()
+        assert res["device_id"] == "d1"
+        assert res["request_id"] == cat.pending_request("d1", time.time())["request_id"]
+        assert res["requested_at"] + cat.PULL_TTL == res["expires_at"]
+        st, _, b = _req(host, port, "GET", "/api/devices/d1/reports", headers=hh)
+        reviewed = json.loads(b)
+        assert st == 200 and reviewed["device_id"] == "d1"
+        assert reviewed["pending_request"]["request_id"] == res["request_id"]
+        assert reviewed["observed_at"] >= res["requested_at"]
         assert cat.pending_report(
             "d1", time.time())["report_requested"] is True
         # duplicate while pending -> 429
@@ -5431,6 +4952,31 @@ def test_request_report_rejects_unknown_fleet_device(tmp_path):
         st, _, body = _req(host, port, "POST", "/api/devices/ghost/request-report",
                            {}, headers={"Cookie": ck, "X-CSRF-Token": csrf})
         assert st == 422 and json.loads(body)["error"] == "device is not in fleet"
+    finally:
+        stop()
+
+
+def test_request_report_reply_keeps_created_identity_after_immediate_completion(tmp_path, monkeypatch):
+    host, port, cat, stop = _serve_reports(tmp_path)
+    original = cat.request_report_details
+    created = []
+
+    def completed_before_reply(device_id, now):
+        directive = original(device_id, now)
+        created.append(directive)
+        cat.clear_report_request(device_id, request_id=directive["request_id"])
+        replacement = original(device_id, now + .001)
+        assert replacement["request_id"] != directive["request_id"]
+        return directive
+
+    monkeypatch.setattr(cat, "request_report_details", completed_before_reply)
+    try:
+        cookie, csrf = _auth(host, port)
+        status, _, raw = _req(host, port, "POST", "/api/devices/d1/request-report",
+                             {}, headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 200
+        assert json.loads(raw) == {"ok": True, "device_id": "d1", **created[0]}
+        assert cat.pending_request("d1", time.time())["request_id"] != created[0]["request_id"]
     finally:
         stop()
 
@@ -5868,8 +5414,9 @@ def test_forget_host_key_unknown_device_404(tmp_path, monkeypatch):
         stop()
 
 
+@pytest.mark.parametrize("hashed", [False, True])
 def test_forget_host_key_removes_only_that_devices_entry_and_re_pins_next_time(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, hashed):
     """The persistent known_hosts holds two devices; forgetting d1 must drop
     ONLY d1's line, leave d2's trust untouched, and leave the file in a state
     where the NEXT session re-verifies and re-pins d1's new key (plain
@@ -5880,6 +5427,11 @@ def test_forget_host_key_removes_only_that_devices_entry_and_re_pins_next_time(
     known_hosts.write_text(
         "192.0.2.10 ssh-ed25519 AAAAOLDKEYFORD1==\n"
         "192.0.2.20 ssh-ed25519 AAAAKEYFORD2==\n")
+    import subprocess
+    if hashed:
+        subprocess.run(["ssh-keygen", "-H", "-f", str(known_hosts)],
+                       check=True, capture_output=True, timeout=10)
+    control = known_hosts.read_text().splitlines()[1]
     host, port, fleet, stop = _serve_forget_host_key(
         tmp_path, monkeypatch, ssh_state_dir=ssh_state,
         devices=[{"device_id": "d1", "device_ip": "192.0.2.10"},
@@ -5891,9 +5443,10 @@ def test_forget_host_key_removes_only_that_devices_entry_and_re_pins_next_time(
                         {}, headers=hh)
         assert st == 200
         assert json.loads(b) == {"ok": True, "peer": "192.0.2.10"}
-        contents = known_hosts.read_text()
-        assert "192.0.2.10" not in contents      # d1's stale entry is gone
-        assert "192.0.2.20" in contents           # d2's trust is untouched
+        assert known_hosts.read_text().splitlines() == [control]
+        for peer, expected in [("192.0.2.10", 1), ("192.0.2.20", 0)]:
+            assert subprocess.run(["ssh-keygen", "-F", peer, "-f", str(known_hosts)],
+                                  capture_output=True, timeout=10).returncode == expected
     finally:
         stop()
 
@@ -6090,6 +5643,40 @@ def test_api_audit_after_ts_unparseable_ignored(tmp_path):
         assert st == 200
         events = json.loads(b)["events"]
         assert any(e["event"] == "e1" for e in events)
+    finally:
+        stop()
+
+
+def test_api_audit_cursor_keeps_timestamp_ties_and_detects_retention(tmp_path):
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        for name in ("first", "second", "third"):
+            audit_mod.append_event(audit_path, name, category="device", ts=1000)
+        ck, _csrf = _auth(host, port)
+        route = "/api/audit?limit=1&category=device&after_ts=900&before_ts=1100"
+        def page(cursor=None):
+            status, _, body = _req(host, port, "GET", route + (
+                "&cursor=" + cursor if cursor is not None else ""), headers={"Cookie": ck})
+            return status, json.loads(body)
+        status, first = page()
+        assert status == 200 and first["events"][0]["event"] == "third"
+        audit_mod.append_event(audit_path, "newer", category="device", ts=1000)
+        status, second = page(first["next_cursor"])
+        assert status == 200 and second["events"][0]["event"] == "second"
+        status, last = page(second["next_cursor"])
+        assert status == 200 and last["events"][0]["event"] == "first"
+        assert last["next_cursor"] is None
+        assert page("malformed")[0] == 400
+        assert page("")[0] == 400
+        # Retention publishes a replacement file; a position in the old file
+        # must never silently continue in the replacement, even if bytes match.
+        replacement = tmp_path / "replacement.jsonl"
+        replacement.write_bytes(Path(audit_path).read_bytes())
+        replacement.replace(audit_path)
+        status, expired = page(first["next_cursor"])
+        assert status == 409
+        assert "audit_cursor_expired" in json.dumps(expired)
+        assert page()[0] == 200
     finally:
         stop()
 
@@ -6669,16 +6256,16 @@ def test_source_guard_monitoring_nav_and_view():
     assert "['monitoring', 'Monitoring', 'pulse'" in _react_shell()
     assert 'id="view-monitoring"' in html
     assert "System" in _react_shell()
-    assert 'id="audit-load-older"' in html
-    assert "Load older" in html
-    assert 'id="audit-category"' in html
+    component = _react_shell("monitoring.jsx")
+    assert 'id="audit-load-older"' in component
+    assert "Load older" in component
+    assert 'id="audit-category"' in component
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "'monitoring'" in js
     assert "refreshMonitoring" in js
-    assert "audit-load-older" in js
-    assert "audit-category" in js
+    assert "iris:monitoring-command" in js
 
 
 # ---- stream tuning API + export-health proxy (device transfer telemetry) ----
@@ -7399,7 +6986,7 @@ def test_ca_trust_default_url_is_prefilled(tmp_path, monkeypatch):
     settings view both surface the built-in Cisco CA-bundle URL, not None,
     so the UI shows it prefilled and 'Download now' works out of the box."""
     assert gui_server._CA_TRUST_DEFAULT_URL == _CA_DEFAULT_URL
-    assert "var CA_CISCO_URL = '" + _CA_DEFAULT_URL + "';" in _webroot("app.js")
+    assert "export const CISCO_CA = '" + _CA_DEFAULT_URL + "';" in _react_shell("settings-model.mjs")
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     p = str(tmp_path / "state" / "ca-trust-settings.json")
     assert gui_server.read_ca_trust_settings(p) == {
@@ -8865,16 +8452,17 @@ def test_undeploy_force_help_and_confirm_text_cover_xr_alongside_router():
     Staged-file retention describes undeploy only, not agent republishing.
     Per-platform file inventories belong in the manual, not this popup.
     """
-    html = _webroot("index.html")
-    modal = html.split('id="undeploy-modal"', 1)[1].split(
-        'class="modal-foot"', 1)[0]
-    confirm = _webroot("app.js").split("!confirm('Undeploy ", 1)[1].split(
-        "setBulkBusy(false)", 1)[0]
+    component = _react_shell("inventory-actions.jsx")
+    modal = component.split("</> : <>", 1)[1].split("</>}", 1)[0]
+    confirm = _react_shell("activity-controller.mjs").split("async start(action,", 1)[1].split(
+        "this.invalidateRead();", 1)[0]
     for text in (modal, confirm):
         for warning in ("resources listed as IRIS-owned", "staged images in device storage",
                         "Does not stop running jobs", "record and device identity checks",
-                        "VirtualPortGroup and NAT settings", "Retires the old record on success"):
+                        "IRIS-marked VirtualPortGroups and related NAT settings on routers",
+                        "Keeps unrelated networking", "Retires the old record on success"):
             assert warning in text
+        assert "keeps VirtualPortGroup" not in text
         assert "never otherwise" not in text
     assert len(re.sub(r"<[^>]+>", " ", modal).split()) < 100
 
@@ -8892,12 +8480,14 @@ def test_telemetry_health_badge_lives_on_overview_not_monitoring():
         js = f.read()
     # the badge is declared inside the Overview heading
     overview = html.split('id="view-overview"', 1)[1].split("</section>", 1)[0]
-    assert 'id="telemetry-health"' in overview
+    assert 'id="iris-overview-root"' in overview
+    component = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview.jsx").read_text()
+    assert 'id="telemetry-health"' in component
     # ...and no longer anywhere in the Monitoring section
     monitoring = html.split('id="view-monitoring"', 1)[1].split("</section>", 1)[0]
     assert 'id="telemetry-health"' not in monitoring
     # it refreshes with the Overview, not as part of refreshMonitoring()
-    monitoring_fn = js.split("async function refreshMonitoring(fromPoll)", 1)[1].split("}", 1)[0]
+    monitoring_fn = js.split("function refreshMonitoring()", 1)[1].split("}", 1)[0]
     assert "refreshTelemetryHealth" not in monitoring_fn
     overview_fn = js.split("async function refreshOverview()", 1)[1].split("\n  }", 1)[0]
     assert "refreshTelemetryHealth" in overview_fn
@@ -8924,71 +8514,32 @@ def test_console_refreshes_the_visible_view_periodically():
 
 
 def test_devices_filter_every_column_and_act_on_the_filtered_set():
-    """The devices table could not be filtered, so an operator working a
-    subset had to hand-pick rows. Every meaningful column gets a filter, the
-    row count reports the match, and 'select all' marks the FILTERED rows so
-    every bulk action -- quarantine included -- operates on exactly what the
-    filter selected."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    devices = html.split('id="view-devices"', 1)[1].split("</section>", 1)[0]
-    # one control per meaningful column, plus free text across the row
-    for control in ("dev-filter-q", "dev-filter-management-type", "dev-filter-platform",
-                    "dev-filter-cred", "dev-filter-telemetry", "dev-filter-peer",
-                    "dev-filter-status", "dev-filter-clear"):
-        assert 'id="%s"' % control in devices, "missing filter control: %s" % control
-    # quarantine is available as a BULK action, not only per row
-    assert 'id="quarantine-selected"' in devices
-    assert 'id="release-selected"' in devices
-    # the predicate exists and is applied before the rows are rendered
-    assert "deviceMatchesFilters" in js
-    # filters re-render, and the periodic poll must not wipe them
-    assert "applyDeviceFilters" in js
+    component = _react_shell("inventory.jsx")
+    for key in ('managementType', 'platform', 'status', 'cred', 'telemetry', 'peer', 'role', 'modelFamily', 'osFamily'):
+        assert "['" + key + "'," in component
+    assert 'id="dev-filter-q"' in component and 'id="dev-filter-clear"' in component
+    assert "bulkButton('quarantine-selected'" in component and "bulkButton('release-selected'" in component
+    assert 'value={state.filters[spec[0]]}' in component and 'controller.setFilter(spec[0], event.target.value)' in component
+    assert 'pageQuery(this.state.filters, offset)' in _react_shell('inventory-controller.mjs')
+    assert 'deviceMatchesFilters' not in _webroot('app.js'), 'The server owns target matching; pages are not silently narrowed again'
 
 
 def test_agent_install_rename_and_inventory_only_label():
-    """Vocabulary fix: the 'platform' field (guestshell/iox/router) read as
-    networking hardware to operators, so its DISPLAY text becomes "Agent
-    install" everywhere it appears -- the add-form placeholder, the devices-
-    table header, and the filter label. Separately, the 'legacy'/
-    'legacy_routed' management_type value displayed as the word "legacy",
-    which reads like a real inventory state rather than "management type
-    not chosen yet" -- it becomes "Inventory only — management type not
-    chosen". Both are display-only: the wire field name 'platform', its
-    values (guestshell/iox/router), and the management_type values (legacy/
-    legacy_routed) are unchanged."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-
-    # index.html: filter option, filter label, table header, add-form select
-    assert '<option value="legacy">Inventory only — management type not chosen</option>' in html
-    assert 'aria-label="Filter by agent install"' in html
-    assert '<option value="">Agent install: any</option>' in html
-    assert '<th>Agent install</th>' in html
-    assert '<option value="" disabled selected>Choose an agent install</option>' in html
-    assert 'Agent install - auto by model' not in html
-    # the old wording is gone everywhere it used to appear as a label
-    assert '>Platform<' not in html
-    assert 'Platform: any' not in html
-    assert 'Filter by platform"' not in html
-    assert '>legacy</option>' not in html
-
-    # the field id, its values, and the management_type values are untouched
-    assert 'id="df-platform"' in html and 'id="dev-filter-platform"' in html
-    assert 'value="guestshell"' in html and 'value="iox"' in html
-    assert 'value="router"' in html and 'value="xr-appmgr"' in html
-    assert '<option value="legacy"' in html
-
-    # app.js: the row-management-type display and the status/detail lines
-    assert "'Inventory only — management type not chosen'" in js
-    assert "managementType === 'legacy_routed' || managementType === 'legacy'" in js
-    assert "'Agent install updated for '" in js
-    assert "'Agent install update failed: '" in js
-    assert "['Agent install', esc(agentInstallLabel(res.platform))]" in js
+    html, component, model, controller = _webroot('index.html'), _react_shell('inventory.jsx'), _react_shell('inventory-model.mjs'), _react_shell('inventory-controller.mjs')
+    assert "['platform', 'platform', 'agent install', 'Agent install: any'" in component
+    assert "['legacy', 'Inventory only — management type not chosen']" in component
+    assert "'Agent install'" in component and 'aria-label={`Agent install for ${id}`}' in component
+    form, form_model = _react_shell('device-forms.jsx'), _react_shell('device-forms-model.mjs')
+    assert '<option value="" disabled>' in form and 'Choose an agent install' in form
+    assert 'id="df-platform"' in form
+    for value in ('guestshell', 'iox', 'router', 'xr-appmgr'):
+        assert "'" + value + "'" in form_model
+        assert "'" + value + "'" in component
+    assert "type === 'legacy' || type === 'legacy_routed'" in model
+    assert "'Inventory only — management type not chosen'" in model
+    assert "kind === 'platform' ? 'Agent install'" in controller
+    assert "row('Agent install', lookup(platforms, res.platform" in _react_shell('device-details-model.mjs')
+    assert '>Platform<' not in html and 'Platform: any' not in component
 
 
 def test_agent_install_labels_name_the_runtime_not_router_networking():
@@ -9000,48 +8551,36 @@ def test_agent_install_labels_name_the_runtime_not_router_networking():
     label_map = js.split("var AGENT_INSTALL_LABELS = {", 1)[1].split("\n  };", 1)[0]
     assert "router: 'Guest Shell'" in label_map
     assert "AGENT_INSTALL_LABELS[platform]" in label_fn
-    assert "var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;" in js
+    assert "router: 'Guest Shell'" in _react_shell('device-forms-model.mjs')
     assert "Router (VPG)" not in html + js
     assert "Router (Guest Shell via VirtualPortGroup)" not in html + js
-    assert '<option value="router">Guest Shell</option>' in html
-    assert "['Agent install', esc(agentInstallLabel(res.platform))]" in js
+    assert '{installLabels[value]}' in _react_shell('device-forms.jsx')
+    details = _react_shell("device-details-model.mjs")
+    assert "router: 'Guest Shell'" in details
+    assert "row('Agent install', lookup(platforms, res.platform" in details
 
 
 def test_add_device_form_model_field_precedes_agent_install_select():
     """Model compatibility is entered before choosing an agent install."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
+    html = _react_shell('device-forms.jsx')
     assert html.index('id="df-model"') < html.index('id="df-platform"')
 
 
 def test_add_device_form_filters_install_options_live_by_model():
     """Model lookup narrows the selected management type's install choices.
     The behavior tests cover changes, failures and late lookup responses."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "getElementById('df-model').addEventListener('change'" in js
+    js = _react_shell('device-forms-controller.mjs')
+    assert "controller.setDevice('model', event.target.value)" in _react_shell('device-forms.jsx')
     assert "/api/v1/install-options?model=" in js
     assert "no agent install available yet" not in js
-    assert "'xr-appmgr'" in js and "XR appmgr container" in js
-    assert "refreshInstallOptions" in js
+    assert "'xr-appmgr'" in _react_shell('device-forms-model.mjs')
+    assert "refreshOptions" in js
 
 
 def test_xr_host_management_type_option_added_to_both_selects():
-    """The xr-host management type needs to be choosable from the console:
-    the add-device form's df-management-type select and the devices-table
-    dev-filter-management-type select both gain the wire value xr-host. The
-    filter (whose siblings are bare wire-value labels like "routed") gets
-    the short honest label 'XR host'; the add-device form (whose siblings
-    are each "Label - one-line description", e.g. "Routed - IRIS-managed
-    app network") gets the matching descriptive form so xr-host doesn't
-    stand out as the one option with no explanation."""
-    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
-        html = f.read()
-    dev_filter = html.split('id="dev-filter-management-type"', 1)[1].split("</select>", 1)[0]
-    assert '<option value="xr-host">XR host</option>' in dev_filter
-    df_mgmt_type = html.split('id="df-management-type"', 1)[1].split("</select>", 1)[0]
-    assert ('<option value="xr-host">XR host - router\'s own network '
-            'stack</option>') in df_mgmt_type
+    html, component = _webroot('index.html'), _react_shell('inventory.jsx')
+    assert "['xr-host', 'XR host']" in component
+    assert '[\'xr-host\', "XR host - router\'s own network stack"]' in _react_shell('device-forms-model.mjs')
 
 
 # Management-type visibility and model lookup behavior are exercised against
@@ -9056,40 +8595,22 @@ def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
     an unhandled xr-host would have wrongly carried routed-mode addressing.
     An explicit xr-host branch must send NONE of the addressing keys at
     all: not the routed ones, not app_ip/app_mask/app_gateway either."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    assert "if (managementType === 'xr-host') {" in js
-    xr_branch = js.split("if (managementType === 'xr-host') {", 1)[1].split(
-        "} else if (managementType === 'inband') {", 1)[0]
+    js = _react_shell('device-forms-model.mjs').split('export function deviceBody(form)', 1)[1]
+    assert "if (managementType === 'xr-host') return body;" in js
+    xr_branch = js.split("if (managementType === 'xr-host') return body;", 1)[0]
     for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
                 "app_gateway", "vpg_number", "nat_interface", "inband_vlan"):
         assert key not in xr_branch, "xr-host submit branch sends %s" % key
 
 
 def test_devices_table_renders_honest_xr_host_label():
-    """managementTypeLabel must render xr-host as 'XR host' -- no VLAN/VPG
-    detail suffix appended, since xr-host carries neither -- while the
-    existing legacy/inventory-only branch stays untouched. Scoped to the
-    managementTypeLabel assignment itself (a bare substring search would
-    pass on ANY occurrence of these tokens anywhere in app.js and would
-    never notice a xr-host arm that accidentally referenced
-    managementTypeDetail), so this also pins that the xr-host arm precedes
-    the generic 'managementType + managementTypeDetail' fallback and never
-    reads managementTypeDetail."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    label = js.split("var managementTypeLabel = ", 1)[1].split(";\n", 1)[0]
-    assert "managementType === 'legacy_routed' || managementType === 'legacy'" in label
-    assert "'Inventory only — management type not chosen'" in label
-    assert "managementType === 'xr-host'" in label
-    assert "'XR host'" in label
-    fallback_marker = "(managementType + managementTypeDetail)"
-    assert fallback_marker in label
-    xr_idx = label.index("managementType === 'xr-host'")
-    fallback_idx = label.index(fallback_marker)
-    assert xr_idx < fallback_idx, "xr-host arm must precede the generic fallback"
-    xr_arm = label[xr_idx:fallback_idx]
-    assert "managementTypeDetail" not in xr_arm
+    model = _react_shell('inventory-model.mjs')
+    function = model.split('export function managementLabel(device)', 1)[1].split('export function telemetryBadge', 1)[0]
+    assert "if (type === 'xr-host') return 'XR host';" in function
+    assert function.index("type === 'xr-host'") < function.index("type.startsWith('router-')")
+    assert "type === 'legacy' || type === 'legacy_routed'" in function
+    assert 'Inventory only — management type not chosen' in function
+    assert 'managementLabel(device)' in _react_shell('inventory.jsx')
 
 
 def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
@@ -9100,20 +8621,19 @@ def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
     the honest 'XR host' label, and the four addressing rows are dropped
     from the table entirely for it rather than shown as em-dashes (which
     read as "unknown", not "not applicable")."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    fn = js.split("function deployRecordRows(rec, total) {", 1)[1].split(
-        "\n  }", 1)[0]
+    js = _react_shell("device-details-model.mjs")
+    fn = js.split("function recordRows(rec, total = 0) {", 1)[1].split(
+        "export function imageRows", 1)[0]
     # Pins the DATA KEY, not just the rendered label: a reader still keyed
     # off the retired res.attachment would read undefined for every device
     # (deployment_records never wrote res.attachment) and this whole test
     # would stay green testing a dead code path -- Task 2's fix-wave gap.
     assert "res.management_type" in fn
     assert "res.attachment" not in fn
-    assert "var xrHost = managementType === 'xr-host';" in fn
+    assert "xrHost = managementType === 'xr-host'" in fn
     assert "'XR host'" in fn
     assert "if (!xrHost) {" in fn
-    guarded = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[0]
+    guarded = fn.split("if (!xrHost) {", 1)[1].split("\n  }", 1)[0]
     for row in ("Management VLAN / VPG", "SVI", "App IP", "NAT interface"):
         assert row in guarded, "%r must be inside the !xrHost guard" % row
     # State/Record/Planned/Finished/Preflight/Management type stay
@@ -9123,11 +8643,11 @@ def test_deploy_info_panel_hides_meaningless_rows_and_labels_xr_host():
     for row in ("State", "Record", "Planned", "Finished", "Preflight",
                 "Management type"):
         assert row in unguarded
-    after_guard = fn.split("if (!xrHost) {", 1)[1].split("}", 1)[1]
+    after_guard = fn.split("if (!xrHost) {", 1)[1].split("\n  }", 1)[1]
     for row in ("Swarm port", "Agent install", "Device identity"):
         assert row in after_guard
-    hardware = js.split("function deviceHardwareRows", 1)[1].split(
-        "function deployRecordRows", 1)[0]
+    hardware = js.split("function hardwareRows", 1)[1].split(
+        "function validRecordResponse", 1)[0]
     assert "Chassis model" in hardware and "Series" in hardware
     assert "xrHost" not in hardware
 
@@ -9177,14 +8697,13 @@ def test_deploy_logs_paging_graph_search_and_side_drawer():
         js = f.read()
     with open(os.path.join(gui_server.WEBROOT, "styles.css")) as f:
         css = f.read()
-    pane = html.split('id="monitoring-pane-deploylogs"', 1)[1].split("</div>\n      </section>", 1)[0]
+    pane = _react_shell("monitoring.jsx").split('id="monitoring-pane-deploylogs"', 1)[1]
     # the timeline is the audit timeline's FEATURE -- chips pick a window, a
     # brush selects a range, and the selection filters the table. A static
     # sparkline is not the same thing.
-    for control in ("dl-range-chips", "dl-histogram", "dl-bars", "dl-brush",
-                    "dl-window-label", "dl-clear-selection"):
-        assert 'id="%s"' % control in pane, "missing timeline control: %s" % control
-    assert "dlCommitSelection" in js and "after_ts=" in js
+    assert '<Timeline kind="deploylogs"' in pane
+    model = _react_shell("monitoring-model.mjs")
+    assert "list.set('after_ts', state.selection?.start" in model
     for control in ("dl-search", "dl-action", "dl-result",
                     "dl-prev", "dl-next", "dl-page", "dl-drawer", "dl-drawer-close"):
         assert 'id="%s"' % control in pane, "missing deploy-log control: %s" % control
@@ -9192,7 +8711,7 @@ def test_deploy_logs_paging_graph_search_and_side_drawer():
     drawer = pane.split('id="dl-drawer"', 1)[1]
     assert 'id="dl-text"' in drawer
     # paging + client-side matching exist
-    assert "dlPage" in js and "deployLogMatches" in js
+    assert "function deploymentRows(state)" in model and "rows.slice(page * PAGE_SIZE" in model
     # the drawer slides in from the right, and respects reduce-motion
     assert "#dl-drawer" in css
     assert "prefers-reduced-motion" in css
@@ -9205,9 +8724,9 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
 
     Steps -- telemetry, device packages, image verification -- with admin
     shown as already complete, because first-run just created it. Every step can be
-    skipped and the wizard resumes at the first incomplete one, because the
-    packages step can NEVER complete in-console (no Docker socket), so a
-    wizard that insisted on completion could never be finished."""
+    skipped. A new wizard visit starts at step one, and status refreshes leave
+    the operator's current step alone. Package preparation happens outside
+    the Console, so navigation must not require every step to be complete."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
@@ -9219,18 +8738,21 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     assert 'id="view-setup"' in html
     assert "'setup'" in js.split("var VIEWS =", 1)[1].split("]", 1)[0]
 
-    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    wiz = _react_shell('setup-packages.jsx')
     # the telemetry form step mounts the SHARED template rather than copying it
     assert 'id="wz-td-mount"' in wiz
-    assert "mountSettingsForm('td', 'wz-td-mount')" in js
+    assert "settings.select('telemetry', 'wz-td-mount')" in js
     # packages is detect-and-instruct, never a form
-    assert 'id="wz-pkg-recheck"' in wiz
+    assert "recheck('wz-pkg-recheck'" in wiz
     assert "<form" not in wiz.split('id="wz-step-packages"', 1)[1]
-    # skippable, resumable, and it reports where you are
+    # Skippable, with an explicit step-one entry instead of status-based jumps.
+    # The controller's Node tests exercise navigation and refresh behavior.
     assert 'id="wz-skip"' in wiz and 'id="wz-next"' in wiz and 'id="wz-back"' in wiz
-    assert "wizardFirstIncompleteStep" in js
+    controller = _react_shell('setup-packages-controller.mjs')
+    assert "step: changed && mode === 'wizard' ? 0 : this.state.step" in controller
+    assert 'this.update({step, navigating: false})' in controller
     # the nudge that brings an operator back
-    assert 'id="setup-nudge"' in html
+    assert 'id="setup-nudge"' in wiz
     # first-run hands off to the wizard, not to the old checklist
     assert "'/#setup'" in login or '"/#setup"' in login
     assert "#settings/setup" not in login
@@ -9307,12 +8829,12 @@ def test_setup_wizard_shows_every_step_even_when_already_complete():
         html = f.read()
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
+    wiz = _react_shell('setup-packages.jsx')
     assert 'id="wz-steplist"' in wiz, "no step list: completed steps stay invisible"
     # the list is built from the same step table the wizard navigates
-    assert "renderWizardStepList" in js
+    assert 'setupSteps.map((row, index)' in wiz
     # and any step can be opened directly, not just the first incomplete one
-    assert "wz-steplist-item" in js
+    assert 'wz-steplist-item' in wiz and 'onClick={() => c.chooseStep(index)}' in wiz
 
 
 def test_onboard_category_chip_does_not_read_as_the_sentence_subject():
@@ -9328,17 +8850,14 @@ def test_onboard_category_chip_does_not_read_as_the_sentence_subject():
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
 
-    # a display-label map exists and the chip renders through it
-    assert "AUDIT_CAT_LABELS" in js
-    chip = js.split("function auditRowHtml", 1)[1].split("return", 1)[0]
-    assert "AUDIT_CAT_LABELS" in chip, "the chip still prints the raw category"
-    # ...while the class stays keyed on the real category, for the styling
-    assert "cat-' + esc(category)" in chip, \
-        "the chip class must stay keyed on the REAL category, for styling"
+    model = _react_shell("monitoring-model.mjs")
+    component = _react_shell("monitoring.jsx")
+    assert "categoryLabel: category === 'onboard' ? 'deployment' : category" in model
+    assert "cat-${text.category}`}>{text.categoryLabel}" in component
     # the filter still SENDS onboard, whatever it displays
-    assert 'value="onboard"' in html
+    assert "value={category}>{category === 'onboard' ? 'deployment' : category}" in component
     # and the label an operator reads is no longer the bare subsystem name
-    assert ">onboard</option>" not in html
+    assert ">onboard</option>" not in component
 
 
 def _write_deploy_log(log_dir, finished_at, device, action="onboard",
@@ -9635,7 +9154,8 @@ def test_forced_undeploy_is_honoured_when_a_record_exists(tmp_path):
         seen.update(e)
         return 0
 
-    host, port, fleet, record_store, stop = _serve_router(tmp_path, run_fn)
+    audit_path = str(tmp_path / "audit.jsonl")
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, run_fn, audit_path=audit_path)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
@@ -9651,6 +9171,11 @@ def test_forced_undeploy_is_honoured_when_a_record_exists(tmp_path):
         # or the very next onboard is refused on it again.
         assert record_store.get(rid)["state"] == "abandoned"
         assert record_store.recoverable_for_device("r1") is None
+        events = _read_audit_lines(audit_path)
+        forced = [event for event in events if event["event"] == "undeploy_forced"]
+        assert len(forced) == 1
+        assert "IRIS-marked VPG/NAT configuration" in forced[0]["detail"]
+        assert "untouched" not in forced[0]["detail"]
     finally:
         stop()
 
@@ -9771,322 +9296,59 @@ def _webroot(name):
 
 
 def test_every_status_the_cell_can_show_is_filterable():
-    """The Status filter must offer every state the Status cell can render.
-
-    The filter used to derive its own status from a three-branch copy of the
-    cell's logic, so a device reading "onboarding…", "placement failed" or
-    "copying to bootflash:" could not be selected at all, and asking for
-    "enrolled" quietly swept them in. One derivation now feeds both, and the
-    dropdown is generated from it -- this guards that they cannot drift."""
-    app_js = _webroot("app.js")
-    body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
-    body = body.split("\n  function ", 1)[0]
+    js = _webroot('app.js')
+    body = js.split('function deviceStatus(d, devNow) {', 1)[1].split('\n  function ', 1)[0]
     rendered = set(re.findall(r"key: '([a-z-]+)'", body))
-    assert rendered, "deviceStatus() returned no recognisable keys"
-
-    options = app_js.split("var DEVICE_STATUS_OPTIONS = [", 1)[1].split("];", 1)[0]
+    options = js.split('var DEVICE_STATUS_OPTIONS = [', 1)[1].split('];', 1)[0]
     offered = set(re.findall(r"\['([a-z-]+)',", options))
-    assert rendered <= offered, (
-        "renderable but not filterable: %s" % sorted(rendered - offered))
-    # "offline" is a modifier on top of the cell, not one of its branches
-    assert offered - rendered == {"offline"}, sorted(offered - rendered)
-    # the filter compares the shared key, never a second derivation
-    assert "deviceStatus(d, devNow).key !== f.status" in app_js
-    assert "deviceStatusKey" not in app_js
-    # and the markup no longer carries a hand-written subset
-    html = _webroot("index.html")
-    picker = html.split('id="dev-filter-status"', 1)[1].split("</select>", 1)[0]
-    assert picker.count("<option") == 1, "status options are hardcoded again"
+    assert rendered and rendered <= offered and offered - rendered == {'offline'}
+    assert 'statusOptions: DEVICE_STATUS_OPTIONS' in js
+    component = _react_shell('inventory.jsx')
+    assert "key === 'status'" in component and 'services.statusOptions' in component
+    assert "status: 'status'" in _react_shell('inventory-model.mjs')
 
 
-def test_image_can_be_assigned_to_the_selection():
-    """Assigning an image was per-row only, which does not scale past a handful
-    of devices -- and the devices table gained filters precisely so an operator
-    could act on a subset. Bulk assignment now opens the SAME image picker the
-    per-row button uses (Task 4: an ordered multi-image set, not a single
-    <select>), and shares the selected-action lock with every other bulk
-    action, or a delete could fire mid-assignment.
-
-    NOTE: this test used to pin the single-image <select id="image-selected">
-    + <button id="apply-image-selected"> pair with an "__unassign" sentinel
-    value. Task 4 replaces that control with the shared image-set picker
-    (openImagePicker) per its own spec, which is why this test's assertions
-    changed rather than only gaining new ones -- the control it pinned no
-    longer exists by design, not by drift."""
-    html = _webroot("index.html")
-    app_js = _webroot("app.js")
-    assert '<select id="image-selected"' not in html, \
-        "old single-image bulk picker still wired -- was it really replaced?"
-    assert 'id="apply-image-selected"' not in html
-    assert 'id="assign-images-selected"' in html
-    assert "'assign-images-selected'" in app_js.split("BULK_BTNS", 1)[1][:400], \
-        "bulk image assign is not under the shared selected-action lock"
-    # two occurrences of the bare getElementById() exist (updateSelBar's
-    # live label text, and the click handler below) -- split on the
-    # listener registration specifically so this pins the handler, not the
-    # label update.
-    handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
-    assert "openImagePicker(" in handler
-    assert "claimSelection()" in handler
-    # the intersection of the selection's current sets, not the union of them
-    # (union would silently ADD an image to a device that lacks it) and not
-    # one device's set either (that would silently DROP one from the rest)
-    assert "reduce(" in handler and "indexOf(" in handler
-    apply_fn = app_js.split("function assignImagesTo", 1)[1][:500]
-    assert "'/assign'" in apply_fn
-    assert "image_ids:" in apply_fn
+def test_assignment_models_and_controller_behavior():
+    """Run actual ES modules, including all former picker source-pin behavior."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for assignment client regressions")
+    tests = Path(gui_server.WEBROOT).parent / "console-ui/tests/assignments.test.mjs"
+    result = subprocess.run([node, "--test", "--test-reporter=tap", str(tests)], text=True,
+                            capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "# fail 0" in result.stdout
 
 
-def test_empty_apply_confirms_before_unassigning(tmp_path):
-    """Review finding: two selected devices with DIFFERENT image sets
-    intersect to an EMPTY picker selection, which opens with nothing
-    pre-checked -- clicking Apply without touching a box then silently wipes
-    every selected device's assignment, no confirmation. Both the bulk path
-    and the single-device (per-row) path must confirm before POSTing an
-    empty image_ids body; a device that already has nothing assigned is a
-    harmless extra prompt, not a special case to detect."""
-    app_js = _webroot("app.js")
-    bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
-    assert "!imgIds.length" in bulk_handler
-    assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
-        in bulk_handler
-    # cancelling the confirm must release the bulk selected-action lock, the
-    # same way the existing delete-selected cancel path does
-    assert "setBulkBusy(false)" in bulk_handler.split(
-        "Unassign all images from", 1)[1][:200]
-    row_handler = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
-    assert "!ids.length" in row_handler
-    assert "confirm('Unassign all images from ' + id + '?')" in row_handler
+def test_row_and_bulk_assignment_share_the_react_picker():
+    component, js = _react_shell('inventory.jsx'), _webroot('app.js')
+    assert '<button type="button" className="linkish assign-btn"' in component
+    assert 'onClick={() => services.assign?.(id)}' in component and 'assign: openRowAssign' in js
+    assert "'— assign —'" in component and '`${assigned.length} image(s)`' in component
+    assert '<select className="assign"' not in component
+    assert 'assignments.openImages([id], true)' in js
+    assert 'assignments.openImages(selectedIds())' in js
+    assert 'id="iris-assignments-root" data-assignments-react' in _webroot('index.html')
+    assert "function openImagePicker" not in js and "function assignImagesTo" not in js
+    controller = _react_shell('assignments-controller.mjs')
+    assert 'expect_image_ids: expect.get(id)' in controller
+    assert 'const chosen = checkedIds(state.chosen, 10), ids = state.ids.slice()' in controller
+    assert 'this.services.claimBulk(state.ids)' in controller
+    assert 'inventory.rowBusy.size > 0' in controller
+    assert "beginImageRead: function () { return assignments.beginImageRead(); }" in js
+    assert 'assignments.prerequisites(inventory.snapshot())' in js
 
 
-def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
-    """Additional to the confirm above: an empty intersection can ALSO mean
-    every selected device genuinely has nothing assigned -- not a trap, so no
-    note. It is a trap only when at least one selected device DOES have an
-    assignment (the empty pre-check came from sets that disagree, not from
-    everyone being unassigned); that case gets a one-line warning in the
-    picker before the operator checks anything."""
-    html = _webroot("index.html")
-    app_js = _webroot("app.js")
-    assert 'id="img-picker-note"' in html
-    bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
-    assert "These devices have different image assignments" in bulk_handler
-    assert "sets.some(" in bulk_handler
-    # the picker itself resets any stale note on every open, so a note left
-    # over from one bulk pick never bleeds into the next (bulk or per-row)
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert "img-picker-note" in picker
-
-
-def test_bulk_picker_warns_when_the_sets_merely_overlap():
-    """Review finding, untested until now: the note and the confirm keyed off
-    an EMPTY intersection, which catches only the extreme case. dev1=[A,B]
-    with dev2=[A] intersects to a perfectly non-empty [A], so that selection
-    got no note and no confirm -- the picker looked complete, Apply posted [A]
-    to both, and dev1 lost B with nothing said.
-
-    The pre-picker note belongs on the SETS, not their intersection.  The
-    confirmation, however, belongs on the proposed RESULT: [A,B] + [A] -> [A]
-    removes B and must warn, while [A] + [] -> [A] only adds A and must not
-    claim that the operator is assigning different images. Identical sets --
-    every device unassigned included -- stay a plain, unconfirmed apply."""
-    app_js = _webroot("app.js")
-    bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
-    assert "setsDiffer" in bulk_handler
-    # the gate is no longer the emptiness of the intersection
-    assert "!intersection.length &&" not in bulk_handler, \
-        "the note still fires only on an EMPTY intersection"
-    assert "if (setsDiffer) {" in bulk_handler
-    # Apply confirms only when the checked result omits an existing image, and
-    # cancelling that confirm releases the shared selected-action lock like
-    # every other one. A mixed [A] + [] start followed by [A] is additive and
-    # therefore does not produce a false destructive-change warning.
-    assert "removesAssignment" in bulk_handler
-    derivation = bulk_handler.split("var removesAssignment", 1)[1][:350]
-    assert "sets.some(" in derivation and "imgIds.indexOf(id) === -1" in derivation
-    guard = bulk_handler.split("} else if (removesAssignment &&", 1)
-    assert len(guard) == 2, "Apply does not confirm before removing an assignment"
-    assert "confirm(" in guard[1][:200]
-    assert "setBulkBusy(false)" in guard[1][:900]
-
-
-def test_per_row_assign_never_releases_the_bulk_selected_action_lock():
-    """Review finding: the per-row assign button routes through forSelected(),
-    whose finally unconditionally did setBulkBusy(false). Assigning one row
-    while a bulk action was still running therefore re-enabled every bulk
-    button -- a delete could then fire while an onboard batch was still
-    starting, which is precisely what the shared selected-action lock exists
-    to prevent.
-
-    One row is not a selected-action: it must not touch that lock at all. The
-    row's own button carries the busy state for the duration of its POST."""
-    app_js = _webroot("app.js")
-    helper = app_js.split("async function forSelected(", 1)[1][:1400]
-    assert "ownsBulkLock" in helper, \
-        "forSelected still releases the bulk lock unconditionally"
-    assert "if (opts.ownsBulkLock !== false) setBulkBusy(false);" in helper
-    row_handler = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
-    assert "ownsBulkLock: false" in row_handler
-    # ...and the row disables its own control while the POST is in flight
-    assert "btn.disabled = true" in row_handler
-    assert "btn.isConnected" in row_handler
-    # and the row is the only caller that opts out -- openRowAssign is where
-    # that decision lives, so it cannot be copied into a bulk path by accident
-    assert app_js.count("ownsBulkLock: false") == 1
-    # the bulk callers keep the default: they claimed the lock, they release it
-    bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
-    assert "ownsBulkLock" not in bulk_handler
-
-
-def test_image_picker_and_drawer_show_filename_not_just_id():
-    """Review finding: the picker and the deployment drawer showed a bare
-    image id, forcing the operator to go find it in the Images tab to see
-    what it actually is. Both now render 'id — filename', escaped like every
-    other interpolation in this file, matching how the catalog list already
-    shows both facts about an image."""
-    app_js = _webroot("app.js")
-    assert "function imageLabel(id)" in app_js
-    label_fn = app_js.split("function imageLabel(id) {", 1)[1][:300]
-    assert "esc(id)" in label_fn and "esc(fn)" in label_fn
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert "imageLabel(id)" in picker
-    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
-    assert "imageLabel(iid)" in drawer
-
-
-def test_picker_sends_the_set_it_was_opened_on_and_answers_409():
-    """Review finding: two operators editing the same device's images had
-    nothing between them -- the later Apply simply won, and the earlier edit
-    vanished without a trace, while the peer-policy PUT beside it has carried
-    an if_revision compare-and-set all along.
-
-    Both entry points now capture what each device was showing when the picker
-    opened and send it as expect_image_ids. A 409 means nothing was written:
-    the client re-reads, says so, and re-opens the picker for a single device
-    on the set that is really stored."""
-    app_js = _webroot("app.js")
-    body = app_js.split("function assignImagesTo(ids, imgIds, opts) {", 1)[1][:1600]
-    assert "expect_image_ids" in body
-    # the expectation is the caller's SNAPSHOT, never a fresh read here (that
-    # would absorb the very concurrent edit this is meant to catch)
-    assert "opts.expect" in body
-    assert "r.status === 409" in body
-    assert "openRowAssign(conflicts[0], null)" in body
-    # ...and both callers capture one
-    row = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
-    assert "expect[id] = current" in row
-    assert "expect: expect" in row
-    bulk = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1].split(
-            "getElementById('apply-cred-selected').addEventListener", 1)[0]
-    assert "expect[id] = sets[i]" in bulk
-    assert "assignImagesTo(claimed, imgIds, { expect: expect })" in bulk
-    # device ids are operator-chosen strings, so these maps have no prototype
-    assert app_js.count("Object.create(null)") >= 2
-
-
-def test_picker_does_not_open_on_a_failed_image_fetch():
-    """Hardening: a failed /api/images substitutes an empty list, which by the
-    time it reaches the picker is indistinguishable from an empty catalog --
-    and an empty picker can only be applied as "unassign everything". Neither
-    entry point opens on a fetch that did not succeed; the status line says so
-    instead.
-
-    Companion: an assigned id the catalog list does not carry was filtered out
-    of the picker entirely, so Apply -- which posts exactly what is checked --
-    dropped it. It keeps its place, checked and disabled."""
-    app_js = _webroot("app.js")
-    assert "imageListOk = ir.ok" in app_js, \
-        "the image list's load state is assumed rather than recorded"
-    assert app_js.count("if (!imageListOk) {") == 2, \
-        "both picker entry points must refuse a picker with no real catalog"
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert "var unknown = imageIds.indexOf(id) === -1" in picker
-    assert "unknown ? ' disabled' : ''" in picker
-    assert "not in the catalog" in picker
-
-
-def test_bulk_assign_resolves_off_page_selection_from_the_server():
-    """Issue #121: selection is id-keyed and outlives paging (issue #112), so
-    a selected device is very often NOT in LAST_DEVICES, which holds only the
-    currently rendered page. The bulk picker used to derive its pre-check
-    intersection AND its expect_image_ids compare-and-set straight from
-    LAST_DEVICES, so an off-page selected device read as "assigned: []" --
-    the server correctly refused (409) the resulting write, but for the wrong
-    reason, and it happened for every off-page device in the selection.
-
-    fetchDeviceRows() resolves each selected id's REAL current row first (a
-    bounded /api/devices walk keyed by device_id -- there is no "fetch by id
-    list" route), and the click handler now reads from that map instead of
-    LAST_DEVICES."""
-    app_js = _webroot("app.js")
-    assert "async function fetchDeviceRows(ids)" in app_js
-    fetch_fn = app_js.split("async function fetchDeviceRows(ids) {", 1)[1].split(
-        "\n  document.getElementById('assign-images-selected')", 1)[0]
-    # keyed by device_id, seeded from whatever page is already rendered
-    assert "byId[d.device_id] = d" in fetch_fn
-    assert "LAST_DEVICES.forEach(function (d) { byId[d.device_id] = d; })" in fetch_fn
-    assert "/api/v1/devices?" in fetch_fn
-    # bounded: nothing to fetch when the whole selection is already rendered,
-    # and the walk stops the moment every missing id has been found rather
-    # than always paging the entire fleet
-    assert "if (!missing.length) return byId;" in fetch_fn
-    assert "remaining--" in fetch_fn
-    bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
-    assert "await fetchDeviceRows(ids)" in bulk_handler
-    # the pre-check/expect sets are read from the fetched map, never straight
-    # from LAST_DEVICES (which is exactly the bug: the page in the DOM is not
-    # the same thing as the selection)
-    assert "byId[id]" in bulk_handler
-    assert "LAST_DEVICES" not in bulk_handler, \
-        "bulk picker still trusts LAST_DEVICES for a selection that can span pages"
-
-
-def test_image_picker_is_one_function_shared_by_both_entry_points():
-    """The row select and the bulk dropdown used to be two separate ways to
-    assign the same thing, through two different code paths that could (and
-    did) drift apart. Task 4 replaces both with ONE picker function -- pin
-    that there is exactly one definition, that both the per-row button and
-    the bulk toolbar action call it, and that it enforces the 10-image cap
-    itself (the 11th checkbox disabled, not just the server's 400)."""
-    app_js = _webroot("app.js")
-    assert app_js.count("function openImagePicker(currentIds, onApply)") == 1
-    # definition + at least two call sites (per-row, bulk)
-    assert app_js.count("openImagePicker(") >= 3
-    picker = app_js.split("function openImagePicker(currentIds, onApply) {", 1)[1]
-    picker = picker.split("\n  function closeImagePicker", 1)[0]
-    assert ">= 10" in picker, "unchecked boxes are never disabled at the cap"
-    assert ".disabled = " in picker
-    # checked-first: the device's current set renders before the rest of the
-    # catalog, so it is never buried below the fold
-    assert "checked" in picker.lower()
-
-
-def test_row_assign_is_a_button_not_a_select():
-    """The per-row image control used to be a <select class="assign">: one
-    change event picked exactly one image. It cannot express an ORDERED SET,
-    so it is replaced by a button that opens the shared picker with the
-    row's current assigned set."""
-    html = _webroot("index.html")
-    app_js = _webroot("app.js")
-    assert '<select class="assign"' not in app_js
-    assert 'class="linkish assign-btn"' in app_js
-    assert "#dev-rows .assign-btn" in app_js
-    # the button opens the shared picker on the row's own assigned set
-    # (through openRowAssign, which the 409 retry re-enters)
-    assert "openRowAssign(btn.closest('tr').getAttribute('data-id'), btn)" in app_js
-    row = app_js.split("function openRowAssign(id, btn) {", 1)[1][:1400]
-    assert "rowAssignedIds(d)" in row and "openImagePicker(current," in row
-    assert 'id="mark-all"' in html   # the checkbox column stays untouched
+def test_assignment_picker_and_drawer_show_filename_once():
+    model = _react_shell('assignments-model.mjs')
+    assert 'row.filename !== row.id' in model
+    assert '`${row.id} — ${row.filename}`' in model
+    assert 'image.label' in _react_shell('assignments.jsx')
+    drawer = _react_shell('device-details-model.mjs')
+    assert '`${id} — ${filename}`' in drawer
 
 
 def test_deployed_badge_requires_every_assigned_image_staged():
@@ -10118,16 +9380,16 @@ def test_deployment_drawer_lists_one_row_per_assigned_image():
     tick's own stage_error carried alongside. Parked is deliberately NOT a
     console state: a parked image is simply absent from the assigned set, so
     it never gets a row here at all."""
-    html = _webroot("index.html")
+    html = _react_shell("device-details.jsx")
     app_js = _webroot("app.js")
     assert 'id="di-img-rows"' in html
-    assert "function deployImageRows(d)" in app_js
-    body = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
-    assert "rowAssignedIds(d)" in body
-    assert "rowHasStaged(d, iid)" in body
+    body = _react_shell("device-details-model.mjs").split("function imageRows", 1)[1].split("export function boundarySteps", 1)[0]
+    assert "assignedIds(device)" in body
+    assert "staged.includes(id)" in body
     assert "stage_error" in body
     assert "parked" not in body.lower()
-    assert "document.getElementById('di-img-rows').innerHTML = deployImageRows(d)" in app_js
+    assert "'di-img-rows').innerHTML" not in app_js
+    assert "imageRows(state?.device" in html
 
 
 def test_devices_side_reads_the_per_image_errors_the_agent_reports():
@@ -10147,20 +9409,21 @@ def test_devices_side_reads_the_per_image_errors_the_agent_reports():
     errored_fn = app_js.split("function rowErroredIds(d) {", 1)[1][:300]
     assert "errored_image_ids" in errored_fn
 
-    drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
-    assert "rowErroredIds(d)" in drawer
+    drawer = _react_shell("device-details-model.mjs").split("function imageRows", 1)[1].split("export function boundarySteps", 1)[0]
+    assert "device.errored_image_ids" in drawer
     assert "'error'" in drawer
     # rowHasStaged rejects a current per-image error before consulting the
     # retained staged set, so drawer and device verdict cannot disagree.
     staged = app_js.split("function rowHasStaged(d, iid) {", 1)[1].split("\n  }", 1)[0]
     assert staged.index("errored_image_ids") < staged.index("staged_image_ids")
-    assert drawer.index("rowHasStaged(d, iid)") < drawer.index("errored.indexOf(iid)")
+    assert drawer.index("errored.includes(id)") < drawer.index("staged.includes(id)")
     # Multi-image state is never derived from the identity pointer.
     # current_image_id is the first image of the set that produced heartbeat
     # data this tick (typically one already STAGED), not the one in flight, so
     # reading it as "currently transferring" mislabels whichever image it
     # lands on and leaves the real failure reading "queued".
-    assert drawer.index("!perImage") < drawer.index("d.current_image_id")
+    legacy_branch = drawer.split("else if (!perImage)", 1)[1]
+    assert "device.current_image_id !== id" in legacy_branch
 
     body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
     body = body.split("\n  function ", 1)[0]
@@ -10176,11 +9439,11 @@ def test_deployment_details_open_in_a_right_hand_drawer():
     """It used to render below the devices table, so opening it on a fleet of
     any size put the details off-screen and made the operator scroll away from
     the row they had just clicked."""
-    html = _webroot("index.html")
+    html = _react_shell("device-details.jsx")
     css = _webroot("styles.css")
     app_js = _webroot("app.js")
     panel = html.split('id="deploy-info-panel"', 1)[1].split(">", 1)[0]
-    assert 'class="drawer"' in panel, panel
+    assert 'className="drawer"' in panel, panel
     drawer = css.split(".drawer {", 1)[1].split("}", 1)[0]
     assert "position:fixed" in drawer and "right:0" in drawer
     assert "top:0" in drawer and "bottom:0" in drawer
@@ -10188,8 +9451,8 @@ def test_deployment_details_open_in_a_right_hand_drawer():
     assert ".drawer { transition:none; }" in css
     # and Escape gets the operator out without aiming for the close control
     assert "closeDeployInfo" in app_js
-    escape = app_js.split("function closeDeployInfo", 1)[1][:700]
-    assert "'Escape'" in escape
+    assert "event.key === 'Escape'" in html
+    assert "controller.close()" in html
 
 
 # ---------------------------------------------------------------------------
@@ -10328,10 +9591,27 @@ def test_deploy_logs_flag_nothing_without_a_registration_stamp(tmp_path):
 
 
 def test_previous_registration_logs_are_labelled_in_the_console():
-    app_js = _webroot("app.js")
+    app_js = _react_shell("device-details.jsx")
     assert "previous_registration" in app_js
     block = app_js.split("previous_registration", 1)[1][:400]
     assert "previous device" in block
+
+
+def test_deploy_log_unknown_timestamp_is_not_a_previous_registration(tmp_path):
+    name = _plant_deploy_log(str(tmp_path), "d1", 1000)
+    log = tmp_path / name
+    log.write_text(log.read_text().replace("finished_at=1000", "finished_at=unknown"))
+    rows = gui_server._list_deploy_logs(str(tmp_path), device_id="d1", registered_at=1500)
+    assert len(rows) == 1
+    assert rows[0]["finished_at"] is None
+    assert rows[0]["previous_registration"] is False
+    # A missing header still has a known timestamp in its filename, but an
+    # unknown result. Neither field should be invented by the Console.
+    log.write_text("saved output without a header\n")
+    rows = gui_server._list_deploy_logs(str(tmp_path), device_id="d1", registered_at=1500)
+    assert rows[0]["finished_at"] == 1000
+    assert rows[0]["state"] is None
+    assert rows[0]["previous_registration"] is True
 
 
 def test_console_fonts_are_served_with_woff2_type(tmp_path):
@@ -10423,8 +9703,8 @@ def test_console_declares_responsive_and_a11y_foundations():
     css = _webroot("styles.css")
     assert 'id="iris-menu-toggle"' in _react_shell()
     assert "@media" in css and "prefers-reduced-motion" in css
-    assert 'class="table-scroll"' in html or "table-scroll" in _webroot("app.js")
-    assert 'aria-live' in html
+    assert 'className="table-scroll"' in _react_shell('setup-packages.jsx')
+    assert 'aria-live="polite"' in _react_shell('inventory.jsx')
 
 
 def test_off_canvas_nav_toggle_wired():
@@ -10459,24 +9739,42 @@ def test_every_operational_table_gets_a_scroll_wrapper():
     forcing the whole page to scroll sideways. Density and ids are
     untouched: this only wraps, it never rewrites a table's own markup."""
     html = _webroot("index.html")
-    table_ids = ("ov-rollout", "importable", "images", "devices",
-                 "di-img-tbl", "di-tbl", "di-log-tbl", "wz-pkg-table",
-                 "setup-pkg-table", "settings-info", "trust-tbl",
-                 "audit-tbl", "dl-tbl")
-    for tid in table_ids:
-        marker = 'id="%s"' % tid
-        assert marker in html, tid
-        before = html.split(marker, 1)[0]
-        # nearest preceding table-scroll open tag must be closer than the
-        # nearest preceding table-scroll CLOSE (i.e. this table is still
-        # inside an open wrapper, not after one that already closed)
-        last_open = before.rfind('<div class="table-scroll">')
-        assert last_open != -1, "%s has no preceding table-scroll wrapper" % tid
-        between = before[last_open:]
-        assert between.count("</div>") == 0, \
-            "%s's table-scroll wrapper closed before the table opened" % tid
-    # the two unnamed tables (credential list, onboarding batch) get one too
+    packages = _react_shell('setup-packages.jsx')
+    for prefix in ('wz-pkg', 'setup-pkg', 'device-packages'):
+        assert 'prefix="%s"' % prefix in packages
+    assert 'aria-label="Package readiness evidence"><table className="tbl" id={prefix + \'-table\'}>' in packages
+    # The unnamed credential table gets a wrapper too.
     assert html.count('<div class="table-scroll"') == html.count("<table")
+    settings = _react_shell("settings.jsx")
+    for tid in ("settings-info", "trust-tbl"):
+        before = settings.split('id="%s"' % tid, 1)[0]
+        assert "</div>" not in before[before.rfind('<div className="table-scroll"'):]
+    component = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview.jsx").read_text()
+    assert '<div className="table-scroll" tabIndex={0} role="region" aria-label="Image rollout">' in component
+    assert '<table className="tbl" id="ov-rollout">' in component
+    images = _react_shell("images.jsx")
+    for label, tid in (("Images available for import", "importable"), ("Image catalog", "images")):
+        region = images.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
+        assert '<table className="tbl" id="%s">' % tid in region
+    assert images.count('className="table-scroll" tabIndex={0} role="region"') == 2
+    monitoring = _react_shell("monitoring.jsx")
+    for label, tid in (("Audit events", "audit-tbl"), ("Deployment logs", "dl-tbl")):
+        region = monitoring.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
+        assert '<table className="tbl" id="%s">' % tid in region
+    assert monitoring.count('className="table-scroll" tabIndex={0} role="region"') == 2
+    details = _react_shell("device-details.jsx")
+    for label, tid in (("Device images", "di-img-tbl"), ("Deployment record", "di-tbl"),
+                       ("Device deployment logs", "di-log-tbl")):
+        region = details.split('aria-label="%s">' % label, 1)[1].split('</div>', 1)[0]
+        assert '<table className="tbl" id="%s">' % tid in region
+    assert details.count('className="table-scroll" tabIndex={0} role="region"') == 3
+    activity = _react_shell("activity.jsx")
+    region = activity.split('aria-label="Device jobs">', 1)[1].split('</div>', 1)[0]
+    assert '<table className="tbl" id="batch-table">' in region
+    assert 'className="table-scroll" tabIndex={0} role="region"' in activity
+    inventory = _react_shell('inventory.jsx')
+    region = inventory.split('aria-label="Device inventory">', 1)[1].split('</div>', 1)[0]
+    assert '<table className="tbl dense" id="devices">' in region
     css = _webroot("styles.css")
     assert ".table-scroll {" in css and "overflow-x: auto;" in css
 
@@ -10497,25 +9795,38 @@ def test_dialogs_get_dialog_role_honestly():
     close -- that part of a dialog's contract holds regardless of modality."""
     html = _webroot("index.html")
     js = _webroot("app.js")
-    non_modal_drawers = ("img-info-panel", "deploy-info-panel", "dl-drawer")
-    for panel_id in non_modal_drawers + ("img-picker",):
-        tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
-        assert 'role="dialog"' in tag, panel_id
-    for panel_id in non_modal_drawers:
-        tag = html.split('id="%s"' % panel_id, 1)[1].split(">", 1)[0]
-        assert 'aria-modal' not in tag, panel_id
-    img_picker_tag = html.split('id="img-picker"', 1)[1].split(">", 1)[0]
-    assert 'aria-modal="true"' in img_picker_tag
+    picker = _react_shell('assignments.jsx')
+    assert 'role="dialog" aria-modal="true"' in picker
     assert "function trapDialogFocus(container) {" in js
-    assert "trapDialogFocus(document.getElementById('img-picker'))" in js
-    for panel_id in non_modal_drawers:
-        assert "trapDialogFocus(document.getElementById('%s'))" % panel_id not in js, panel_id
+    assert "event.key !== 'Tab'" in picker and 'first?.focus()' in picker and 'last?.focus()' in picker
     # focus moves in on open and is restored to the opener on close, for
     # all four -- modal or not
-    for opener_var in ("imgInfoOpener", "deployInfoOpener", "imgPickerOpener", "dlDrawerOpener"):
-        assert ("var %s = null;" % opener_var) in js, opener_var
-        assert (opener_var + " = document.activeElement;") in js, opener_var
-        assert (opener_var + ".focus();") in js, opener_var
+    assert 'const active = document.activeElement' in picker and 'target.focus()' in picker
+    assert "'#img-picker-cancel')?.focus()" in picker
+    images = _react_shell("images.jsx")
+    tag = images.split('id="img-info-panel"', 1)[1].split('>', 1)[0]
+    assert 'role="dialog"' in tag and 'aria-modal' not in tag
+    assert "trapDialogFocus" not in images
+    assert "opener.current = event.currentTarget" in images
+    assert "close.current?.focus()" in images and "opener.current.focus()" in images
+    monitoring = _react_shell("monitoring.jsx")
+    tag = monitoring.split('id="dl-drawer"', 1)[1].split('>', 1)[0]
+    assert 'role="dialog"' in tag and 'aria-modal' not in tag
+    assert "trapDialogFocus" not in monitoring
+    assert "opener.current = event.currentTarget" in monitoring
+    assert "close.current?.focus()" in monitoring and "opener.current.focus()" in monitoring
+    details = _react_shell("device-details.jsx")
+    tag = details.split('id="deploy-info-panel"', 1)[1].split('>', 1)[0]
+    assert 'role="dialog"' in tag and 'aria-modal' not in tag
+    assert "trapDialogFocus" not in details
+    assert "controller.opener = document.activeElement" in details
+    assert "close.current?.focus()" in details and "controller.opener.focus()" in details
+    activity = _react_shell("activity.jsx")
+    tag = activity.split('id="activity-panel"', 1)[1].split('>', 1)[0]
+    assert 'role="dialog"' in tag and 'aria-modal' not in tag
+    assert "trapDialogFocus" not in activity
+    assert "close.current?.focus()" in activity
+    assert "document.getElementById('dev-activity')?.focus()" in activity
 
 
 def test_forms_get_persistent_field_labels():
@@ -10531,24 +9842,26 @@ def test_forms_get_persistent_field_labels():
     assert "font-size: 12px" in css.split(".field-label {", 1)[1].split("}", 1)[0]
     # a representative sample across different forms, not every field
     samples = {
-        "dev-form": ("df-id", "df-management-type", "df-cred"),
-        "cred-form": ("cf-id", "cf-pass"),
-        "pw-form": ("pw-cur", "pw-new", "pw-confirm"),
-        "cert-form": ("cert-pem", "cert-key"),
-        "trust-form": ("trust-pem",),
-        "ca-form": ("ca-source", "ca-url"),
-        "ae-form": ("ae-host", "ae-port", "ae-recipient"),
-        "iv-schedule-form": ("iv-mode",),
+        "iv-schedule-form": ("iv-mode", "iv-hour"),
     }
     for form_id, field_ids in samples.items():
-        form = html.split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
+        form = _react_shell('image-verification.jsx').split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
         for fid in field_ids:
-            assert 'for="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
-    # the shared template (mounted into both Setup and Settings)
-    for tpl_id, field_ids in (("tpl-td-form", ("td-endpoint",)),):
-        tpl = html.split('id="%s"' % tpl_id, 1)[1].split("</template>", 1)[0]
-        for fid in field_ids:
-            assert 'for="%s"' % fid in tpl, "%s: no label for=%r" % (tpl_id, fid)
+            assert 'htmlFor="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
+    form = _react_shell('device-forms.jsx')
+    assert '<label className="field" htmlFor={id}' in form
+    for fid in ('df-id', 'df-management-type', 'df-cred'):
+        assert '<Field id="%s" label=' % fid in form
+    for fid in ('cf-id', 'cf-pass'):
+        assert "'%s'," % fid in form
+    assert '<Field id={id} label={label}>' in form
+    settings = _react_shell("settings.jsx")
+    assert '<label className="field" htmlFor={id}' in settings
+    assert '<label className="field field-wide" htmlFor={id}' in settings
+    for fid in ("pw-cur", "pw-new", "pw-confirm", "cert-pem", "cert-key",
+                "trust-pem", "ca-url", "td-endpoint", "ae-host", "ae-port", "ae-recipient"):
+        assert "'%s', '" % fid in settings
+    assert 'htmlFor="ca-source"' in settings
 
 
 def test_error_and_status_regions_carry_live_roles():
@@ -10558,18 +9871,28 @@ def test_error_and_status_regions_carry_live_roles():
     styles.css) get role=alert, so either outcome is announced without the
     operator having to go find the message by sight."""
     html = _webroot("index.html")
-    alert_ids = ("df-err", "cf-err", "pw-msg", "cert-msg",
-                 "trust-msg", "ca-msg", "td-msg", "ae-msg",
-                 "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg",
-                 "ii-override-note", "ii-release-msg")
-    for eid in alert_ids:
-        tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
-        assert 'role="alert"' in tag, eid
-    status_ids = ("status", "dev-status", "di-note", "wz-progress", "wz-msg",
-                  "cert-status", "td-status", "ae-status",
-                  "sessions-info", "swarm-summary")
-    for sid in status_ids:
-        tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
+    verification = _react_shell('image-verification.jsx')
+    assert 'id={`iv-${action}-msg`}' in verification
+    for action in ('schedule', 'refresh', 'offline'):
+        assert '<Outcome state={state} action="%s" />' % action in verification
+    assert 'role="status" aria-live="polite">{message?.text' in verification
+    form = _react_shell('device-forms.jsx')
+    for eid in ('df-err', 'cf-err'):
+        assert 'role="alert"' in form.split('id="%s"' % eid, 1)[1].split('>', 1)[0]
+    for source, sid in ((_react_shell('inventory.jsx'), 'dev-status'), (_react_shell('setup-packages.jsx'), 'wz-progress'),
+                        (_react_shell('swarm-view.jsx'), 'swarm-summary')):
+        tag = source.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
+        assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
+    setup = _react_shell('setup-packages.jsx')
+    assert "message('wz-msg')" in setup and 'id={id} role="status" aria-live="polite"' in setup
+    settings = _react_shell("settings.jsx")
+    assert 'id={id} role="status" aria-live="polite" tabIndex={-1}' in settings
+    for sid in ("cert-status", "td-status", "ae-status", "sessions-info", "peer-tls-status"):
+        tag = settings.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
+        assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
+    details = _react_shell("device-details.jsx")
+    for sid in ("di-note", "di-forget-host-key-status"):
+        tag = details.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
         assert 'role="status"' in tag and 'aria-live="polite"' in tag, sid
     # progress bars are exposed as progressbar, not silent divs. #prog
     # (the legacy publish progress bar this pin used to also cover) was
@@ -10578,12 +9901,16 @@ def test_error_and_status_regions_carry_live_roles():
     # rowProg assertions right below) -- so only the offline-upload bar
     # remains here.
     for pid in ("iv-offline-progress",):
-        tag = html.split('id="%s"' % pid, 1)[1].split(">", 1)[0]
+        tag = verification.split('id="%s"' % pid, 1)[1].split(">", 1)[0]
         assert 'role="progressbar"' in tag, pid
-        assert 'aria-valuemin="0"' in tag and 'aria-valuemax="100"' in tag, pid
-    app_js = _webroot("app.js")
-    assert "rowProg.setAttribute('role', 'progressbar');" in app_js
-    assert "aria-valuenow" in app_js
+        assert 'aria-valuemin={0}' in tag and 'aria-valuemax={100}' in tag, pid
+    images = _react_shell("images.jsx")
+    for eid in ("ii-override-note", "ii-release-msg"):
+        assert 'role="alert"' in images.split('id="%s"' % eid, 1)[1].split('>', 1)[0]
+    tag = images.split('id="status"', 1)[1].split('>', 1)[0]
+    assert 'role="status"' in tag and 'aria-live="polite"' in tag
+    assert 'role="progressbar" aria-valuemin={0} aria-valuemax={100}' in images
+    assert 'aria-valuenow={Math.round(row.percent)}' in images
 
 
 def test_reduced_motion_covers_more_than_the_two_drawers_and_shadows_are_tokenized():
@@ -10613,28 +9940,22 @@ def test_reduced_motion_covers_more_than_the_two_drawers_and_shadows_are_tokeniz
 # ---------------------------------------------------------------------------
 
 def test_staging_boundary_component_exists_and_ends_at_operator_control():
-    """Brief Step 1: the Staging Boundary is one shared component
-    (stagingBoundaryHTML(steps)), reused verbatim by device/image detail
-    contexts (Task 8; Overview's own fleet-wide instance was removed per
-    operator decision, Wave C). This is a pure source guard --
-    every named step of the lifecycle and the hatched terminus label must
-    exist as literal strings in app.js, regardless of how any one view
-    derives the states it feeds the component."""
-    js = _webroot("app.js")
-    assert "function stagingBoundaryHTML(" in js
-    for label in ('"Catalogued"', '"Source checked"', '"Assigned"',
-                  '"Transferring"', '"Verified"', '"Staged"', "Operator control"):
+    """Keep the lifecycle labels and operator-control terminus in the React
+    component, independent of the model supplying its states."""
+    js = _react_shell("device-details.jsx")
+    assert "function StagingBoundary(" in js
+    for label in ("'Catalogued'", "'Source checked'", "'Assigned'",
+                  "'Transferring'", "'Verified'", "'Staged'", "Operator control"):
         assert label in js, label
 
 
 def test_staging_boundary_step_states_are_css_backed():
     """Brief Step 3: circles = done/current/upcoming/na CSS states, plus the
-    status-pill substitution for a failed step. Every state stagingBoundaryHTML
+    status-pill substitution for a failed step. Every state StagingBoundary
     can render must have a real selector -- a typo'd class here would render
     invisibly rather than fail loudly."""
-    js = _webroot("app.js")
-    fn = js.split("function boundaryMarkerHTML(state, pillHtml) {", 1)[1].split(
-        "\n  }", 1)[0]
+    js = _react_shell("device-details.jsx")
+    fn = js.split("function BoundaryMarker", 1)[1].split("function StagingBoundary", 1)[0]
     for cls in ("boundary-circle is-done", "boundary-circle is-current",
                 "boundary-dot", "boundary-circle is-na", "boundary-circle is-upcoming",
                 "boundary-marker"):
@@ -10650,8 +9971,7 @@ def test_staging_boundary_step_states_are_css_backed():
     # themselves emit no style= attribute anywhere.
     assert "repeating-linear-gradient" in css
     assert "style=" not in fn
-    assert "style=" not in js.split("function stagingBoundaryHTML(steps) {", 1)[1].split(
-        "\n  }", 1)[0]
+    assert "style=" not in js.split("function StagingBoundary", 1)[1].split("function DeviceDetails", 1)[0]
 
 
 def test_device_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
@@ -10664,12 +9984,11 @@ def test_device_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
     (overviewBoundarySteps); that band (#ov-boundary, "Active staging") was
     removed per operator decision (Wave C post-walk fix) along with the
     function that derived its steps. The device drawer's per-device
-    instance (deviceBoundarySteps) is the sole survivor of the Staging
+    instance (boundarySteps) is the sole survivor of the Staging
     Boundary's per-view step derivation and carries the exact same
     invariant, so the pin moves here rather than disappearing."""
-    js = _webroot("app.js")
-    fn = js.split("function deviceBoundarySteps(d, devNow) {", 1)[1].split(
-        "\n  }", 1)[0]
+    js = _react_shell("device-details-model.mjs")
+    fn = js.split("function boundarySteps", 1)[1]
     assert "'placement-failed'" in fn
     assert "'image-failed'" in fn
     assert "'onboard-failed'" not in fn
@@ -10679,7 +9998,7 @@ def test_device_boundary_scoped_to_staging_lifecycle_not_agent_deployment():
     assert "if (!ids.length) return ['na', 'na', 'upcoming', 'na', 'na', 'na'];" in fn
     # no distinct on-device post-transfer verification signal exists in this
     # build -- admitted honestly as 'na', not inferred from a proxy
-    assert "var verified = 'na';" in fn
+    assert "return ['done', source, 'done', transfer, 'na', staged];" in fn
 
 
 def test_overview_needs_attention_is_worst_of_group_and_excludes_offline():
@@ -10701,58 +10020,34 @@ def test_overview_needs_attention_is_worst_of_group_and_excludes_offline():
 
 
 def test_devices_attention_filter_is_appended_not_added_to_the_status_options():
-    """'__attention' is a rollup over several deviceStatus() keys, not a
-    producible status of its own -- it must be appended to the rendered
-    <select>, never merged into DEVICE_STATUS_OPTIONS itself (that array is
-    exactly "every key deviceStatus() can produce",
-    test_every_status_the_cell_can_show_is_filterable enforces it)."""
-    js = _webroot("app.js")
-    options_literal = js.split("var DEVICE_STATUS_OPTIONS = [", 1)[1].split("];", 1)[0]
-    assert "__attention" not in options_literal
-    assert "'<option value=\"__attention\">Needs attention (any)</option>'" in js
-    filter_fn = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "f.status === '__attention'" in filter_fn
-    assert "'negative'" in filter_fn and "'severe'" in filter_fn and "'warning'" in filter_fn
+    js = _webroot('app.js')
+    options = js.split('var DEVICE_STATUS_OPTIONS = [', 1)[1].split('];', 1)[0]
+    assert '__attention' not in options
+    assert ".concat([['__attention', 'Needs attention (any)']])" in _react_shell('inventory.jsx')
+    assert "status: 'status'" in _react_shell('inventory-model.mjs')
+    # Actual server matching is covered by test_devices_status_offline_and_attention_filters.
+    assert 'deviceMatchesFilters' not in js
 
 
 def test_images_catalog_leads_with_filename_and_verdict_pill():
     """Brief Step 5: catalog rows lead with the exact filename (.machine) +
     Cisco source-verification verdict pill; image id stays adjacent
     (.machine)."""
-    html = _webroot("index.html")
-    thead = html.split('id="images">', 1)[1].split("</thead>", 1)[0]
-    headers = [h.split("</th>")[0] for h in thead.split("<th>")[1:]]
+    component = _react_shell("images.jsx")
+    thead = component.split('id="images">', 1)[1].split("</thead>", 1)[0]
+    headers = [h.split("</th>")[0] for h in thead.split('<th scope="col">')[1:]]
     assert headers[:3] == ["File", "Verification", "Image ID"], headers
-    js = _webroot("app.js")
-    fn = js.split("function renderImageRows() {", 1)[1].split(
-        "\n  document.getElementById('images-filter-attention')", 1)[0]
-    row = fn.split("return '<tr data-id=", 1)[1].split("}).join('')", 1)[0]
-    pill_idx = row.index("bulkhashVerdictPillHTML(")
-    # filename leads (the FIRST esc(i.id) is the data-id attribute, not a
-    # displayed column -- the id column's own esc(i.id) comes after the pill).
-    # filename itself renders via dash() (Wave A item 8, em-dash fallback for
-    # an empty value) rather than a bare esc().
-    assert row.index("dash(i.filename") < pill_idx
-    assert "esc(i.id)" in row[pill_idx:]
+    row = component.split('<tbody id="rows">', 1)[1].split('</tbody>', 1)[0]
+    assert row.index("{item.filename || '—'}") < row.index('<Verdict image={item} />') < row.index('>{item.id}</td>')
 
 
 def test_images_needs_attention_toggle_filters_client_side_no_refetch():
-    """The "Needs attention only" toggle re-renders from LAST_IMAGES (the
-    already-fetched catalog), the same applyDeviceFilters()/renderDevices()
-    split Devices uses -- toggling it must never trigger a new /api/images
-    fetch."""
-    js = _webroot("app.js")
-    fn = js.split("function renderImageRows() {", 1)[1].split(
-        "\n  document.getElementById('images-filter-attention')", 1)[0]
-    # the filter + row-build itself, BEFORE the per-row click-handler wiring
-    # (the delete button's own handler legitimately calls fetch() for the
-    # DELETE request -- that is a click-time action, not part of re-render)
-    build = fn.split("document.querySelectorAll('#rows .del-img')", 1)[0]
-    assert "fetch(" not in build
-    assert "LAST_IMAGES.filter(" in build
-    assert "images-filter-attention" in fn
-    assert "'change', renderImageRows" in js
+    """Filtering uses the existing catalog; no new request or write."""
+    component = _react_shell("images.jsx")
+    controller = _react_shell("images-controller.mjs")
+    assert 'state.images.filter(item => !!item.quarantined)' in component
+    assert 'onChange={event => controller.setAttention(event.target.checked)}' in component
+    assert 'setAttention(value) { this.update({attentionOnly: !!value}); }' in controller
 
 
 def test_overview_fetches_devices_and_images_alongside_overview():
@@ -10780,11 +10075,10 @@ def test_overview_fetches_devices_and_images_alongside_overview():
 def test_overview_fleet_totals_carry_precise_denominators():
     """Brief Step 4, band 3: fleet totals with precise denominators. Every
     ratio card names what it is a fraction OF, not a bare count."""
-    js = _webroot("app.js")
-    fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
-    assert "'Waiting for heartbeat'" in fn  # pinned card label, unchanged
-    for sub in ("'of ' + ov.devices", "'of ' + ov.assigned"):
-        assert sub in fn, sub
+    model = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview-model.mjs").read_text()
+    assert "'Waiting for heartbeat'" in model
+    for sub in ("of ${ov.devices}", "of ${ov.assigned}"):
+        assert sub in model, sub
 
 
 def test_card_component_matches_spec_padding_radius_and_elevation():
@@ -10797,40 +10091,24 @@ def test_card_component_matches_spec_padding_radius_and_elevation():
 
 
 def test_overview_attention_band_distinguishes_no_data_from_all_clear():
-    """Fix wave 2 (reviewer-confirmed truthfulness defect): a failed
-    /api/devices or /api/images fetch used to render the byte-identical
-    green "All clear" card genuine health renders -- "no data to report a
-    problem from" and "confirmed no problem" must be distinguishable.
-    renderOverviewAttention() now takes a fourth `fleetDataUnavailable`
-    argument and gates the all-clear branch behind its absence."""
-    js = _webroot("app.js")
-    fn = js.split(
-        "function renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable) {",
-        1)[1].split("\n  }", 1)[0]
-    assert "Fleet status unavailable" in fn
-    assert "attention-card is-inactive" in fn
-    assert "i-minus-circle" in fn
-    # the failure branch is neutral, not a repaint of the positive one --
-    # no check-circle/positive class anywhere in its own pushed markup
-    unavailable_card = fn.split("if (fleetDataUnavailable) {", 1)[1].split(
-        "} else if (!cards.length) {", 1)[0]
-    assert "i-check-circle" not in unavailable_card
-    assert "is-positive" not in unavailable_card
-    assert "All clear" not in unavailable_card
-    # the all-clear branch is the OTHER arm of the same if/else -- reachable
-    # only when fleet data was NOT reported unavailable
-    assert "} else if (!cards.length) {" in fn
-    all_clear_card = fn.split("} else if (!cards.length) {", 1)[1]
-    assert "All clear" in all_clear_card
+    """The controller reports each failed secondary; React renders it neutrally.
 
-    # refreshOverview() marks BOTH degraded shapes (a rejected fetch and a
-    # resolved-but-non-2xx response) with failed:true, ORs them together,
-    # and threads the result into the renderer as its 4th argument.
-    overview_fn = js.split("async function refreshOverview() {", 1)[1].split(
-        "\n  }", 1)[0]
+    Executable model/browser checks also cover failed, clean and mixed results.
+    """
+    js = _webroot("app.js")
+    model = (Path(gui_server.WEBROOT).parent / "console-ui/src/overview-model.mjs").read_text()
+    unavailable_card = model.split("if (unavailable) cards.push(", 1)[1].split("else if (!cards.length)", 1)[0]
+    assert "level: 'inactive'" in unavailable_card
+    assert "Fleet status unavailable" in unavailable_card
+    assert "positive" not in unavailable_card and "All clear" not in unavailable_card
+    assert "else if (!cards.length)" in model
+
+    overview_fn = js.split("async function refreshOverview() {", 1)[1].split("\n  }", 1)[0]
     assert "failed: true" in overview_fn
     assert "dbody.failed || imgsBody.failed" in overview_fn
     assert "renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable)" in overview_fn
+    bridge = js.split("function renderOverviewAttention(", 1)[1].split("\n  }", 1)[0]
+    assert "unavailable: fleetDataUnavailable" in bridge
 
 
 # ---------------------------------------------------------------------------
@@ -10840,28 +10118,11 @@ def test_overview_attention_band_distinguishes_no_data_from_all_clear():
 # ---------------------------------------------------------------------------
 
 def test_devices_filter_offers_only_producible_options():
-    """M2 is ADJUDICATED as repair, not removal: the value="legacy" option
-    describes a real fleet state (an unclassified device, which the server
-    always stores as the truthy 'legacy_routed' -- gui_fleet.py's
-    _legacy_record/_legacy_like) and stays exactly where it is. What was
-    broken is the FILTER COMPARISON at deviceMatchesFilters(): it fell back
-    to the string 'legacy' only when d.management_type was falsy, which
-    never happens, so selecting the option always returned zero rows. Pin
-    both halves: the option survives verbatim, and the comparison now
-    folds 'legacy_routed' into 'legacy' the same way the row label already
-    does (managementTypeLabel, app.js) -- without touching that label
-    line, which test_devices_table_renders_honest_xr_host_label pins
-    character-for-character already."""
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert ('<option value="legacy">Inventory only — management type not '
-            'chosen</option>') in html
-    filter_fn = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1].split(
-        "\n  }", 1)[0]
-    # the repaired comparison: legacy_routed and legacy compare equal, the
-    # same equivalence class managementTypeLabel already grants the row label
-    assert ("d.management_type === 'legacy_routed' ? 'legacy' : "
-            "(d.management_type || 'legacy')") in filter_fn
+    assert "['legacy', 'Inventory only — management type not chosen']" in _react_shell('inventory.jsx')
+    assert "managementType: 'management_type'" in _react_shell('inventory-model.mjs')
+    row = {'device_id': 'old', 'management_type': 'legacy_routed'}
+    assert gui_server.target_row_matches(row, {'management_type': 'legacy'}, now=1)
+    assert not gui_server.target_row_matches(row, {'management_type': 'xr-host'}, now=1)
 
 
 def test_device_status_cell_carries_job_step_and_elapsed():
@@ -10907,7 +10168,7 @@ def test_offline_is_expected_during_active_undeploy():
     own state === 'running': a queued undeploy job's offline device keeps
     the normal, honest "no recent heartbeat" pill."""
     js = _webroot("app.js")
-    fn = js.split("function deviceStatusHtml(d, devNow) {", 1)[1].split(
+    fn = js.split("function deviceStatusPresentation(d, devNow) {", 1)[1].split(
         "\n  }", 1)[0]
     assert "Offline (expected during undeploy)" in fn
     assert "[1/5]" in fn
@@ -10965,39 +10226,28 @@ def test_settings_forms_are_wrapped_in_bounded_card_sections():
     settings = html.split('id="view-settings"')[1].split("</section>")[0]
     parsed = CardHeadings()
     parsed.feed(settings)
-    for heading in ("Peer transfer TLS", "Console certificate",
-                    "Trusted certificate authorities", "Public CA bundle",
-                    "Telemetry destination", "Audit export", "Server & build",
-                    "Schedule"):
+    for heading in ("Telemetry destination",):
         assert parsed.headings.get(heading) is True, \
             "%s must have an open card ancestor" % heading
-    # Certificate replacement and telemetry each retain their primary action.
-    cert_form = settings.split('id="cert-form"')[1].split('</form>')[0]
-    assert cert_form.count('class="btn"') == 1
-    td_form = settings.split('id="td-form"')[1].split('</form>')[0]
-    assert td_form.count('class="btn"') == 1
+    component = _react_shell("settings.jsx")
+    assert '<div className="card" data-iv-action="schedule"><h3>Schedule</h3>' in _react_shell('image-verification.jsx')
+    for group, heading in (("peer", "Peer transfer TLS"), ("cert", "Console browser certificate"),
+                           ("trust", "Trusted certificate authorities"), ("ca", "Public CA bundle"),
+                           ("ae", "Audit export")):
+        assert ('data-setting="%s"><h3>%s</h3>' % (group, heading)) in component
+    # Runtime card ancestry and action hierarchy are checked in settings-smoke.mjs.
 
 
 def test_settings_card_never_wraps_a_template_root():
-    """The card goes AROUND the mount point (#td-mount), never
-    around the <template> whose content is cloned into it -- a wrapped
-    template root would be inert markup styled as a card that never
-    actually renders."""
+    """The telemetry card wraps a React portal target, never inert markup."""
     html = _webroot("index.html")
-    for tpl_id, mount_id in (("tpl-td-form", "td-mount"),):
-        before_tpl = html.split('id="%s"' % tpl_id, 1)[0]
-        last_card_open = before_tpl.rfind('<div class="card">')
-        last_card_close = before_tpl.rfind("</div>")
-        assert last_card_close > last_card_open, \
-            "%s: the preceding card must already be closed" % tpl_id
-        mount_pos = html.index('id="%s"' % mount_id)
-        assert mount_pos < html.index('id="%s"' % tpl_id), \
-            "%s: mount point must precede its template" % mount_id
+    assert 'id="tpl-td-form"' not in html
+    assert '<div class="card"><h3>Telemetry destination</h3><div id="td-mount">' in html
+    assert 'id="wz-td-mount"' in _react_shell('setup-packages.jsx')
 
 
 def test_monitoring_panes_carry_a_scope_tag_and_stay_distinct():
-    html = _webroot("index.html")
-    js = _webroot("app.js")
+    html = _react_shell("monitoring.jsx")
     css = _webroot("styles.css")
     audit_pane = html.split('id="monitoring-pane-audit"', 1)[1]
     assert 'id="audit-scope-tag"' in audit_pane.split("<h3>", 1)[1].split(
@@ -11006,14 +10256,10 @@ def test_monitoring_panes_carry_a_scope_tag_and_stay_distinct():
     assert 'id="dl-scope-tag"' in dl_pane.split("<h3>", 1)[1].split("</h3>", 1)[0]
     # each pane keeps its own description, distinct from the other's
     assert "Every settings change" in audit_pane.split("<h3>", 1)[1][:600]
-    assert "Per-job onboard and undeploy logs" in dl_pane.split("<h3>", 1)[1][:600]
+    assert "Onboarding and undeployment logs" in dl_pane.split("<h3>", 1)[1][:600]
     assert ".scope-tag {" in css
-    fn = js.split("function updateMonitoringScopeTags() {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "auditRange" in fn and "dlRange" in fn
-    show_fn = js.split("function showMonitoringSub(sub) {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "updateMonitoringScopeTags();" in show_fn
+    assert "ranges[audit.range].label" in html and "ranges[logs.range].label" in html
+    assert "return monitoringCommand('select', null, sub);" in _webroot("app.js")
 
 
 def test_table_scroll_fade_color_is_parameterized_for_cards():
@@ -11030,54 +10276,16 @@ def test_table_scroll_fade_color_is_parameterized_for_cards():
 
 
 def test_bulk_bar_names_selection_scope():
-    """Final review fix wave, spec §5: the bulk bar names whether the checked
-    set IS the whole filtered table or only part of it, and -- when it's
-    only part -- gives a one-click path to the rest.
-
-    Rewritten for issue #112 (paging): "the whole filtered table" used to BE
-    every rendered '#dev-rows .mark' row, because the table always rendered
-    the entire fleet -- so m (every row) and n (checked rows) were both safe
-    to read straight off the DOM, and the one-click path could just replay
-    #mark-all's own change handler. Once the table pages, that DOM read is
-    exactly the ambiguity issue #112 flags: '#dev-rows .mark' only ever
-    holds the current page, and replaying #mark-all only ever selects it.
-    m is now devTotal (the server's own match count for the current filter)
-    and n is Object.keys(SELECTED).length (real selections, id-keyed,
-    independent of what page is rendered); the one-click path now walks
-    every server page of the current filter (selectAllMatchingDevices)
-    instead of touching #mark-all at all."""
-    html = _webroot("index.html")
-    selbar = html.split('id="sel-bar"', 1)[1].split('class="selbar-actions"', 1)[0]
-    assert '<span class="muted" id="sel-scope-text" hidden></span>' in selbar
-    # A tertiary BUTTON, not the .linkish text link it used to be: Magnetic
-    # Button > Usage keeps text links for navigation inside a paragraph and
-    # gives standalone actions a button. Cancel is its neighbour because
-    # Magnetic Table > Bulk action bar dismisses the bar either by deselecting
-    # every row or by "the 'Cancel' button".
-    assert '<button class="btn tertiary" type="button" id="sel-scope-all" hidden></button>' in selbar
-    assert '<button class="btn tertiary" type="button" id="sel-clear">Cancel</button>' in selbar
-    assert 'onclick=' not in selbar
-
-    js = _webroot("app.js")
-    fn = js.split("function updateSelBar() {", 1)[1].split("\n  }", 1)[0]
-    assert "var n = Object.keys(SELECTED).length;" in fn
-    assert "var m = devTotal;" in fn
-    assert "var allSelected = n > 0 && n === m;" in fn
-    assert "'· All ' + m + ' matching devices selected'" in fn
-    assert "'· Select all ' + m + ' matching devices'" in fn
-
-    # the click runs a REAL server-side walk of the current filter, not a
-    # replay of #mark-all (which can only ever reach the rendered page)
-    click_fn = js.split(
-        "document.getElementById('sel-scope-all').addEventListener('click', function () {",
-        1)[1].split("\n  });", 1)[0]
-    assert "selectAllMatchingDevices();" in click_fn
-    assert "markAll" not in click_fn
-
-    select_all_fn = js.split("async function selectAllMatchingDevices() {", 1)[1].split(
-        "\n  }", 1)[0]
-    assert "deviceFilterQuery(deviceFilterState())" in select_all_fn
-    assert "SELECTED[d.device_id] = true;" in select_all_fn
+    component, model, controller = (_react_shell(name) for name in ('inventory.jsx', 'inventory-model.mjs', 'inventory-controller.mjs'))
+    assert 'id="sel-scope-text" hidden={!scope.text}' in component
+    assert 'id="sel-scope-all" hidden={!scope.offerAll}' in component
+    assert 'controller.selectAll()' in component and 'controller.clearSelection()' in component
+    assert 'matchIds.filter(id => selected.has(id)).length' in model
+    assert 'total > 0 && complete && matched === total' in model
+    assert 'selected outside this' in model and 'matches are unconfirmed' in model
+    assert 'pageQuery(this.state.filters, offset, 1000)' in controller
+    assert 'new Set([...this.state.selected, ...ids])' in controller
+    assert "'sel-scope-all'" not in _webroot('app.js'), 'No legacy mutation inside the React root'
 
 
 def test_table_type_roles_are_magnetic_p3_p4():
@@ -11145,94 +10353,18 @@ def test_monitoring_group_stays_inside_react_navigation():
 
 
 def test_bulk_bar_action_buttons_capped_via_more_menu():
-    """Magnetic Table > Bulk action bar: "When row checkboxes are selected,
-    the bulk action bar appears, allowing up to 4 specific actions for the
-    selected rows... The bulk action bar stays visible until all rows are
-    deselected or the 'Cancel' button is clicked."
-
-    So .selbar-actions holds exactly four controls, the fourth being the
-    overflow (Magnetic Dropdown lists "List actions from a horizontal 3-dot
-    icon" as a dropdown use case, and Table > Action column reaches for an
-    overflow icon button once there are more than two). The single primary
-    sits on the group's outside edge per Button > Button group > Alignment.
-    Selection state -- the count, the select-all-beyond-this-page shortcut and
-    Cancel -- sits outside that group and is not one of the four.
-
-    Adopt/Quarantine/Release/Set-credential/Delete live inside the overflow;
-    every id, click handler and the shared bulk busy-lock stay put
-    (test_bulk_row_actions_wired / test_all_selected_actions_share_one_busy_
-    lock guard those already)."""
-    def _top_level_button_ids(container):
-        # IDs of buttons NOT nested inside a `.menu` floating popover -- a
-        # menu-wrap TRIGGER button stays visible in the bar at all times
-        # (only its popover's own contents are hidden until opened), so
-        # `.menu-wrap` itself is transparent to this count; depth only
-        # starts at a `.menu` popover's own opening tag (exact class
-        # match, so it does not fire on `.menu-wrap`/`.menu-note` too), and
-        # any <div> nested inside one still balances the count correctly
-        # via the generic branch below.
-        depth = 0
-        ids = []
-        i = 0
-        while i < len(container):
-            if depth == 0 and container.startswith('<div class="menu"', i):
-                depth = 1
-                i += 4
-            elif depth > 0 and container.startswith("<div", i):
-                depth += 1
-                i += 4
-            elif depth > 0 and container.startswith("</div>", i):
-                depth -= 1
-                i += 6
-            elif depth == 0 and container.startswith('<button class="btn', i):
-                m = re.search(r'id="([^"]+)"', container[i:i + 260])
-                ids.append(m.group(1) if m else None)
-                i += 1
-            else:
-                i += 1
-        return ids
-
-    html = _webroot("index.html")
-    selbar = html.split('id="sel-bar"', 1)[1].split('id="dev-form"', 1)[0]
-    state, actions = selbar.split('class="selbar-actions"', 1)
-
-    # selection state, not actions on the selection
-    assert _top_level_button_ids(state) == ['sel-scope-all', 'sel-clear']
-
-    # exactly four, primary last (right-aligned group, outside edge)
-    ids = _top_level_button_ids(actions)
-    assert ids == ['assign-images-selected', 'undeploy-selected',
-                   'onboard-selected', 'more-menu-btn'], ids
-    assert len(ids) <= 4
-    assert actions.count('<button class="btn"') == 1, "one primary per group"
-
-    # the fourth is an icon-only overflow trigger with an accessible name
-    trigger = actions.split('id="more-menu-btn"', 1)[0]
-    assert 'class="btn ghost icon-only"' in trigger[trigger.rfind("<button"):]
-    assert 'aria-label="More actions"' in actions.split(
-        'id="more-menu-btn"', 1)[1].split(">", 1)[0]
-
-    more_pop = actions.split('id="more-pop" hidden>', 1)[1].split("</div>", 1)[0]
-    for folded_id in ("adopt-selected", "quarantine-selected",
-                      "release-selected", "set-cred-selected",
-                      "delete-selected"):
-        assert ('id="%s"' % folded_id) in more_pop, folded_id
-        # menu-close so the popover closes the instant the action fires --
-        # without it .menu's own click handler stopPropagation()s and the
-        # outside-click closer (document listener) never sees the click
-        before = more_pop.split('id="%s"' % folded_id, 1)[0]
-        tag_start = before.rfind("<button")
-        assert "menu-close" in before[tag_start:], folded_id
-    # Dropdown > Types: destructive menu items are a supported type, and the
-    # divider groups Delete away from the reversible actions above it
-    assert '<hr class="menu-divider">' in more_pop
-    assert 'class="menu-item danger menu-close" type="button" id="delete-selected"' in more_pop
-    # the credential picker moved out of the menu and into its own modal --
-    # Dropdown items act immediately, they never carry a select + Apply pair
-    assert 'id="cred-selected"' not in more_pop
-    cred_modal = html.split('id="cred-modal"', 1)[1].split('id="img-picker"', 1)[0]
-    assert 'id="cred-selected"' in cred_modal
-    assert 'id="apply-cred-selected"' in cred_modal
+    component = _react_shell('inventory.jsx')
+    actions = component.split('className="selbar-actions"', 1)[1].split('id="more-pop"', 1)[0]
+    assert re.findall(r"bulkButton\('([^']+)'", actions) == ['assign-images-selected', 'undeploy-selected', 'onboard-selected']
+    assert actions.count('id="more-menu-btn"') == 1 and 'aria-label="More actions"' in actions
+    assert "bulkButton('onboard-selected', 'Onboard…', 'btn')" in actions
+    menu = component.split('id="more-pop"', 1)[1].split('</div>', 1)[0]
+    for action in ('adopt-selected', 'quarantine-selected', 'release-selected', 'set-cred-selected', 'set-role-selected', 'schedule-selected', 'delete-selected'):
+        assert "bulkButton('" + action + "'" in menu
+    assert 'className="menu-divider"' in menu and "'menu-item danger menu-close'" in menu
+    assert 'id="cred-selected"' not in menu
+    modal = _react_shell('assignments.jsx')
+    assert 'id="cred-selected"' in modal and "'apply-cred-selected'" in modal
 
 
 def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
@@ -11261,37 +10393,27 @@ def test_bulk_modals_close_cleanly_and_the_total_agrees_with_the_total():
     js = _webroot("app.js")
 
     # 1 -- both branches pluralise on `total`
-    assert "(devs.length === total ? String(total) : devs.length + ' of ' + total) +" in js
-    assert "' result' + (total === 1 ? '' : 's');" in js
+    component = _react_shell('inventory.jsx')
+    assert "state.rows.length === state.total ? state.total : state.rows.length + ' of ' + state.total" in component
+    assert "result${state.total === 1 ? '' : 's'}" in component
     # the old form agreed with the matched count
     assert "((devs.length === total ? total : devs.length) === 1 ? '' : 's')" not in js
 
-    # 2 -- a menu-hosted opener resolves to the popover's trigger
-    fn = js.split("function openModal(id) {", 1)[1].split("\n  }", 1)[0]
-    assert "var opener = document.activeElement;" in fn
-    assert "opener.closest('.menu')" in fn
-    assert "menu.closest('.menu-wrap')" in fn
-    assert "wrap.querySelector('[aria-expanded]')" in fn
-    assert "modalOpener = opener;" in fn
-    assert "modalOpener = document.activeElement;" not in js
-
-    # 3 -- no backdrop click-to-close anywhere (the phrase appears in the
-    # comment explaining why, so pin the code form, not the words)
-    assert "if (e.target === overlay) closeModal" not in js
-    assert "overlay.addEventListener('click'" not in js
-    wire = js.split("function wireModal(id, closerIds) {", 1)[1].split("\n  }", 1)[0]
-    assert "addEventListener('click'" in wire, "the ✕/Cancel closers must stay"
-    assert "e.key === 'Escape'" in wire
-    assert "trapDialogFocus(overlay);" in wire
+    # React actions return focus to the stable menu trigger and trap Tab.
+    actions = _react_shell('inventory-actions.jsx')
+    assert "opener.current" in actions and "[aria-expanded]" in actions
+    assert "function openModal(" not in js and "function wireModal(" not in js
+    for name in ('inventory-actions.jsx', 'role-actions.jsx', 'policy-dialogs.jsx'):
+        modal = _react_shell(name)
+        assert "event.key === 'Escape'" in modal
+        assert "event.key !== 'Tab'" in modal
+        assert "controller.close()" in modal
+        assert "event.target === event.currentTarget" not in modal
     # every modal still offers an explicit close control, per Magnetic Modal
-    html = _webroot("index.html")
-    for mid, closers in (("onboard-modal", ("onboard-cancel", "onboard-modal-x")),
-                         ("undeploy-modal", ("undeploy-cancel", "undeploy-modal-x")),
-                         ("cred-modal", ("cred-modal-cancel", "cred-modal-x"))):
-        block = html.split('id="%s"' % mid, 1)[1].split("<!--", 1)[0]
-        for cid in closers:
-            assert 'id="%s"' % cid in block, "%s must offer %s" % (mid, cid)
-        assert "wireModal('%s', ['%s', '%s']);" % (mid, closers[0], closers[1]) in js
+    component = _react_shell('inventory-actions.jsx')
+    assert "id={action + '-cancel'}" in component and "id={action + '-modal-x'}" in component
+    assert "controller.close()" in component and "event.key === 'Escape'" in component
+    assert "opener.current.focus()" in component and "first?.focus()" in component
 
 
 def test_nav_divider_grid_spacing_and_compact_anatomy_comment():
@@ -11326,9 +10448,9 @@ def test_devices_table_gets_the_dense_type_modifier():
     unmodified."""
     html = _webroot("index.html")
     css = _webroot("styles.css")
-    assert '<table class="tbl dense" id="devices">' in html
+    assert '<table className="tbl dense" id="devices">' in _react_shell('inventory.jsx')
     # Images keeps the base (non-dense) table scale this wave
-    assert '<table class="tbl" id="images">' in html
+    assert '<table className="tbl" id="images">' in _react_shell("images.jsx")
     assert ".tbl.dense td { font-size:12px; line-height:18px; }" in css
     # row controls (selects/buttons) match the row's own 12px text
     assert "#dev-rows select, #dev-rows button { font-size:12px; }" in css
@@ -11362,19 +10484,17 @@ def test_images_import_blurb_drops_the_subdirectory_examples():
     Images import blurb -- the mechanism (a real subdirectory, the scanned
     extensions, IMAGES_ROOT) stays, only the illustrative "such as
     /opt/images/iosxe/c9300/ or /opt/images/iosxr/" clause goes."""
-    html = _webroot("index.html")
+    html = _react_shell("images.jsx")
     # the worked examples are gone outright -- these substrings do not
     # appear anywhere else in the page
     assert "such as" not in html
     assert "iosxe/c9300" not in html
     assert "/opt/images/iosxr/" not in html
-    assert ("Images copied onto the server under\n"
-            '              <span class="machine">/opt/images</span> — including any subdirectory —\n'
-            "              are offered for import below without uploading. Files ending in\n"
-            '              <span class="machine">.bin</span>, <span class="machine">.iso</span>,\n'
-            '              <span class="machine">.tar</span> or <span class="machine">.rpm</span> are\n'
-            "              scanned. Set <span class=\"machine\">IMAGES_ROOT</span> to scan a\n"
-            "              different directory.</p>") in html
+    assert 'Images copied onto the server under' in html
+    assert '/opt/images</span> — including any subdirectory — are offered for import below without uploading.' in html
+    for suffix in ('.bin', '.iso', '.tar', '.rpm'):
+        assert '<span className="machine">%s</span>' % suffix in html
+    assert '<span className="machine">IMAGES_ROOT</span> to scan a different directory.' in html
 
 
 # ---- fix-wave regressions: HTTP layer, session lifecycle, console sources ----
@@ -11676,23 +10796,21 @@ def test_console_fetch_wrapper_handles_session_loss_polls_and_stale_state():
     assert "new CustomEvent('iris:shell-state', { detail: { connection: connection } })" in js
     assert "if (!r.ok) throw new Error('health proxy '" in js
     assert "poll = pollMonitoring;" in js
-    assert "if (fromPoll && auditExtraPages > 0) return;" in js
-    assert "if (!brushDrag) renderBrush(auditSel);" in js
+    monitoring = _react_shell("monitoring-controller.mjs")
+    assert "fromPoll && (state.olderPages > 0 || state.olderBusy)" in monitoring
+    assert "state.interacting" in monitoring
 
 
 def test_bulk_credential_modal_untouched_is_noop_and_clear_confirms():
     """Source guard (IRIS-08-001): the resting placeholder is disabled (an
     untouched Apply does nothing), clearing is a distinct sentinel that is
     confirmed, and the modal refuses to open without a profile list."""
-    js = _webroot("app.js")
-    html = _webroot("index.html")
-    assert '<select id="cred-selected"><option value="" disabled selected>' in html
-    assert 'id="cred-modal-msg"' in html
-    assert "var CRED_CLEAR = '__none';" in js
-    assert "<option value=\"\" disabled>" in js
-    assert "var pid = raw === CRED_CLEAR ? '' : raw;" in js
-    assert "confirm('Clear the credential on '" in js
-    assert "if (!raw) {" in js
+    js, component = _react_shell('assignments-controller.mjs'), _react_shell('assignments.jsx')
+    assert '<option value="" disabled>' in component
+    assert "'cred-modal-msg'" in component
+    assert "choice.startsWith('profile:') ? choice.slice(8) : ''" in js
+    assert 'Clear the credential on ${ids.length} reviewed device(s)?' in js
+    assert "if (!choice) {" in js
 
 
 def test_credential_list_failure_is_not_rendered_as_no_credential():
@@ -11701,50 +10819,49 @@ def test_credential_list_failure_is_not_rendered_as_no_credential():
     row to "no credential"."""
     js = _webroot("app.js")
     assert "var credListOk = false;" in js
-    assert "if (cr.ok) credOpts = (await cr.json()).profiles || [];" in js
-    assert "credential pickers are disabled until it loads." in js
-    assert "var credSel = credListOk" in js
-    assert "credential list unavailable; assign later" in js
-    assert "Credential list unavailable; not opening the picker." in js
+    assert 'credentials: credentialsOk ? credentials.body.profiles : this.state.credentials' in _react_shell('inventory-controller.mjs')
+    assert 'disabled={busy || state.bulkBusy || !state.credentialsOk}' in _react_shell('inventory.jsx')
+    assert 'Credential list unavailable; showing the assignment as recorded' in _react_shell('inventory.jsx')
+    assert "credential list unavailable; assign later" in _react_shell('device-forms.jsx')
+    assert "Credential list unavailable; not opening the picker." in _react_shell('assignments-controller.mjs')
 
 
 def test_console_id_keyed_maps_are_prototype_free():
-    """Source guard (IRIS-08-009): every map keyed by an operator-chosen id
-    is created with Object.create(null).
-
-    'marked' (a per-render DOM scrape) is gone as of issue #112: selection is
-    now the persistent SELECTED map, id-keyed the same way and replacing
-    'marked' in this list rather than adding beside it."""
+    """Operator-chosen IDs use null-prototype objects, Map or Set."""
     js = _webroot("app.js")
     for decl in ("var LAST_JOBS_BY_DEVICE = Object.create(null);",
                  "var best = Object.create(null);",
                  "var imageFilenames = Object.create(null);",
                  "var imageQuarantined = Object.create(null);",
-                 "var peerPolicyBusy = Object.create(null);",
-                 "var SELECTED = Object.create(null);",
-                 "SELECTED = Object.create(null);",
-                 "var checkedSet = Object.create(null);",
                  "imageFilenames = Object.create(null);",
                  "imageQuarantined = Object.create(null);"):
         assert decl in js, decl
     assert "var SELECTED = {};" not in js and "var checkedSet = {};" not in js
+    model = _react_shell('inventory-controller.mjs')
+    assert 'selected: new Set()' in model and 'rowBusy: new Set()' in model
+    picker = _react_shell('assignments-model.mjs')
+    controller = _react_shell('assignments-controller.mjs')
+    assert 'const expect = new Map(ids.map(id =>' in picker
+    assert 'const records = new Map(), seen = new Set(), targets = new Set(ids)' in controller
+    assert 'const chosen = new Set(this.state.chosen)' in controller
 
 
 def test_telemetry_filter_has_unknown_bucket():
     """Source guard (IRIS-08-008): the filter's tri-state matches the cell's."""
     js = _webroot("app.js")
     html = _webroot("index.html")
-    assert '<option value="unknown">' in html.split('id="dev-filter-telemetry"')[1].split("</select>")[0]
-    assert ": 'unknown';" in js and "typeof d.telemetry_stream_enabled === 'boolean'" in js
+    assert "['unknown', 'unknown (no heartbeat yet)']" in _react_shell('inventory.jsx')
+    assert "telemetry: 'telemetry'" in _react_shell('inventory-model.mjs')
 
 
 def test_swarm_map_treats_error_body_as_failed_poll():
     """Source guard (IRIS-08-005): the proxy's 200-with-error shape is a
     failed poll in the map, and its poll is marked as background."""
-    with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "swarmmap.html")) as f:
-        html = f.read()
-    assert 'data.error)throw Error(' in html
-    assert '"X-IRIS-Poll":"1"' in html
+    model = _react_shell('swarm-map-model.mjs')
+    controller = _react_shell('swarm-map-controller.mjs')
+    assert 'if (!validSnapshot(data)) throw Error(' in controller
+    assert 'data.error' in model.split('function validSnapshot(data)', 1)[1].split('export ', 1)[0]
+    assert "'X-IRIS-Poll': '1'" in controller
 
 
 def test_login_page_distinguishes_throttling_and_network_errors():
@@ -12270,17 +11387,14 @@ def test_devices_role_filter_matches_exact_role_and_unassigned(tmp_path):
 
 
 def test_declared_role_filter_has_server_and_client_parity():
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert 'id="dev-filter-role"' in html
-    assert '<option value="__none">— no role —</option>' in html
-    assert 'role: val(\'dev-filter-role\')' in js
-    assert "role: 'role'" in js
-    predicate = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1]
-    predicate = predicate.split("\n  }", 1)[0]
-    assert "f.role" in predicate and "d.role" in predicate
-    assert "Object.keys(" in js.split("function syncDeviceFilterOptions()", 1)[1]
-    assert ".roles || {}).members" in js
+    component = _react_shell('inventory.jsx')
+    assert "['role', 'role'" in component and "['__none', '— no role —']" in component
+    assert 'state.policy?.roles?.members' in component
+    assert 'values.concat([[state.filters[key], state.filters[key]]])' in component
+    assert "role: 'role'" in _react_shell('inventory-model.mjs')
+    assert gui_server.target_row_matches({'role': 'boat'}, {'role': 'boat'}, now=1)
+    assert gui_server.target_row_matches({'role': ''}, {'role': '__none'}, now=1)
+    assert not gui_server.target_row_matches({'role': 'boat'}, {'role': '__none'}, now=1)
 
 
 def test_target_filters_use_fleet_and_deployment_facts_not_heartbeat(tmp_path):
@@ -12432,36 +11546,16 @@ def test_record_backed_target_facts_are_stable_across_preview_filters(tmp_path):
 
 
 def test_device_type_filters_have_server_and_client_preview_parity():
-    html = _webroot("index.html")
-    js = _webroot("app.js")
-    assert 'id="dev-filter-model-family"' in html
-    assert 'id="dev-filter-os-family"' in html
-    assert "modelFamily: val('dev-filter-model-family')" in js
-    assert "osFamily: val('dev-filter-os-family')" in js
-    assert "modelFamily: 'model_family'" in js
-    assert "osFamily: 'os_family'" in js
-    predicate = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1]
-    predicate = predicate.split("\n  }", 1)[0]
-    assert "d.model_family" in predicate
-    assert "d.os_family" in predicate
-    assert "d.platform_resolved || d.platform" in predicate
-    assert "target_warnings" in js
-    assert 'id="dev-target-warning"' in html
-    refresh = js.split("async function refreshDevices() {", 1)[1].split(
-        "\n  function syncDeviceFilterOptions()", 1)[0]
-    failed = refresh.split("if (!dr.ok)", 1)[1].split(
-        "var dbody = await dr.json()", 1)[0]
-    assert "devStatus.textContent" in failed
-    assert "targetWarning.textContent" in failed
-    assert "document.getElementById('dev-rows').innerHTML" in failed
-    assert "Device target preview unavailable." in failed
-    assert "document.getElementById('dev-count').textContent = " \
-        "'Results unavailable'" in failed
-    assert "devTotal = 0" in failed and "devOffset = 0" in failed
-    assert "updateDevPager(0)" in failed
-    assert "markAll.disabled = true" in failed
-    assert "markAll.textContent = 'Select page'" in failed
-    assert "delete SELECTED" not in failed
+    component, model, controller = (_react_shell(name) for name in
+        ('inventory.jsx', 'inventory-model.mjs', 'inventory-controller.mjs'))
+    assert "['modelFamily', 'model-family'" in component
+    assert "['osFamily', 'os-family'" in component
+    assert "modelFamily: 'model_family'" in model and "osFamily: 'os_family'" in model
+    assert 'target_warnings' in controller and 'id="dev-target-warning"' in component
+    assert 'Device target preview unavailable' in controller
+    assert 'rows: [], total: 0, offset: 0, now: 0, readOk: false' in controller
+    assert "'Results unavailable'" in component and 'disabled={!state.rows.length}' in component
+    assert 'matchQuery: null, matchIds: null' in controller
 
     # Task 22 consumes this same pure predicate; the HTTP handler delegates to
     # it rather than owning a second copy of the target language.
@@ -12491,74 +11585,23 @@ def test_device_type_filters_have_server_and_client_preview_parity():
 
 def test_failed_target_preview_cannot_be_replayed_from_selection_cache():
     import subprocess
-
-    js = _webroot("app.js")
-    refresh = "async function refreshDevices() {" + js.split(
-        "async function refreshDevices() {", 1)[1].split(
-            "\n\n  // Populate the credential filter", 1)[0]
-    select_all = "async function selectAllMatchingDevices() {" + js.split(
-        "async function selectAllMatchingDevices() {", 1)[1].split(
-            "\n  // Every selected-action shares one lock", 1)[0]
-    script = r'''
-const assert = require('node:assert/strict');
-const elements = new Map();
-function el(id) {
-  if (!elements.has(id)) elements.set(id, {
-    textContent: '', innerHTML: '', checked: true, indeterminate: true,
-    disabled: false
-  });
-  return elements.get(id);
-}
-var document = {getElementById: el};
-class AbortController {
-  constructor() { this.signal = {}; }
-  abort() {}
-}
-var devicesRefreshGeneration = 0, devicesRefreshController = null;
-var peerPolicyReadGeneration = 0;
-var LAST_DEVICES = [{device_id: 'stale-row'}], LAST_DEV_NOW = 77;
-var devTotal = 1, devOffset = 0, DEV_PAGE_SIZE = 200;
-var SELECTED = {'keep-selected': true};
-var peerPolicyReadOk = true, peerPolicy = {}, devStatus = el('dev-status');
-var selectAllMatchingBusy = false;
-function applyPendingDevFilter() {}
-function devicesPageQuery() { return ''; }
-function deviceFilterState() { return {}; }
-function deviceFilterQuery() { return ''; }
-function renderPeerPolicyPanel() {}
-// The schedule read rides along with the device read and is advisory; this
-// harness is about the device projection, so it stands in for it.
-async function refreshScheduleList() {}
-var pagerTotal = null;
-function updateDevPager(total) { pagerTotal = total; }
-var replayed = null;
-function renderDevices(devices) { replayed = devices.slice(); }
-async function fetch(url) {
-  if (url.startsWith('/api/v1/devices?')) {
-    return {ok: false, status: 503, json: async () => ({})};
-  }
-  if (url === '/api/v1/onboard/jobs') {
-    return {ok: true, status: 200, json: async () => ({jobs: []})};
-  }
-  return {ok: true, status: 200, json: async () => ({})};
-}
-''' + refresh + '\n' + select_all + r'''
-(async () => {
-  await refreshDevices();
-  assert.deepEqual(LAST_DEVICES, []);
-  assert.equal(LAST_DEV_NOW, 0);
-  assert.match(el('dev-rows').innerHTML, /preview unavailable/i);
-  assert.equal(el('dev-count').textContent, 'Results unavailable');
-  assert.equal(pagerTotal, 0);
-  assert.equal(el('mark-all').disabled, true);
-  assert.equal(el('mark-all').textContent, 'Select page');
-  await selectAllMatchingDevices();
-  assert.deepEqual(replayed, []);
-  assert.deepEqual(SELECTED, {'keep-selected': true});
-})().catch(error => { console.error(error); process.exit(1); });
-'''
-    result = subprocess.run(
-        ["node", "-"], input=script, text=True, capture_output=True)
+    model = (Path(gui_server.WEBROOT).parent / 'console-ui/src/inventory-model.mjs').as_uri()
+    controller = (Path(gui_server.WEBROOT).parent / 'console-ui/src/inventory-controller.mjs').as_uri()
+    program = f"import {{InventoryController}} from {json.dumps(controller)}; import {{selectionScope}} from {json.dumps(model)};" + r"""
+import assert from 'node:assert/strict';
+const c = new InventoryController(); let reads = 0;
+c.connect({fetch: async () => { reads++; return {ok: false, status: 503}; }});
+c.update({rows: [{device_id: 'stale'}], now: 77, total: 1, matchQuery: '', selected: new Set(['keep'])});
+await c.refresh();
+assert.deepEqual(c.snapshot().rows, []); assert.equal(c.snapshot().now, 0);
+assert.equal(c.snapshot().total, 0); assert.equal(c.snapshot().offset, 0);
+assert.match(c.snapshot().error, /preview unavailable/);
+assert.match(selectionScope(c.snapshot()).text, /unconfirmed/);
+assert.equal(selectionScope(c.snapshot()).offerAll, false);
+const n = reads; await c.selectAll(); assert.equal(reads, n);
+assert.deepEqual(c.selectedIds(), ['keep']); c.dispose();
+"""
+    result = subprocess.run(['node', '--input-type=module', '-'], input=program, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -13013,27 +12056,28 @@ def test_role_definitions_editor_wired_in_console():
         html = f.read()
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    panel = html.split('id="peer-policy-panel"')[1].split("</details>")[0]
-    for cid in ('id="role-def-new"', 'id="role-def-import"', 'id="role-def-export"',
-                'id="role-def-file"', 'id="role-def-rows"', 'id="role-def-status"'):
-        assert cid in panel, cid + " must live inside the Peer policy panel"
-    modal = html.split('id="role-def-modal"')[1].split('id="sched-modal"')[0]
-    for cid in ('id="rd-name"', 'id="rd-peers"', 'id="rd-nets"', 'id="rd-on-stale"',
-                'id="rd-restricted"', 'id="rd-origin"', 'id="rd-rates"', 'id="rd-swarm"',
-                'id="role-def-preview"', 'id="role-def-save"'):
-        assert cid in modal, cid + " must live inside the role editor"
-    assert "managed through the API or CLI" not in html
-    assert "/api/v1/peer-policy/roles/import-csv?dry_run=1" in js
-    assert "/api/v1/peer-policy/roles/export-csv" in js
-    save = js.split("getElementById('role-def-save').addEventListener")[1]
-    assert "?dry_run=1" in save and "confirm_token" in save
-    assert "wireModal('role-def-modal'" in js
-    # every role-scoped QoS key is editable, none of the global-only ones is
+    panel = _react_shell('policy-dialogs.jsx')
+    for cid in ('role-def-new', 'role-def-import', 'role-def-export',
+                'role-def-file', 'role-def-rows', 'role-def-status',
+                'rd-name', 'rd-peers', 'rd-nets', 'rd-on-stale',
+                'rd-restricted', 'rd-origin', 'rd-rates', 'rd-swarm',
+                'role-def-preview', 'role-def-save'):
+        assert cid in panel
+    assert 'id="iris-policies-root" data-policies-react' in html
+    assert 'id="role-def-modal"' not in html
+    assert "managed through the API or CLI" not in panel
+    controller = _react_shell('policies-controller.mjs')
+    assert "/api/v1/peer-policy/roles/import-csv" in controller
+    assert "/api/v1/peer-policy/roles/export-csv" in controller
+    assert "?dry_run=1" in controller and "confirm_token" in controller
+    assert "'If-Match'" in controller
     import role_csv
+    model = _react_shell('policy-definitions-model.mjs')
+    fields = model.split("export const roleQosFields = [")[1].split("];")[0]
     for key in role_csv.ROLE_QOS_FIELDS:
-        assert "['%s'," % key in js, key
+        assert "['%s'," % key in fields, key
     for key in ("origin_up_bps", "origin_per_torrent_up_bps", "origin_max_peers"):
-        assert "'%s'" % key not in js.split("ROLE_QOS_FIELDS = [")[1].split("];")[0]
+        assert "'%s'" % key not in fields
 
 
 def test_role_policy_view_and_effective_qos(role_api):
@@ -13058,7 +12102,7 @@ def test_role_policy_view_and_effective_qos(role_api):
     assert qos["instruction"]["accepted_identity"] is None
     assert qos["qos"]["numwant"]["source"] == "builtin"
     assert qos["qos"]["numwant"]["effective_ceiling"] == 50
-    assert qos["qos"]["announce_min_interval_s"]["peerless_leecher_floor_s"] == 120
+    assert qos["qos"]["announce_min_interval_s"] == {"value": 30, "source": "builtin"}
     assert qos["qos"]["catalog_tick_s"]["offline_horizon_s"] == 600
     assert qos["qos"]["catalog_tick_s"]["heartbeat_always"] is True
     assert request("GET", "/api/devices/missing/effective-qos")[0] == 404
@@ -13654,30 +12698,23 @@ def test_role_drift_accepts_preloaded_rows_without_a_second_fleet_read(
 
 def _run_instruction_console_js(script):
     import subprocess
-    js = _webroot("app.js")
-    code = js.split("// ---- Instruction status projection ----", 1)[1].split(
-        "// ---- End instruction status projection ----", 1)[0]
-    result = subprocess.run(["node", "-"], input=r'''
-const assert = require('node:assert/strict');
-const elements = new Map();
-function el(id) {
-  if (!elements.has(id)) elements.set(id, {
-    textContent: '', innerHTML: '', hidden: false, className: ''
-  });
-  return elements.get(id);
+    root = Path(gui_server.WEBROOT).parent / 'console-ui/src'
+    imports = (f"import {{instructionBadge}} from {json.dumps((root / 'inventory-model.mjs').as_uri())};\n"
+               f"import {{instructionDiagnostics}} from {json.dumps((root / 'policy-model.mjs').as_uri())};\n")
+    result = subprocess.run(["node", "--input-type=module", "-"], input=imports + r'''
+import assert from 'node:assert/strict';
+let panel;
+function renderInstructionPanel(policy) {
+  panel = instructionDiagnostics(policy, value => 'time:' + value);
 }
-var document = {getElementById: el};
-function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
-function fmtDate(v) { return 'time:' + v; }
-function policyCount(v) { return Number.isSafeInteger(v) && v >= 0 ? v : '—'; }
-''' + code + '\n' + script, text=True, capture_output=True)
+''' + script, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
-    html, js = (_webroot(name) for name in ("index.html", "app.js"))
-    assert "<th>Instructions</th>" in html
-    assert 'colspan="12"' in js
+    component = _react_shell('policy-dialogs.jsx')
+    assert "'Instructions'" in _react_shell('inventory.jsx')
+    assert 'colSpan={12}' in _react_shell('inventory.jsx')
     for identifier in (
             "policy-issued-revision", "policy-applied-revisions",
             "policy-instruction-states", "policy-instr-stamp-missing",
@@ -13685,36 +12722,34 @@ def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
             "instruction-key-state", "instruction-cert-days",
             "instruction-keylist-age", "instruction-root-ceremony",
             "instruction-root-quorum", "instruction-key-actions"):
-        assert 'id="%s"' % identifier in html
-    assert "Server-observed" in html
-    assert "Device-authored" in html
-    assert "Agent-asserted" in html
-    assert "violation = 0 does not mean compliant" in html
-    block = js.split("// ---- Instruction status projection ----", 1)[1].split(
-        "// ---- End instruction status projection ----", 1)[0]
-    assert "fetch(" not in block
-    assert "setTimeout(" not in block
+        assert identifier in component
+    for label in ("Server-observed", "Device-authored", "Agent-asserted",
+                  "violation = 0 does not mean compliant"):
+        assert label in component
+    model = _react_shell('policy-model.mjs')
+    assert "fetch(" not in model
+    assert "setTimeout(" not in model
 
 
 def test_instruction_console_renders_exact_escaped_chip_rollup_and_custody():
     _run_instruction_console_js(r'''
-let cell = instructionCell({instruction: {
+let cell = instructionBadge({instruction: {
   label: 'stale · last reported applied r9223372036854775807<img>', display_state: 'stale',
   underlying_state: 'applied', evidence: 'server-observed',
   report_age_seconds: 601, report_stale: true, pointer_skew: true,
   qos_drift_count: 0
 }});
-assert.match(cell, /applied r9223372036854775807&lt;img>/);
-assert.doesNotMatch(cell, /9223372036854776000/);
-assert.doesNotMatch(cell, /<img>/);
-assert.match(cell, /server-observed/);
-assert.match(cell, /last agent report \(agent-asserted\): applied/);
-assert.match(cell, /report 601s old/);
-assert.match(cell, /pointer skew/);
-let rejected = instructionCell({instruction: {label: 'rejected',
+assert.equal(cell.label, 'stale · last reported applied r9223372036854775807<img>');
+assert.doesNotMatch(cell.label, /9223372036854776000/);
+// React escapes these text fields; the browser suite verifies no HTML executes.
+assert.match(cell.detail, /server-observed/);
+assert.match(cell.detail, /last agent report \(agent-asserted\): applied/);
+assert.match(cell.detail, /report 601s old/);
+assert.match(cell.detail, /pointer skew/);
+let rejected = instructionBadge({instruction: {label: 'rejected',
   display_state: 'rejected', underlying_state: 'key_rejected',
   evidence: 'agent-asserted', reason: 'unknown_key', report_age_seconds: 1}});
-assert.match(rejected, /reason: unknown_key/);
+assert.match(rejected.detail, /reason: unknown_key/);
 
 renderInstructionPanel({
   fleet_rollup: {issued_revision: 12,
@@ -13729,33 +12764,33 @@ renderInstructionPanel({
     root_ceremony_overdue: 'critical', root_quorum_degraded: true,
     roots_attested_180d: 1, roots_configured: 2}
 });
-assert.equal(el('policy-issued-revision').textContent, 'r12');
-assert.match(el('policy-applied-revisions').innerHTML,
-  /r9223372036854775807<\/span>: 1/);
-assert.equal(el('policy-instr-stamp-missing').textContent, '4 devices');
-assert.equal(el('policy-pointer-skew').textContent, '1 device');
-assert.equal(el('policy-instruction-observed').textContent, 'time:456');
-assert.equal(el('instruction-cert-days').textContent, '-2 days');
-assert.match(el('instruction-root-ceremony').textContent, /critical/);
-assert.match(el('instruction-root-quorum').textContent, /degraded/);
-assert.match(el('instruction-key-actions').textContent, /certificate renewal due/);
-assert.match(el('instruction-key-actions').textContent, /signing refused/);
-assert.match(el('instruction-key-actions').textContent, /key list re-sign due/);
+assert.equal(panel.cells['policy-issued-revision'], 'r12');
+assert.deepEqual(panel.applied, [{label: 'r7', count: 2}, {label: 'r9223372036854775807', count: 1}]);
+assert.equal(panel.cells['policy-instr-stamp-missing'], '4 devices');
+assert.equal(panel.cells['policy-pointer-skew'], '1 device');
+assert.equal(panel.cells['policy-instruction-observed'], 'time:456');
+assert.equal(panel.cells['instruction-cert-days'], '-2 days');
+assert.equal(panel.cells['instruction-key-state'], 'Signing stopped');
+assert.match(panel.cells['instruction-root-ceremony'], /Review overdue/);
+assert.match(panel.cells['instruction-root-quorum'], /Confirmation needed/);
+assert.match(panel.cells['instruction-key-actions'], /Renew signing certificate/);
+assert.match(panel.cells['instruction-key-actions'], /Signing is stopped/);
+assert.match(panel.cells['instruction-key-actions'], /Re-sign revocation list/);
 
 renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
   instruction_status: {observed_at: 500, instr_stamp_missing: null,
     pointer_skew: null}, instruction_keys: null});
-assert.equal(el('policy-instr-stamp-missing').textContent, 'unavailable');
-assert.equal(el('policy-pointer-skew').textContent, 'unavailable');
-assert.equal(el('instruction-cert-days').textContent, 'unavailable');
-assert.equal(el('instruction-root-ceremony').textContent, 'unknown');
-assert.equal(el('instruction-key-actions').textContent, 'unavailable');
-assert.match(el('policy-applied-revisions').innerHTML, /unavailable/);
+assert.equal(panel.cells['policy-instr-stamp-missing'], 'unavailable');
+assert.equal(panel.cells['policy-pointer-skew'], 'unavailable');
+assert.equal(panel.cells['instruction-cert-days'], 'unavailable');
+assert.equal(panel.cells['instruction-root-ceremony'], 'Unavailable');
+assert.equal(panel.cells['instruction-key-actions'], 'Unavailable');
+assert.deepEqual(panel.applied, [{label: 'unavailable'}]);
 
-let unknownDrift = instructionCell({instruction: {label: 'unknown',
+let unknownDrift = instructionBadge({instruction: {label: 'unknown',
   display_state: 'unknown', evidence: 'agent-asserted',
   report_age_seconds: 1, qos_drift_count: null}});
-assert.match(unknownDrift, /QoS drift unavailable/);
+assert.match(unknownDrift.detail, /QoS drift unavailable/);
 
 renderInstructionPanel({fleet_rollup: {issued_revision: 0, applied: {'0': 1}, states: {applied: 1}},
   instruction_status: {observed_at: 501, instr_stamp_missing: 0,
@@ -13765,13 +12800,13 @@ renderInstructionPanel({fleet_rollup: {issued_revision: 0, applied: {'0': 1}, st
     certificate_days_to_expiry: 0, keylist_age_days: 100,
     root_ceremony_overdue: 'warn', root_quorum_degraded: false,
     roots_attested_180d: 2, roots_configured: 2}});
-assert.equal(el('policy-issued-revision').textContent, 'r0');
-assert.equal(el('policy-instr-stamp-missing').textContent, '0 devices');
-assert.equal(el('policy-pointer-skew').textContent, '0 devices');
-assert.equal(el('instruction-cert-days').textContent, '0 days');
-assert.match(el('instruction-root-ceremony').textContent, /warn/);
-assert.match(el('instruction-root-quorum').textContent, /healthy/);
-assert.equal(el('instruction-key-actions').textContent, 'key list re-sign due');
+assert.equal(panel.cells['policy-issued-revision'], 'r0');
+assert.equal(panel.cells['policy-instr-stamp-missing'], '0 devices');
+assert.equal(panel.cells['policy-pointer-skew'], '0 devices');
+assert.equal(panel.cells['instruction-cert-days'], '0 days');
+assert.match(panel.cells['instruction-root-ceremony'], /Review due/);
+assert.match(panel.cells['instruction-root-quorum'], /Confirmed/);
+assert.equal(panel.cells['instruction-key-actions'], 'Re-sign revocation list');
 
 renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
   instruction_status: {observed_at: 502, instr_stamp_missing: 0,
@@ -13781,8 +12816,8 @@ renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, state
     keylist_age_days: null, root_ceremony_overdue: 'unknown',
     root_quorum_degraded: false, roots_attested_180d: 0,
     roots_configured: 0}});
-assert.equal(el('instruction-root-quorum').textContent, 'not enabled');
-assert.equal(el('instruction-key-actions').textContent, 'not enabled');
+assert.equal(panel.cells['instruction-root-quorum'], 'Not enabled');
+assert.equal(panel.cells['instruction-key-actions'], 'Not enabled');
 ''')
 
 
@@ -14203,10 +13238,10 @@ def _schedule_projections():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required for console schedule projection tests")
-    source = _webroot("app.js")
-    start = source.index("  // ---- schedule projections")
-    end = source.index("  // ---- end schedule projections")
-    return node, source[start:end]
+    from pathlib import Path
+    module = (Path(gui_server.WEBROOT).parent / "console-ui/src/schedules-model.mjs").as_uri()
+    names = "scheduleTargetSummary, scheduleNextFireText, scheduleDeltaText, scheduleWaveText, scheduleCreatorText, scheduleTargetFromFilters, scheduleDefinitionFromForm, pendingScheduleText"
+    return node, "import {" + names + "} from " + json.dumps(module) + ";"
 
 
 def _run_schedule_projections(script):
@@ -14214,7 +13249,7 @@ def _run_schedule_projections(script):
     import subprocess
     node, block = _schedule_projections()
     program = (block + "\nconst esc = value => String(value);\n" + script)
-    result = subprocess.run([node], input=program, text=True,
+    result = subprocess.run([node, "--input-type=module"], input=program, text=True,
                             capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return _json.loads(result.stdout)
@@ -14250,21 +13285,20 @@ _SCHEDULE_OCCURRENCE = {
 
 
 def test_schedules_panel_lists_the_schedule_facts_an_operator_plans_from():
-    html = _webroot("index.html")
-    assert 'id="manage-schedules"' in html
-    panel = html.split('id="sched-panel"', 1)[1].split("</div>", 1)[0] + \
-        html.split('id="sched-panel"', 1)[1]
+    html = _react_shell("schedules.jsx")
+    assert "['manage-schedules', 'Schedules']" in _react_shell('inventory.jsx')
+    panel = html.split('id="sched-panel"', 1)[1]
     for column in ("Action", "Target", "Next run", "State",
                    "Latest run", "Created by"):
-        assert ">" + column + "<" in panel, column
+        assert "'" + column + "'" in panel, column
     assert 'id="sched-rows"' in html and 'id="sched-close"' in html
 
-    js = _webroot("app.js")
-    assert "function renderSchedules(" in js
+    js = _react_shell("schedules-controller.mjs")
+    assert "async refresh(" in js
     assert "'/api/v1/schedules'" in js
     # The list reads the schedule's own next-fire slot rather than
     # recomputing DST-aware weekly arithmetic in the browser.
-    assert "row.next_fire" in js
+    assert "row.next_fire" in _react_shell("schedules-model.mjs")
 
 
 def test_schedule_row_projections_report_target_delta_and_wave_counts():
@@ -14305,22 +13339,21 @@ def test_orphaned_schedule_names_the_missing_actor_and_can_be_reaffirmed():
     assert out["present"] == "console:alice"
     assert out["gone"] == "console:departed (actor no longer exists)"
 
-    js = _webroot("app.js")
+    js = _react_shell("schedules-controller.mjs")
     assert "'/reaffirm'" in js
     # Re-affirming rewrites created_by and bumps rev, so it carries the
     # revision the operator was looking at.
-    reaffirm = js.split("async function reaffirmSchedule(", 1)[1] \
-        .split("\n  }", 1)[0]
-    assert "'If-Match': row.etag" in reaffirm and "csrfHdr(" in reaffirm
+    reaffirm = js.split("async reaffirm(", 1)[1]
+    assert "'If-Match': row.etag" in reaffirm and "this.services.headers(" in reaffirm
     assert "method: 'POST'" in reaffirm
-    assert "sched-reaffirm" in js and "#sched-rows .sched-reaffirm" in js
+    assert "sched-reaffirm" in _react_shell("schedules.jsx") and "controller.reaffirm(row.id)" in _react_shell("schedules.jsx")
 
 
 def test_schedule_bulk_action_targets_the_current_device_filter():
-    html = _webroot("index.html")
-    assert 'id="schedule-selected"' in html
-    for element in ('id="sched-modal"', 'id="sched-modal-scope"',
-                    'id="sched-modal-kind"', 'id="sched-modal-when"',
+    html = _react_shell("schedules.jsx")
+    assert "bulkButton('schedule-selected'" in _react_shell('inventory.jsx')
+    for element in ('id="sched-modal"', "select('scope', 'scope'",
+                    "select('kind', 'kind'", "select('when', 'when'",
                     'id="sched-modal-preview"', 'id="create-schedule"'):
         assert element in html, element
 
@@ -14390,8 +13423,9 @@ def test_device_row_shows_a_pending_schedule_before_a_manual_conflict():
     assert out["miss"] == "" and out["none"] == ""
 
     js = _webroot("app.js")
-    assert "pendingScheduleText(d.device_id" in js
-    assert "sched-chip" in js
+    assert "schedules.scheduled(id)" in js
+    assert "pendingScheduleText(id, this.state.rows)" in _react_shell("schedules-controller.mjs")
+    assert "sched-chip" in _react_shell('inventory.jsx')
 
 
 def test_schedule_view_carries_its_own_next_fire_slot(tmp_path):
@@ -14425,25 +13459,12 @@ def test_schedule_next_run_never_renders_an_unreadable_row_as_undefined():
 
 
 def test_agent_install_dropdown_offers_only_what_the_row_can_take():
-    """An operator picked IOx for a C8000V on a router management type and
-    watched the dropdown snap back: the fleet store refused it with a 400 and
-    the next refresh re-rendered the stored value, with the reason parked in
-    the status line. The row now carries the server's own answer
-    (install_options) and refuses the choice up front, with the reason on the
-    option itself. The stored value stays selectable so the inventory is never
-    hidden. The server-side rule (install_options_for_record) stays the one
-    source of truth; this is presentation of it, not a second rule."""
-    js = _webroot("app.js")
-    render = js.split("var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr']", 1)[1].split(".join('')", 1)[0]
-    assert "d.install_options" in js
-    assert "allowed.indexOf(key) === -1" in render
-    assert "key !== platVal" in render          # the stored value is never disabled
-    assert "disabled title=" in render
-    assert "installRefusal(d, key)" in render
-    refusal = js.split("function installRefusal(d, platform) {", 1)[1].split("\n  }", 1)[0]
-    assert "router-routed" in refusal and "router-nat" in refusal and "xr-host" in refusal
-    # the failure path keeps surfacing the server's reason and reverting
-    handler = js.split("querySelectorAll('#dev-rows .platform')", 1)[1].split("\n    });", 1)[0]
-    assert "Agent install update failed" in handler and "refreshDevices()" in handler
-    source = inspect.getsource(gui_server.make_server)
-    assert 'row["install_options"] = gui_fleet.install_options_for_record(d)' in source
+    component, controller, js = _react_shell('inventory.jsx'), _react_shell('inventory-controller.mjs'), _webroot('app.js')
+    assert "['', 'guestshell', 'iox', 'router', 'xr-appmgr'].map" in component
+    assert 'Array.isArray(device.install_options)' in component and '!device.install_options.includes(value)' in component
+    assert 'value !== platform' in component and 'disabled={!!refused}' in component
+    assert 'services.installRefusal?.(device, value)' in component
+    refusal = js.split('function installRefusal(d, platform) {', 1)[1].split('\n  }', 1)[0]
+    assert 'router-routed' in refusal and 'router-nat' in refusal and 'xr-host' in refusal
+    assert 'update refused' in controller and 'body?.error' in controller and 'await this.refresh()' in controller
+    assert 'row["install_options"] = gui_fleet.install_options_for_record(d)' in inspect.getsource(gui_server.make_server)

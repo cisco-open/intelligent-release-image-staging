@@ -69,7 +69,7 @@ def test_expired_previous_is_dropped_on_the_next_rotation_pass():
     assert len(store["seeder"]["announce_token_previous"]) == 2
 
     # a third rotation inside the window is still refused (both still live)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="wait for one to expire"):
         secrets_store.rotate_announce(store, now + 3)
 
     # ... but once the window has passed, the pass retires them itself: no

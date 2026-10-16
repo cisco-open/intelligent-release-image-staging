@@ -74,9 +74,13 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 .product-bar .tag { font-family:var(--font-sans); font-size:11px; font-weight:500; color:var(--text-secondary); border:1px solid var(--border); border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:1px; }
 .shell { display:flex; min-height:calc(100vh - 49px); }
 .deployment-panel { margin: 0 0 24px; padding: 16px; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius-card); }
-.deployment-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 16px; }
-.deployment-heading h3 { margin: 0; }
-.deployment-layout { color: var(--action); font-weight: 600; }
+.deployment-panel summary { display: flex; align-items: baseline; gap: 12px; cursor: pointer; border-radius: var(--radius-control); }
+.deployment-panel summary::-webkit-details-marker { display: none; }
+.deployment-panel summary::before { content: '›'; color: var(--text-secondary); font-size: 20px; line-height: 1; flex: none; }
+.deployment-panel details[open] > summary::before { transform: rotate(90deg); }
+.deployment-panel summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.deployment-heading { display: flex; align-items: baseline; flex-wrap: wrap; flex: 1; min-width: 0; gap: 8px 16px; margin: 0; font-size: 16px; }
+.deployment-layout { color: var(--action); font-size: 14px; font-weight: 600; }
 #deployment-observed { margin-left: auto; font-size: 12px; }
 .deployment-panel p { margin: 8px 0 0; font-size: 12px; }
 .deployment-panel .deployment-table { table-layout: fixed; width: 100%; margin-top: 12px; }
@@ -217,14 +221,27 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 /* chart fill has no single-token equivalent (decorative, not a status
    color); Monitoring's chart treatment is Task 9 territory. */
 #audit-histogram .bar, #dl-histogram .bar { fill:#9fc0f0; cursor:pointer; transition:fill .12s ease; }
-#audit-histogram .bar:hover { fill:var(--action); }
+#audit-histogram .bar:hover, #dl-histogram .bar:hover { fill:var(--action); }
 /* time brush: selection overlay lives in its own pointer-events-free layer;
    all hit-testing is numeric on the svg itself */
-#audit-histogram { cursor:crosshair; touch-action:none; user-select:none; -webkit-user-select:none; }
-#audit-brush { pointer-events:none; }
-#audit-brush .brush-sel { fill:rgba(39,116,217,.14); stroke:var(--action); stroke-width:1; }
-#audit-brush .brush-handle { fill:var(--action); }
-#audit-clear-selection { margin-left:6px; }
+#audit-histogram, #dl-histogram { cursor:crosshair; touch-action:none; user-select:none; -webkit-user-select:none; }
+#audit-brush, #dl-brush { pointer-events:none; }
+#audit-brush .brush-sel, #dl-brush .brush-sel { fill:rgba(39,116,217,.14); stroke:var(--action); stroke-width:1; }
+#audit-brush .brush-handle, #dl-brush .brush-handle { fill:var(--action); }
+#audit-clear-selection, #dl-clear-selection { margin-left:6px; }
+:is(#audit-histogram, #dl-histogram)[data-brush-mode="left"],
+:is(#audit-histogram, #dl-histogram)[data-brush-mode="right"] { cursor:ew-resize; }
+:is(#audit-histogram, #dl-histogram)[data-brush-mode="pan"] { cursor:grab; }
+:is(#audit-histogram, #dl-histogram)[data-brush-mode="dragging"] { cursor:grabbing; }
+.monitoring-timeline-help { font-size:12px; }
+#audit-tbl { min-width:640px; }
+#dl-tbl { min-width:700px; }
+@media (max-width: 800px) {
+  #monitoring-pane-deploylogs .joined { display:flex; flex-wrap:wrap; gap:8px; width:100%; }
+  #monitoring-pane-deploylogs .joined :is(input, select, button) { border:1px solid var(--border); border-radius:var(--radius-control); }
+  #monitoring-pane-deploylogs .joined input { flex-basis:100%; width:100%; min-width:0; }
+  #monitoring-pane-deploylogs .joined select { flex:1; min-width:0; }
+}
 /* audit table: composed messages, category tags, result badges */
 #audit-tbl td.nowrap { white-space:nowrap; }
 #audit-tbl .detail { color:var(--text-secondary); }
@@ -467,12 +484,16 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 /* per-file upload rows: each upload owns its bar and state text */
 #uploads { max-width:560px; margin:0 auto; text-align:left; }
 #uploads:empty { display:none; }
-.upload-row { display:flex; gap:10px; align-items:center; margin:8px 0; }
-.upload-row .up-name { flex:0 1 220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
-.upload-row .progress { flex:1 1 auto; margin:0; }
-.upload-row .up-state { white-space:nowrap; font-size:12px; min-width:64px; }
+.upload-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(64px,1fr) auto;
+  gap:6px 10px; align-items:center; margin:12px 0; }
+.upload-row .up-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.upload-row .progress { width:100%; margin:0; }
+/* Put the verdict below the name/bar so long errors neither hide progress
+   nor push a narrow page wider than the viewport. */
+.upload-row .up-state { grid-column:1 / -1; grid-row:2; white-space:normal;
+  overflow-wrap:anywhere; font-size:12px; min-width:0; }
 .upload-row .up-state.err { color:var(--danger); }
-.upload-row .up-dismiss { font-size:14px; }
+.upload-row .up-dismiss { grid-column:3; grid-row:1; font-size:14px; }
 /* per-job onboard log panels (one panel per job in #onboard-logs) */
 #onboard-logs .job-log-panel { margin-top:18px; }
 .job-log-head { display:flex; gap:8px; align-items:center; }
@@ -523,15 +544,23 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 .drawer-body { flex:1; overflow:auto; padding:12px 14px; }
 .drawer-body h3:first-child { margin-top:0; }
 .drawer-body .log { max-height:45vh; overflow:auto; }
+#deploy-info-panel .drawer-head > span { min-width:0; overflow-wrap:anywhere; }
+#deploy-info-panel .drawer-head .btn { flex-shrink:0; }
+#di-log-tbl { min-width:540px; }
+#batch-table { min-width:600px; }
+#activity-panel .job-log-head { flex-wrap:wrap; }
+#activity-panel .job-log-head h3 { min-width:0; overflow-wrap:anywhere; }
+.job-action-label { font-size:12px; color:var(--text-secondary); }
+@media (max-width:480px) {
+  #activity-panel .job-log-head h3 { flex-basis:100%; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .drawer { transition:none; }
 }
 
-/* Image picker: a centred modal over a translucent backdrop, shared by the
-   per-row assign button and the bulk "Assign images to N devices…" action
-   (openImagePicker in app.js) -- a choice to make and confirm, not a panel
-   to read alongside the table, so it is a modal rather than a third drawer. */
+/* Shared modal chrome. React's assignment dialogs and the remaining
+   application dialogs use the same scrollable body and fixed footer. */
 .modal-backdrop { position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.35);
   display:flex; align-items:center; justify-content:center; padding:24px; }
 .modal-backdrop[hidden] { display:none; }
@@ -559,7 +588,9 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 #dl-drawer[hidden] { display:none; }
 .dl-drawer-head { display:flex; align-items:center; justify-content:space-between;
   gap:10px; padding:10px 12px; border-bottom:1px solid var(--rule); }
-#dl-drawer .log { flex:1; margin:0; overflow:auto; border:0; border-radius:0; }
+.dl-drawer-head > span { min-width:0; overflow-wrap:anywhere; }
+.dl-drawer-head .btn { flex-shrink:0; }
+#dl-drawer .log { flex:1; max-height:none; margin:0; overflow:auto; border:0; border-radius:0; }
 
 @media (prefers-reduced-motion: reduce) {
   #dl-drawer { transition:none; }

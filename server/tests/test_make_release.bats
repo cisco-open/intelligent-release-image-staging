@@ -43,6 +43,7 @@
   for path in \
     iris/docs/zensical/index.md \
     iris/docs/dev/README.md \
+    iris/docs/dev/api-soak.md \
     iris/zensical.toml \
     iris/requirements-docs.txt \
     iris/requirements-dev.txt \
@@ -53,6 +54,7 @@
     iris/fleet/roles.csv.example \
     iris/fleet/schedules.csv.example \
     iris/lab/device-run.sh \
+    iris/lab/guest-publish.py \
     iris/lab/xr-run.sh \
     iris/lab/xr-dialogue.pl \
     iris/lab/iris-ssh-policy.sh \
@@ -70,12 +72,35 @@
     iris/tools/irisctl \
     iris/tools/iris-key-setup \
     iris/tools/release-auth.py \
+    iris/tools/release-stage.py \
+    iris/tools/prepare-device-context.py \
+    iris/tools/prepare-docker-hosts.py \
+    iris/tools/finalize-device-image.py \
+    iris/tools/build-release-kit.py \
+    iris/tools/build-release-candidate.py \
+    iris/tools/build-packaging-inputs.py \
+    iris/tools/build-offline-dependencies.py \
+    iris/tools/build-offline-sources.py \
+    iris/tools/build-debian-sources.py \
+    iris/tools/build-alpine-sources.py \
+    iris/tools/build-core-python-sources.py \
+    iris/tools/build-runtime-sources.py \
+    iris/tools/build-image-source-notices.py \
+    iris/tools/complete-release-candidate.py \
+    iris/tools/prepare-prebuilt-release.py \
+    iris/tools/inspect-image-components.py \
+    iris/tools/build-guest-inputs.py \
+    iris/tools/bootstrap-offline.py \
     iris/tools/iris_installer/cli.py \
     iris/tools/iris_installer/probe.py \
     iris/tools/check-host-time.sh \
     iris/tools/api-exercise.py \
     iris/tools/api_exercise_fixtures.py \
     iris/tools/test_api_exercise.py \
+    iris/tools/api-soak.py \
+    iris/tools/api_soak_workload.py \
+    iris/tools/api_soak_fixture.py \
+    iris/tools/test_api_soak.py \
     iris/tools/vendor-swagger-ui.sh; do
     tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
   done
@@ -83,6 +108,9 @@
   run env PYTHONPATH="$FIX/release/iris/tools" python3 -c \
     'from api_exercise_fixtures import exercise; assert callable(exercise)'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run python3 "$FIX/release/iris/tools/api-soak.py" --help
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"--accept-isolated-load"* ]]
   run python3 "$FIX/release/iris/tools/irisctl" doctor --help
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"kubernetes"* ]]
@@ -122,6 +150,7 @@ _make_release_fixture() {
   echo "# index" > "$FIX/docs/zensical/index.md"
   # docs/ ships whole, so the contributor folder travels with the manual.
   echo "# dev" > "$FIX/docs/dev/README.md"
+  cp "$repo/docs/dev/api-soak.md" "$FIX/docs/dev/api-soak.md"
   echo "# server" > "$FIX/server/tracker.py"
   echo "PUBLIC CERT" > "$FIX/server/certs/cisco_bulkhash_verify.pem"
   echo "# device" > "$FIX/device/bootstrap.sh"
@@ -132,6 +161,14 @@ _make_release_fixture() {
            gen-device-installers.sh apply-assignments.sh get-ioxclient.sh \
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
            build-device-image.sh check-package-freshness.sh \
+           prepare-device-context.py prepare-docker-hosts.py finalize-device-image.py \
+           build-release-kit.py build-release-candidate.py build-packaging-inputs.py \
+           build-offline-dependencies.py build-offline-sources.py build-guest-inputs.py \
+           bootstrap-offline.py inspect-image-components.py build-debian-sources.py \
+           build-alpine-sources.py build-core-python-sources.py \
+           build-runtime-sources.py build-image-source-notices.py \
+           complete-release-candidate.py prepare-prebuilt-release.py release-stage.py \
+           prebuilt-intake.py hosted-prebuilt-stage.py \
            build-ssh-verifier.sh build-ssh-verifiers.sh \
            iris-aead.c build-instruction-crypto.sh build-instruction-crypto-inner.sh \
            build-instruction-crypto.Dockerfile \
@@ -140,6 +177,9 @@ _make_release_fixture() {
     echo "# $f" > "$FIX/tools/$f"
   done
   cp "$repo/tools/api_exercise_fixtures.py" "$FIX/tools/api_exercise_fixtures.py"
+  for f in api-soak.py api_soak_workload.py api_soak_fixture.py test_api_soak.py; do
+    cp "$repo/tools/$f" "$FIX/tools/$f"
+  done
   cp "$repo/tools/irisctl" "$FIX/tools/irisctl"
   cp "$repo/tools/iris-key-setup" "$FIX/tools/iris-key-setup"
   cp "$repo/tools/release-auth.py" "$FIX/tools/release-auth.py"
@@ -163,6 +203,7 @@ _make_release_fixture() {
   # spares next to them stay ignored and must never reach the tarball
   echo "stale" > "$FIX/deliverables/aria2c-x86_64.old-6patch"
   echo "# run" > "$FIX/lab/device-run.sh"; echo "# run" > "$FIX/lab/xr-run.sh"
+  cp "$repo/lab/guest-publish.py" "$FIX/lab/guest-publish.py"
   cp "$repo/lab/xr-dialogue.pl" "$FIX/lab/xr-dialogue.pl"
   echo "# policy" > "$FIX/lab/iris-ssh-policy.sh"
   echo "kind: Namespace" > "$FIX/kubernetes/namespace.yaml"
@@ -211,7 +252,8 @@ _make_release_fixture() {
   # structural placeholders
   for present in iris/server/tracker.py iris/server/certs/cisco_bulkhash_verify.pem \
                  iris/tools/aria2c-patches/0001.patch iris/fleet/devices.csv.example \
-                 iris/lab/iris-ssh-policy.sh \
+                 iris/lab/iris-ssh-policy.sh iris/lab/guest-publish.py \
+                 iris/tools/prebuilt-intake.py iris/tools/hosted-prebuilt-stage.py \
                  iris/bin/aria2c iris/deliverables/aria2c-x86_64 \
                  iris/deliverables/aria2c-aarch64 \
                  iris/bin/.gitkeep iris/artifacts/.gitkeep iris/MANIFEST.txt; do

@@ -21,6 +21,7 @@ are:
 | The ordered patches | `../aria2c-patches/*.patch` |
 | The build container definition | `Dockerfile` here |
 | The build driver | `build.sh` here |
+| Checksum-locked offline acquisition and rebuild | `rebuild-pinned.py` and `apk-lock.json` here |
 | Original producer recipe and dependency sources | Release source asset, recorded in `../aria2c-source/` |
 
 ## What the repository distributes
@@ -32,10 +33,10 @@ package builders read). A clone or an unpacked release carries the binaries,
 ordered local patches, and build scripts. `tools/aria2c.sha256` records the
 version, source pin, patch list and SHA-256 of each committed binary.
 
-The [aria2c-2.5.6-p10 release](https://github.com/cisco-open/intelligent-release-image-staging/releases/tag/aria2c-2.5.6-p10)
-also carries `aria2c-2.5.6-p10-source.tar.gz` and its adjacent `.sha256` file.
-This source asset contains the pinned upstream tree and bundled libraries,
-all ten original patches, the original producer recipe, current build scripts,
+The current local source asset is `aria2c-2.5.6-p12-source.tar.gz`, with an
+adjacent `.sha256` file. This is not a claim of a published p12 release.
+The source asset contains the pinned upstream tree and bundled libraries,
+all twelve patches, the preserved p10 producer recipe, current build scripts,
 dependency source archives with Alpine recipes and patches, license texts,
 and binary provenance. A separately identified source tree adds dated
 modification notices without altering the preserved original inputs.
@@ -82,10 +83,10 @@ matching `tools/aria2c.sha256`, prepare and verify the complete source asset
 before creating the release. For the current client:
 
 ```bash
-source_asset=aria2c-2.5.6-p10-source.tar.gz
+source_asset=aria2c-2.5.6-p12-source.tar.gz
 sha256sum -c "$source_asset.sha256"
-gh release create aria2c-2.5.6-p10 \
-  --title "aria2c 2.5.6, 10 patches" \
+gh release create aria2c-2.5.6-p12 \
+  --title "aria2c 2.5.6, 12 patches" \
   --notes-file <notes> \
   deliverables/aria2c-x86_64 deliverables/aria2c-aarch64 tools/aria2c.sha256 \
   "$source_asset" "$source_asset.sha256"
@@ -99,43 +100,44 @@ update the source asset record and default `ARIA2C_RELEASE_TAG` in
 
 ## Rebuilding
 
+Use the matching source archive and the checksum-locked dependency helper from
+this checkout. See [source verification](../aria2c-source/README.md).
+
 ```bash
-git clone https://github.com/AnInsomniacy/aria2-next vendor/aria2-next
-git -C vendor/aria2-next checkout v2.5.6
-./build.sh x86_64      # or: ./build.sh aarch64
+python3 tools/aria2c-build/rebuild-pinned.py x86_64 \
+  --source-archive /path/to/aria2c-2.5.6-p12-source.tar.gz \
+  --cache /path/to/retained-apks --output /path/to/new-output --jobs 2
 ```
 
-`build.sh` refuses to proceed unless the checkout is at the pinned commit, and
-refuses any patch that does not apply cleanly to it, so a build either
-corresponds to the published patches or it fails.
+Run from the repository root. Use `aarch64` for ARM64, with a native builder or
+already configured emulation. Python 3.11+, git, Docker and buildx are required.
+The script verifies the pinned archive, reconstructs its exact patched
+source, and checks the rebuilt binary against the distributed checksum before
+adopting the output. It leaves the original source archive and clients unchanged.
 
-Builds default to two compiler and LTO jobs, including under ARM emulation.
-Set `ARIA2C_BUILD_JOBS=4 ./build.sh x86_64` to choose another positive bound.
-LTO and static linking remain enabled.
+The cache contains all 53 exact packages used by each architecture, including
+transitive dependencies. Downloads use HTTPS and pinned byte sizes and SHA256
+hashes. The build also verifies Alpine signatures using the pinned base image's
+architecture-specific trust keys. Compiler commands, static linking and LTO
+are unchanged; two compiler/LTO jobs are used by default.
+
+Retain the cache and base image for repeat builds. Add `--offline` to refuse
+package downloads and `--no-cache` to disable Docker build-layer reuse.
+Build steps run without network access in both modes. A changed cached file,
+missing offline input or binary mismatch stops the build without replacing
+existing output. These are contributor tools; installations use committed clients.
 
 ### When a pin has been withdrawn
 
-`Dockerfile` pins the base image by digest and every Alpine package by exact
-version, so a rebuild either resolves the same inputs or fails. It can fail:
-an Alpine release branch indexes only the newest `-rN` of each package, so a
-security bump withdraws the version we pinned and `apk add` refuses the set:
+The historical p10 archive's `rebuild.py` and producer `build.sh` use Alpine's rolling
+package index, which no longer lists every pinned version. Use the helper above:
+it acquires exact APK files from the recorded mirrors instead of resolving that
+index. Mirrors can also remove files, so retain the checked cache. No mirror is
+trusted to substitute bytes or signing keys.
 
-```
-ERROR: unable to select packages:
-  openssl-dev-3.5.8-r0: breaks: world[openssl-dev=3.5.7-r0]
-```
-
-That is the pinning working, not a bug to route around. Bump the withdrawn pin
-to the version the branch now carries — deliberately, in the file, keeping the
-`=version` — and note that the rebuilt binary then links the newer library and
-will not reproduce the shipped bytes. Never replace a pin with a floating
-package name to make the error go away.
-
-A rebuild with the recorded inputs can match `tools/aria2c.sha256`; a fresh
-x86_64 rebuild has done so. Changing a toolchain, library version or flag can
-produce different bytes. The checksum pins the exact artifact IRIS ships.
-Update it only when deliberately adopting and validating a new binary, never
-to silence an unexplained mismatch.
+Do not bump a dependency merely to make an old binary reproduce. A deliberately
+updated client needs matched binaries, corresponding source, notices and tests
+for both architectures. Existing published assets remain unchanged.
 
 ## Peer-cap regression checks
 
@@ -241,10 +243,32 @@ completion, sidecar `[]`).
 
 ## Opt-in peer TLS (2026-09-18)
 
-The local producer is the sibling `aria2-next-static` checkout. The driver archives
-the local pinned checkout before applying patches; it never fetches or resets
-that checkout. Patches 0008/0009 add required hybrid TLS and align upstream
-seeder tests with the already-shipped grace period. TLS defaults to disabled.
+Patches 0008/0009 introduced required hybrid TLS and aligned upstream seeder
+tests with the existing grace period. The current rebuild helper reconstructs
+that source and the later patches from the matching archive without touching a
+vendor checkout. TLS defaults to disabled. Patch 0011 additionally requires
+fresh certificate-identity withdrawal data in required mode.
 See [Peer transfer
 encryption](../../docs/zensical/architecture/security-model.md#peer-transfer-encryption)
 for enrollment, deployment and security limits.
+
+## Tracker announcements under a download limit
+
+Patch `0012-isolate-tracker-control-throttle.patch` marks only the tracker's
+internal HTTP request. Its response remains readable when image transfers reach
+the aggregate download cap. Per-request limits and ordinary HTTP and BitTorrent
+payload limits still apply. Required peer TLS and identity checks are unchanged.
+
+Run the bounded native regression against an exact candidate digest:
+
+```bash
+python3 test-tracker-throttle.py out/x86_64/aria2c \
+  --sha256 "<candidate-sha256>" --seconds 180 --output "<new-evidence-directory>"
+```
+
+The test uses a loopback HTTP tracker, mandatory hybrid peer TLS, and both global
+and per-torrent download limits. It checks real payload, recurring announcements,
+the final silent interval, and a separately capped ordinary HTTP download.
+It retains results and logs and requires all child processes to exit. Python 3.11+
+and the OpenSSL command are required. Use the ARM binary with the same command
+on ARM64 or a registered QEMU handler; emulation is not device performance proof.

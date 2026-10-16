@@ -27,10 +27,16 @@ def job(**updates):
                  "state": "recovery-required", "proof": None}, **updates)
 
 
-@pytest.mark.parametrize("updates", [{"action": "backup"}, {"state": "completed"},
-    {"state": "running"}, {"family": "shell"}, {"id": "../other"}])
-def test_recovery_requires_exact_interrupted_operation(updates):
-    with pytest.raises(InstallError, match="interrupted rotation"):
+@pytest.mark.parametrize("updates,message", [
+    ({"action": "backup"}, "interrupted backup"),
+    ({"action": "shell"}, "interrupted rotation"),
+    ({"state": "completed"}, "interrupted rotation"),
+    ({"state": "running"}, "interrupted rotation"),
+    ({"family": "shell"}, "interrupted rotation"),
+    ({"id": "../other"}, "interrupted rotation"),
+])
+def test_recovery_requires_exact_interrupted_operation(updates, message):
+    with pytest.raises(InstallError, match=message):
         gui.recovery_request(job(**updates))
 
 
@@ -384,7 +390,7 @@ def test_recipient_rejects_running_job_and_pending_candidate_replacement(client,
     with pytest.raises(InstallError, match="different recovery candidate"):
         gui.prepare_recovery_candidate(client, other, other_recipient, independent_copy=True)
     assert json.loads((client.state_dir / "recovery-candidate.json").read_text())["operation_id"] == first["request_id"]
-    monkeypatch.setattr(client, "snapshot", lambda: [job(id=first["request_id"], state="rotated")])
+    monkeypatch.setattr(client, "snapshot", lambda: [job(id=first["request_id"], family='age-recovery', state="rotated")])
     second = gui.prepare_recovery_candidate(client, other, other_recipient, independent_copy=True)
     assert second["request_id"] != first["request_id"]
 

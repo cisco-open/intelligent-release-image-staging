@@ -282,8 +282,8 @@ def install_options_for(model, os_family=None):
     of what the model prefix would otherwise suggest) and never ``None``
     (which would read as "no opinion" and let validate_record wave it
     through). Widening past the 8000 series is a v2 change to this one
-    branch, not a rewrite of the guardrail. The Console intersects this answer
-    with the install choices for the operator's selected management type.
+    branch, not a rewrite of the guardrail. The fleet projection combines this
+    answer with the management-type coupling for Console install choices.
     A model answer never changes that type or its network fields.
 
     None means the model is blank or not a family this table recognizes, so no

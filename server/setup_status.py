@@ -38,14 +38,17 @@ _PACKAGE_SPECS = (
     ("iris-arm64.tar", "iox", "linux/arm64", REMEDY),
     (XR_PACKAGE, "xr-appmgr", "linux/amd64", REMEDY_XR),
 )
-_PROVENANCE_FORMAT = "iris-device-wrapper-v1"
 _PROVENANCE_MAX_BYTES = 64 * 1024
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _OCI_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
-_REQUIRED_PROVENANCE = {
+_COMMON_PROVENANCE = {
     "format", "wrapper_kind", "wrapper_file", "wrapper_sha256", "platform",
     "canonical_index_digest", "canonical_archive_sha256",
-    "canonical_source_sha256",
+}
+_PROVENANCE_SOURCES = {
+    "iris-device-wrapper-v1": ("canonical_source_sha256",),
+    "iris-device-wrapper-v2": ("canonical_neutral_source_sha256",
+                               "canonical_finalization_sha256"),
 }
 _READY_DETAIL = (
     "Readable package bytes match the adjacent build-provenance manifest; "
@@ -136,7 +139,8 @@ def _parse_provenance(path):
         if not key or not value or key in values:
             return None, "provenance-invalid"
         values[key] = value
-    if not _REQUIRED_PROVENANCE.issubset(values):
+    sources = _PROVENANCE_SOURCES.get(values.get("format"))
+    if sources is None or set(values) != _COMMON_PROVENANCE | set(sources):
         return None, "provenance-invalid"
     return values, ""
 
@@ -180,14 +184,14 @@ def package_readiness(path, name, kind, platform, remedy):
         entry.update(state="unknown", reason=reason,
                      detail=_REASON_DETAIL[reason])
         return entry
-    if (values["format"] != _PROVENANCE_FORMAT
-            or values["wrapper_kind"] != kind
+    source_fields = _PROVENANCE_SOURCES[values["format"]]
+    if (values["wrapper_kind"] != kind
             or values["wrapper_file"] != name
             or values["platform"] != platform
             or not _HEX_SHA256.fullmatch(values["wrapper_sha256"])
             or not _OCI_SHA256.fullmatch(values["canonical_index_digest"])
             or not _HEX_SHA256.fullmatch(values["canonical_archive_sha256"])
-            or not _HEX_SHA256.fullmatch(values["canonical_source_sha256"])):
+            or any(not _HEX_SHA256.fullmatch(values[field]) for field in source_fields)):
         entry.update(state="unknown", reason="provenance-invalid",
                      detail=_REASON_DETAIL["provenance-invalid"])
         return entry
@@ -201,8 +205,12 @@ def package_readiness(path, name, kind, platform, remedy):
     entry["provenance"] = {
         "canonical_index_digest": values["canonical_index_digest"],
         "canonical_archive_sha256": values["canonical_archive_sha256"],
-        "canonical_source_sha256": values["canonical_source_sha256"],
+        **{field: values[field] for field in source_fields},
     }
+    if values["format"] == "iris-device-wrapper-v2":
+        # A neutral build-input digest and deployment finalization record are
+        # distinct evidence, never aliases for v1's rooted source digest.
+        entry["provenance"]["format"] = values["format"]
     return entry
 
 
@@ -236,6 +244,7 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
         embedded = {}
         identities = {}
         for name in ("iris-agent.tgz", "iris-agent.tgz.sha256",
+                     "iris-agent-arm.tgz", "iris-agent-arm.tgz.sha256",
                      "bootstrap.sh", "iris-signers.pem"):
             expected = record.get(name)
             if not isinstance(expected, str) or not _HEX_SHA256.fullmatch(expected):
@@ -250,7 +259,7 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
                         or (before.st_dev, before.st_ino) != \
                         (info.st_dev, info.st_ino) or not info.st_size:
                     return entry
-                if name == "iris-agent.tgz.sha256" and info.st_size != 65:
+                if name.endswith(".tgz.sha256") and info.st_size != 65:
                     entry.update(state="stale", reason="served-bundle-changed",
                                  detail="The served bundle digest sidecar is not canonical.")
                     return entry
@@ -262,8 +271,8 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
                 data = bytearray()
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
-                    if name in ("iris-agent.tgz.sha256", "iris-signers.pem"):
-                        limit = 65 if name == "iris-agent.tgz.sha256" \
+                    if name.endswith(".tgz.sha256") or name == "iris-signers.pem":
+                        limit = 65 if name.endswith(".tgz.sha256") \
                             else 128 * 1024
                         if len(data) + len(chunk) > limit:
                             entry.update(
@@ -271,14 +280,14 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
                                 detail="A bounded served publication input grew while being read.")
                             return entry
                         data.extend(chunk)
-                if name == "iris-agent.tgz":
+                if name in ("iris-agent.tgz", "iris-agent-arm.tgz"):
                     entry["built_at"] = int(info.st_mtime)
                 if digest.hexdigest() != expected:
                     entry.update(
                         state="stale", reason="served-bundle-changed",
                         detail="A served bundle publication input changed after verified provisioning.")
                     return entry
-                if name == "iris-agent.tgz":
+                if name in ("iris-agent.tgz", "iris-agent-arm.tgz"):
                     handle.seek(0)
                     with tarfile.open(fileobj=handle, mode="r:gz") as archive:
                         members = archive.getmembers()
@@ -297,6 +306,10 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
                                 if member_handle is not None else b""
                             if not trust_data \
                                     or len(trust_data) != matches[0].size:
+                                return entry
+                            if trust_name in embedded and embedded[trust_name] != trust_data:
+                                entry.update(state="stale", reason="served-bundle-changed",
+                                             detail="Architecture bundles have different instruction trust.")
                                 return entry
                             embedded[trust_name] = trust_data
                             trust_expected = record.get(trust_name)
@@ -320,12 +333,11 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
                     return entry
             identities[name] = identity
             contents[name] = bytes(data)
-        bundle_digest = record["iris-agent.tgz"]
-        if contents["iris-agent.tgz.sha256"] != \
-                (bundle_digest + "\n").encode("ascii"):
-            entry.update(state="stale", reason="served-bundle-changed",
-                         detail="The served bundle digest sidecar is not the exact digest of the bundle.")
-            return entry
+        for bundle in ("iris-agent.tgz", "iris-agent-arm.tgz"):
+            if contents[bundle + ".sha256"] != (record[bundle] + "\n").encode("ascii"):
+                entry.update(state="stale", reason="served-bundle-changed",
+                             detail="The served bundle digest sidecar is not the exact digest of the bundle.")
+                return entry
         if embedded["iris-signers.allowed_signers"] != \
                 contents["iris-signers.pem"]:
             entry.update(state="stale", reason="served-bundle-changed",

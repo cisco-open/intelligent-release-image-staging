@@ -66,23 +66,18 @@ def test_script_success_does_not_preempt_service_failure():
 
 
 def test_chassis_details_use_actual_model_and_keep_evidence_source():
-    app = (Path(__file__).resolve().parents[1] / "webroot/app.js").read_text()
-    fn = app.split("  function deviceHardwareRows", 1)[1].split(
-        "  function deployRecordRows", 1)[0]
-    program = """
-const assert = require('node:assert/strict');
-const esc = value => String(value).replaceAll('<','&lt;').replaceAll('>','&gt;');
-const deviceSeriesLabel = family => family === 'C8xxx' ? 'Catalyst Routers' : 'NCS';
-function deviceHardwareRows""" + fn + """
-let html = deviceHardwareRows({model_family:'C8xxx',model:'C8xxx'},
+    model = (Path(__file__).resolve().parents[1] / "console-ui/src/device-details-model.mjs").as_uri()
+    program = "import {hardwareRows} from '" + model + "';\n" + """
+import assert from 'node:assert/strict';
+const rows = hardwareRows({model_family:'C8xxx',model:'C8xxx'},
  {preflight:{detected_model:'C8000V'},resolved:{model:'C8xxx'}});
-assert.match(html,/Series.*Catalyst Routers/);
-assert.match(html,/Chassis model.*C8000V.*last preflight/);
-assert.doesNotMatch(html,/Chassis model.*C8xxx/);
-assert.match(deviceHardwareRows({model:'NCS'}),/Not detected/);
-assert.match(deviceHardwareRows({model:'NCS',heartbeat_model:'NCS-540'}),/NCS-540.*agent-reported/);
-assert.match(deviceHardwareRows({model:'NCS',heartbeat_model:'<script>'}),/&lt;script&gt;/);
+assert.deepEqual(rows, [{label:'Series',value:'Catalyst Routers'},
+ {label:'Chassis model',value:'C8000V',note:'last preflight'}]);
+assert.equal(hardwareRows({model:'NCS'})[1].value,'Not detected');
+assert.equal(hardwareRows({model:'NCS',heartbeat_model:'NCS-540'})[1].note,'agent-reported');
+// Rendering escapes text in React, covered by the actual browser suite.
+assert.equal(hardwareRows({model:'NCS',heartbeat_model:'<script>'})[1].value,'<script>');
 """
-    result = subprocess.run(["node", "-"], input=program, text=True,
+    result = subprocess.run(["node", "--input-type=module", "-"], input=program, text=True,
                             capture_output=True, timeout=5)
     assert result.returncode == 0, result.stderr

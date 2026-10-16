@@ -82,6 +82,9 @@ _HOP_HEADERS = {
 _RESPONSE_DROP = _HOP_HEADERS | {"server", "date"}
 _HANDSHAKE_TIMEOUT = 30
 _MAX_BODY = 64 * 1024
+_MAX_SIGNING_APPROVAL = 192 * 1024  # 128 KiB public keylist, base64 + JSON
+_MAX_BROWSER_APPROVAL = 128 * 1024  # 64 KiB public PEM plus escaped JSON
+_MAX_TRUST_APPROVAL = 256 * 1024  # public certificate and signed keylist together
 _MAX_CSV = 8 * 1024 * 1024
 _MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024
 _MAX_OFFLINE_TAR = 256 * 1024 * 1024
@@ -103,6 +106,13 @@ def _body_limit(target):
     if path in ("/internal/v1/devices/bulk-credential",
                 "/internal/v1/devices/bulk-role"):
         return _MAX_BULK_DEVICE_IDS
+    if path in ("/internal/v1/settings/certificates/instruction/rotation",
+                "/internal/v1/settings/certificates/instruction/renew"):
+        return _MAX_SIGNING_APPROVAL
+    if path == "/internal/v1/settings/certificates/browser/rotation":
+        return _MAX_BROWSER_APPROVAL
+    if path == "/internal/v1/settings/trust-rotation":
+        return _MAX_TRUST_APPROVAL
     return _MAX_BODY
 
 
@@ -592,6 +602,7 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                 self.close_connection = True
                 return
             conn = None
+            response_started = False
             try:
                 context = _tls_client_context(ca_file)
                 buffered = b""
@@ -676,6 +687,11 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                     if refresh or local_settings:
                         payload["gui_cert"] = dict(srv.certificate_info)
                     body = json.dumps(payload, separators=(",", ":")).encode()
+                # Once response emission starts, a failed upstream read or
+                # browser write must only close this response. end_headers()
+                # clears _headers_buffer, so that buffer cannot prove that
+                # sending a fresh error response is still safe.
+                response_started = True
                 self.send_response(response.status, response.reason)
                 has_cache = False
                 for name, value in response.getheaders():
@@ -716,7 +732,7 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             except (OSError, ssl.SSLError, http.client.HTTPException,
                     tier_auth.CredentialUnavailable,
                     ConsoleConfigurationError):
-                if not getattr(self, "_headers_buffer", None):
+                if not response_started:
                     api_problem.send(self, 503, "management-api-unavailable",
                                      "Management API unavailable",
                                      headers=(("Retry-After", "1"),))

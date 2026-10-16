@@ -271,15 +271,27 @@ def test_exact_legacy_unit_repaired_without_adopting_foreign_bytes(host):
         managed.setup(host.args)
 
 
-def test_managed_worker_real_unix_restart_preserves_job_recovery(host, monkeypatch):
+@pytest.mark.parametrize('action, prior_state, expected_state', [
+    ('backup', 'running', 'recovery-required'),
+    ('verify', 'running', 'failed'), ('verify', 'recovery-required', 'failed'),
+    ('extract', 'running', 'failed'), ('extract', 'recovery-required', 'failed')])
+def test_managed_worker_real_unix_restart_preserves_job_recovery(host, monkeypatch, action, prior_state, expected_state):
     # A real privileged worker process, real Unix peer credentials and an actual
     # service restart; systemctl itself remains intercepted by the fixture.
     managed.setup(host.args)
     record = managed._load(host.state)
-    job = {'id': str(uuid.uuid4()), 'action': 'backup', 'state': 'running'}
+    job = {'id': str(uuid.uuid4()), 'action': action, 'state': prior_state,
+           'backup_id': str(uuid.uuid4()), 'started_at': int(time.time()), 'detail': 'Interrupted fixture'}
     atomic_write(host.state / 'lifecycle-jobs.json', json.dumps([job]).encode())
+    partial = host.state / 'isolated-restores' / job['id']
+    partial.parent.mkdir(mode=0o700, exist_ok=True)
+    partial.mkdir(mode=0o700)
+    atomic_write(partial / 'partial.age', b'protected isolated fixture output')
+    original_identity = (partial.stat().st_dev, partial.stat().st_ino)
+    original_file = (partial / 'partial.age').stat()
     launch = managed._runtime_directory(host.state, record) / 'launch.py'
     from iris_installer.maintenance import MaintenanceClient
+    settled = None
     for _attempt in range(2):
         process = subprocess.Popen(['/usr/bin/python3', '-I', '-B', str(launch), str(host.state)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -296,8 +308,27 @@ def test_managed_worker_real_unix_restart_preserves_job_recovery(host, monkeypat
                         pytest.fail('real worker did not become ready')
                     time.sleep(0.05)
             assert response['jobs'][0]['id'] == job['id']
-            assert response['jobs'][0]['state'] == 'recovery-required'
+            assert response['jobs'][0]['state'] == expected_state
             assert response['managed_service']['storage_ready'] is True
+            assert (partial.stat().st_dev, partial.stat().st_ino) == original_identity
+            retained = (partial / 'partial.age').stat()
+            assert (retained.st_dev, retained.st_ino, retained.st_mode, retained.st_uid) == (
+                original_file.st_dev, original_file.st_ino, original_file.st_mode, original_file.st_uid)
+            assert (partial / 'partial.age').read_bytes() == b'protected isolated fixture output'
+            if expected_state == 'failed':
+                if settled is None:
+                    settled = response['jobs'][0]
+                else:
+                    assert response['jobs'][0] == settled
+                # Actual root-process flock refusal happens BEFORE Worker
+                # construction, so a second worker cannot settle/rewrite an
+                # operation while the first still owns this deployment.
+                before = (host.state / 'lifecycle-jobs.json').read_bytes()
+                duplicate = subprocess.run(['/usr/bin/python3', '-I', '-B', str(launch), str(host.state)],
+                                           capture_output=True, timeout=12)
+                assert duplicate.returncode != 0
+                assert b'A lifecycle worker already owns this deployment' in duplicate.stderr
+                assert (host.state / 'lifecycle-jobs.json').read_bytes() == before
         finally:
             process.send_signal(signal.SIGTERM)
             stdout, stderr = process.communicate(timeout=12)

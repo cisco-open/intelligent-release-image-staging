@@ -5438,6 +5438,14 @@ def _peer_tls_observation(cfg, rpc):
             result.update(runtime_mode=mode, runtime_source="aria2_rpc")
     except Exception:
         pass
+    if result['runtime_mode'] == 'required':
+        try:
+            from peer_revocations import runtime_status
+            status = runtime_status(rpc('aria2.getPeerTLSRevocationStatus', []))
+            if status is not None:
+                result['revocations'] = status
+        except Exception:
+            pass
     return result
 
 
@@ -5534,7 +5542,10 @@ def _with_instruction_step(deps, cfg, conf_path, platform):  # pragma: no cover
     def peer_tls():
         if not transport_observation:
             transport_observation.append(_peer_tls_observation(cfg, aria_rpc))
-        return dict(transport_observation[0])
+        result = dict(transport_observation[0])
+        if 'revocations' in result:
+            result['revocations'] = dict(result['revocations'])
+        return result
 
     aria_add = deps.aria_add
     wrapper = _instruction_aria_add_protocol(aria_add)

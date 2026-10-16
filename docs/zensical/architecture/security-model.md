@@ -72,6 +72,10 @@ Undeploying a router-nat device clears only the NAT translations whose inside-lo
 
 Each device holds what its agent needs: the catalog token, the aria2 secret, and, on IOx, the password for the app's SSH session back to IOS. Each file is readable only by the agent.
 
+The agent verifies catalog HTTPS against its provisioned CA and refuses HTTP
+redirects. A redirect cannot forward its bearer credential or replay a request
+at another destination, even another path on the same server.
+
 > **Residual risk: device login held in cleartext.** The generated `iris-agent.conf` holds the SSH-to-self password in cleartext on the app's persistent storage, mode `0600`. Device administrators and anyone holding an offline storage copy can read it. Restrict the VTY ACL to the IRIS app subnet. Test any AAA command restrictions against discovery, verification, placement and cleanup: the agent also uses `show`, `verify`, `rename` and `delete`. The supplied installer uses password authentication. Rotate the credential by re-onboarding with the new value.
 
 The app's SSH-to-self host-key checks are separate from the server's SSH policy. See [Device agent configuration](../reference/device-configuration.md) for the `device_ssh_known_hosts` setting and its default.
@@ -86,7 +90,14 @@ The agent verifies the signature and authenticates the envelope before parsing p
 
 ### The two root keys
 
-Exactly two distinct offline-root public keys form the trust set. Two people hold the two private halves, in two places, and neither half reaches the server. Lose one half and the surviving root issues the next online certificate. The unified IOx and IOS-XR appmgr image embeds both public root files read-only, so with a natively signed package and platform verification enforced those roots are pinned in the image. Guest Shell holds the same two files in a bundle on replaceable flash, which is tamper-evidence rather than a pin.
+Exactly two distinct offline-root public keys form the trust set. With separate
+key holders, each person keeps one private root key in a separate location.
+[Automatic local setup](../install/managed-package.md#guided-local-setup)
+instead keeps both private keys and their random passphrase files in a protected
+folder on the deployment host. A host compromise can expose both keys. Only
+the public root keys enter deployment containers and volumes in either workflow.
+
+Lose one private root key and the surviving root issues the next online certificate. The unified IOx and IOS-XR appmgr image embeds both public root files read-only, so with a natively signed package and platform verification enforced those roots are pinned in the image. Guest Shell holds the same two files in a bundle on replaceable flash, which is tamper-evidence rather than a pin.
 
 The online signing private key is stored encrypted on the server and exists as plaintext only in the server's runtime directory while the server runs. Each device also holds a key for its own last known good copy, the LKG key, which the device creates itself. No current/prior instruction key, LKG key, online signing private key or offline-root private key enters IOx `run-opts`, XR `docker-run-opts`, installer arguments, or device platform configuration. Only an authenticated refresh returns the current and bounded prior instruction keys into the agent's private configuration file.
 
@@ -140,7 +151,13 @@ Under `fail_closed` the tracker derives an emergency deny list: every address it
 
 The status route is the operator boundary and is count-only. It returns counts: role definitions, restrictions and members, queue occupancy, the applied revision, the addresses the tracker wants denied, conflicts by type, and origin rate counts. It never returns the raw blocklist, peer addresses, aria2 option dictionaries, session ids, or the device ids behind the mutual-origin preflight.
 
-Two devices that both hold a full copy of the same image are a mutual origin. Mutual-origin blocking is **preflight only**: the reconciler counts how many devices a future rule would newly deny and keeps applying the rules in force. The count is `null` when the protected seeder address is unknown; zero means the evaluation found no newly denied device.
+Mutual-origin blocking checks whether the device and distribution server permit each other. The default is **preflight**: the reconciler counts newly denied devices and keeps applying the rules in force. The count is `null` when the protected seeder address is unknown; zero means the evaluation found no newly denied device.
+
+**Policies → Distribution access** offers a reviewed opt-in. A preview binds the exact device identities and IPv4 addresses, the policy, and the limits on newly restricted devices and addresses. A change to those inputs requires another preview. Requested mode and applied status are separate: `enforced` needs a recent acknowledgement from the current aria2 session.
+
+An unknown or mismatched origin, unavailable state, or a changed policy stops new origin restrictions. The tracker preserves its last acknowledged list and reports the problem; a healthy newer policy still applies ordinary quarantine and revocation. If an interrupted apply has no acknowledgement, the live list is left untouched until valid current evidence permits an exact reviewed apply. Known protected addresses are excluded. A shared permitted/denied address refuses activation; if one appears later, the tracker removes that address from the blocklist and reports degraded enforcement. That exclusion survives endpoint expiry and restart until another explicit review. IP blocking cannot separate devices behind one shared address.
+
+Approvals retain exact device/address bindings after endpoint expiry, with a total bound of 10,000 devices and 41,024 bindings. Each review permits at most 1,000 new devices and 1,000 new addresses, defaulting to 10 each. Switching back to review only requires a preview and releases origin-only restrictions while preserving ordinary quarantine and revocation rules.
 
 A conflict record names the single address that two principals disagree about, so the status file is **not address-free**. See [Control which devices share with each other](../user-guide/roles.md).
 
@@ -154,8 +171,28 @@ Encrypting the payload between peers is one setting for the whole swarm, off by 
 
 When it is required, peers use TLS 1.3 with a hybrid key exchange, an authenticated cipher, a dedicated application protocol name, and mutual certificate checks, and a required peer never falls back to plain text. Each device generates its own private key, sends a certificate request over the catalog connection it already trusts, and receives a certificate valid for 24 hours, renewed six hours before it expires. A missing, expired or mismatched identity stops the peer from starting.
 
+The Console can revoke every peer certificate for one device identity without
+deleting its inventory row. Issuance and renewal stop for that identity.
+Updated clients receive the revocation list over the pinned catalog HTTPS
+connection. The list names its certificate authority, revision and expiry;
+clients reject another authority, an older revision or a list lasting more
+than five minutes. A failed refresh does not extend its expiry. Native peer
+transport rejects revoked identities and stops encrypted peer connections
+when the list expires.
+
+Revocation remains recorded through inventory deletion, onboarding and server
+restarts. **Allow fresh onboarding** approves a new identity for the same
+inventory device; it never removes the old revocation. The approval changes
+no device files. Normal onboarding creates fresh credentials and the device
+generates a new private key. See
+[Revoke a device certificate](../user-guide/undeploy.md#revoke-a-device-certificate).
+
 !!! warning
-    Revoking a device's catalog token prevents renewal, but a certificate already issued can still authenticate new connections until it expires. Token revocation does not immediately disconnect established peer sessions; certificate expiry is checked during the TLS handshake, not continuously on an open connection. Replacing the issuing authority means enrolling every peer again. See [Find your way around the Console](../user-guide/console.md).
+    Revoking only the catalog token prevents renewal; it is separate from
+    withdrawing a peer certificate. Clients without revocation support can
+    accept unexpired certificates and continue existing transfers. For immediate
+    isolation, block the device's network access. A saved revocation or one device's report is not proof
+    that every peer has enforced it.
 
 ## Image authenticity: the Bulk Hash check
 

@@ -195,13 +195,21 @@ fi
 # Enrollment uses the already provisioned catalog CA and device bearer.
 # A changed certificate changes the config bytes, forcing daemon replacement.
 _peer_tls_failed=0
+_peer_revocations=''
 _peer_conf="${IRIS_AGENT_CONF:-$STAGE_DIR/iris-agent.conf}"
 _peer_mode="${IRIS_PEER_TLS_MODE:-$(sed -n 's/^[[:space:]]*peer_tls_mode[[:space:]]*=[[:space:]]*//p' "$_peer_conf" 2>/dev/null | sed 's/[[:space:]]*$//' | tail -1 || true)}"
 case "${_peer_mode:-disabled}" in
   disabled) ;;
   required)
-    python3 "$STAGE_DIR/agent/peer_tls.py" --conf "$_peer_conf" >> "$_aria2_conf_tmp" \
-      || _peer_tls_failed=1 ;;
+    if python3 "$STAGE_DIR/agent/peer_tls.py" --conf "$_peer_conf" --start-revocation-watch >> "$_aria2_conf_tmp"; then
+      # Use the same validated canonical path as the generated fragment.
+      # Guest Shell may expose /flash as the platform-owned /bootflash alias.
+      _peer_revocations="$(sed -n 's/^bt-peer-tls-revocations=//p' "$_aria2_conf_tmp")"
+      case "$_peer_revocations" in /*) ;; *) _peer_tls_failed=1 ;; esac
+      case "$_peer_revocations" in *$'\n'*|*$'\r'*) _peer_tls_failed=1 ;; esac
+    else
+      _peer_tls_failed=1
+    fi ;;
   *) _peer_tls_failed=1 ;;
 esac
 # Compare bytes before publishing so a rotated secret forces replacement of a
@@ -555,7 +563,7 @@ unset _aria2_binary_tmp
 # Put the requirement on argv too: old aria2 ignores unknown config keys,
 # but rejects an unknown command-line option before opening any socket.
 if [ "${_peer_mode:-disabled}" = required ]; then
-  set -- "$@" --bt-peer-tls=required
+  set -- "$@" --bt-peer-tls=required --bt-peer-tls-revocations="$_peer_revocations"
 fi
 exec "$ARIA2" \
   --daemon=true \

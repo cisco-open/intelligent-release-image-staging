@@ -15,7 +15,7 @@ them on the Devices table and use **Assign images**; see
 
 ## In the Console
 
-1. Open **Inventory** and click the device row.
+1. Open **Inventory** and click the link in the device's **Assigned images** column.
 2. Pick the images the device should stage. The picker allows up to ten.
 3. Apply the change. The device shows **Waiting for staging** until its agent
    polls, picks up the assignment and reports work.
@@ -23,6 +23,16 @@ them on the Devices table and use **Assign images**; see
 !!! warning "Assigning replaces the image set"
     The new choice replaces the old one, so include every image you want to
     keep. An empty set unassigns every image.
+
+The picker reads current assignments before enabling **Apply**. Expand
+**reviewed devices** to check its targets. They stay fixed while it is open,
+even if the table selection changes. Closing it after Apply leaves requests
+running; check the result in Inventory.
+
+If another update changes an assignment, the server refuses the outdated
+choice. A lost or incomplete response is shown as unknown. Choose **Review
+current assignments**, check the new selection, then decide whether to apply
+again. The Console never resends the change automatically.
 
 ## With the API
 
@@ -95,10 +105,10 @@ app-hosting storage. See [How an image reaches a device](../architecture/data-pa
 
 ## What happens to an image you unassign { #unassigned-image-park }
 
-Removing an image from a device's assignments **parks** it. To park an image is
-to keep it on the device in case it is assigned again. At the agent's next
-successful policy poll it stops the torrent, removes the staging copy and marks
-the image parked. Clearing all assignments parks every image.
+Removing an image from a device's assignments **parks** it. At the next
+successful policy poll, the agent stops its torrent and cleans its staging
+copy. Retained files depend on the platform and who supplied them, as shown
+below. Clearing all assignments parks every image.
 
 | Platform | What stays on the storage root |
 | --- | --- |

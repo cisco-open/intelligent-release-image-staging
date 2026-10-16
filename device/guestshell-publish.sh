@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared by the two Guest Shell installers. No native commands are run when
+# sourced. Inputs and target names come only from the installer's fixed list.
+guest_input_pairs() {
+  printf '%s\n' "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
+    "staging/$RPC_SECRET_FILE:rpc-secret" "iris-catalog.pem:iris-catalog.pem" \
+    "iris-signers.pem:iris-signers.allowed_signers" \
+    "staging/$INSTRUCTION_ENVELOPE:iris-instructions.bootstrap" \
+    "staging/$BUNDLE_DIGEST_FILE:bundle.tgz.sha256" "$BUNDLE:bundle.tgz"
+}
+
+guest_input_metadata() {
+  # This program also runs on a remote artifact host through the existing
+  # pinned SSH helper. It emits sizes/digests only, never configuration bytes.
+  local program
+  program='import hashlib,os,stat,sys
+for index,path in enumerate(sys.argv[1:]):
+ fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ try:
+  before=os.fstat(fd)
+  assert stat.S_ISREG(before.st_mode) and (0 if index==2 else 1)<=before.st_size<=33554432
+  digest=hashlib.sha256(); count=0
+  while True:
+   block=os.read(fd,65536)
+   if not block: break
+   count+=len(block); assert count<=33554432; digest.update(block)
+  after=os.fstat(fd); named=os.lstat(path)
+  signature=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_mode,s.st_uid,s.st_gid,s.st_nlink)
+  assert count==before.st_size and signature(before)==signature(after)==signature(named)
+  print(str(count)+":"+digest.hexdigest())
+ finally: os.close(fd)'
+  local pair src command
+  local paths=()
+  while IFS= read -r pair; do
+    src="${pair%:*}"
+    if [ "$STAGE_LOCAL" -eq 1 ]; then paths+=("$ART/$src")
+    else paths+=("iris/artifacts/$src"); fi
+  done < <(guest_input_pairs)
+  if [ "$STAGE_LOCAL" -eq 1 ]; then
+    python3 -c "$program" "${paths[@]}"
+  else
+    # Every path is relative to the same remote login's home, as in staging.
+    printf -v command 'cd "$HOME" && python3 -c %q' "$program"
+    for src in "${paths[@]}"; do printf -v command '%s %q' "$command" "$src"; done
+    ssh_host "$command"
+  fi
+}
+
+guest_publication_failure() {
+  # Classify only a bounded prefix of the already captured response. Never
+  # copy arbitrary device output, paths or exception details into job logs.
+  python3 -c 'import re,sys
+marker=sys.argv[1].encode("ascii"); status=int(sys.argv[2])
+raw=sys.stdin.buffer.read(65537); oversized=len(raw)>65536
+raw=raw[:65536].replace(b"\r",b"")
+count=raw.split(b"\n").count(marker)
+category="missing-marker"
+if oversized: category="oversized-response"
+elif count>1: category="duplicate-marker"
+elif b"IRIS-BOOTSTRAP: input publication lock busy; no inputs published" in raw:
+ category="bootstrap-lock-busy"
+elif b"IRIS-BOOTSTRAP: input publication refused; inspect retained inputs" in raw:
+ category="bootstrap-refused"
+elif b"IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" in raw:
+ category="stage-unwritable"
+elif re.search(br"% (?:Invalid input|Incomplete command|Ambiguous command)",raw):
+ category="ios-command-rejected"
+elif re.search(br"(?m)^(?:PermissionError|FileNotFoundError|OSError|ValueError|SyntaxError|TypeError|NameError):",raw):
+ category="python-error"
+elif count==0 and marker in raw.replace(b"\n",b""):
+ category="marker-framing"
+elif status: category="transport-error"
+label="outcome unknown" if status else "not proved"
+print("ERROR: Guest Shell publication %s (category=%s, marker-count=%s, transport-status=%d); inspect before retrying" %
+ (label,category,"unknown" if oversized else count,status),file=sys.stderr)
+' "$1" "$2"
+}
+
+publish_guest_inputs() {
+  local metadata pair src dst pending attempt out ok marker row status
+  local expected=()
+  metadata="$(guest_input_metadata)" \
+    || { echo "ERROR: cannot fingerprint staged Guest Shell inputs" >&2; return 1; }
+  while IFS= read -r row; do
+    [[ "$row" =~ ^(0|[1-9][0-9]{0,7}):[0-9a-f]{64}$ ]] \
+      || { echo "ERROR: invalid Guest Shell input fingerprint" >&2; return 1; }
+    if [[ "$row" == 0:* ]] && [ "${#expected[@]}" -ne 2 ]; then return 1; fi
+    expected+=("$row")
+  done <<<"$metadata"
+  [ "${#expected[@]}" -eq 8 ] || return 1
+  while IFS= read -r pair; do
+    src="${pair%:*}"; dst="${pair##*:}"
+    pending="$IOS_ROOT/.iris-upload-$CAP-$dst"
+    ok=0
+    for attempt in 1 2 3; do
+      # Only this invocation's unconsumed name is cleared on a copy retry.
+      # Neither existing root inputs nor the runnable stage are deleted.
+      out="$(printf 'delete /force %s\ncopy https://%s:8000/%s %s\n' \
+        "$pending" "$STAGE_HOST" "$src" "$pending" \
+        | "$HERE/../lab/device-run.sh" "$DEVICE_IP")" || out=""
+      if printf '%s\n' "$out" | tr -d '\r' | grep -Eq '^[[:space:]]*[0-9]+ bytes copied([[:space:]]|$)'; then
+        ok=1; break
+      fi
+      echo "  copy of $src failed (attempt $attempt/3)" >&2
+      [ "$attempt" -eq 3 ] || sleep 10
+    done
+    [ "$ok" -eq 1 ] \
+      || { echo "ERROR: incomplete Guest Shell upload; existing inputs retained" >&2; return 1; }
+  done < <(guest_input_pairs)
+  # The fixed command contains no token or arbitrary path argument. The
+  # completed bootstrap checks its own bytes as well as the other seven files.
+  marker="IRIS-INPUTS-PUBLISHED:$CAP:${expected[7]#*:}"
+  status=0
+  # Keep the IOS editor out of the long typed publication line. This closed
+  # helper enters Guest Shell and waits for both the marker and its prompt
+  # before exiting; it reports bounded classifications, never raw replies.
+  out="$(python3 "$HERE/../lab/guest-publish.py" "$DEVICE_IP" "$GUEST_INPUT_ROOT" "$CAP" "${expected[@]}")" || status=$?
+  [ "$status" -eq 0 ] || return 1
+  if [ "$(printf '%s\n' "$out" | tr -d '\r' | grep -Fxc "$marker")" -ne 1 ]; then
+    printf '%s\n' "$out" | guest_publication_failure "$marker" "$status"
+    return 1
+  fi
+  echo "  Guest Shell inputs published; bundle acceptance and runtime startup are separate checks"
+}
+
+render_guest_inputs() {
+  local pair src dst
+  while IFS= read -r pair; do
+    src="${pair%:*}"; dst="${pair##*:}"
+    printf 'copy https://%s:8000/%s %s/.iris-upload-%s-%s\n' \
+      "$STAGE_HOST" "$src" "$IOS_ROOT" "$CAP" "$dst"
+  done < <(guest_input_pairs)
+  echo "# Publish under the bootstrap lock only after all eight source size/hash checks."
+  printf 'guestshell run bash %s/.iris-upload-%s-bootstrap.sh --publish-inputs %s <eight-size:sha256-values>\n' \
+    "$GUEST_INPUT_ROOT" "$CAP" "$CAP"
+}

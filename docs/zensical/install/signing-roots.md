@@ -6,9 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Create the two offline signing keys
 
-Two offline keys, the signing roots, sign every instruction the server sends a
-device. Create both, keep the private halves offline, and put the two public
-halves where the package build reads them. The
+For guided key creation on the deployment host instead, use
+[local setup](managed-package.md#guided-local-setup). The steps here use separate holders.
+
+The two signing roots approve the server's online instruction-signing key and
+sign its key-retirement list. The online key signs the instructions sent to
+devices. In this separate-holder workflow, keep the private roots offline and
+put their public halves where the package build reads them. The
 [Glossary](../reference/glossary.md) defines root key and instruction.
 
 Skip this page if your organization already has an approved pair: ask the
@@ -27,7 +31,7 @@ For guided prompts, each holder can run
 [iris-key-setup](offline-approval.md#create-your-root). The commands below
 create the same keys directly with OpenSSH.
 
-### Holder A: on the first custody machine
+### Holder A: on the first offline machine { #holder-a-on-the-first-custody-machine }
 
 ```bash
 install -d -m 0700 ~/iris-custody
@@ -38,7 +42,7 @@ ssh-keygen -lf ~/iris-custody/root-a.pub
 Record the fingerprint. Transfer only `root-a.pub` through your approved public
 file transfer process to `~/iris-root-import/root-a.pub` on the build host.
 
-### Holder B: on the second custody machine
+### Holder B: on the second offline machine { #holder-b-on-the-second-custody-machine }
 
 ```bash
 install -d -m 0700 ~/iris-custody
@@ -48,7 +52,7 @@ ssh-keygen -lf ~/iris-custody/root-b.pub
 
 Record the fingerprint. Transfer only `root-b.pub` through your approved public
 file transfer process to `~/iris-root-import/root-b.pub` on the build host.
-Each private key stays on its holder's offline custody machine.
+Each private key stays on its holder's offline machine.
 
 ### Build host: assemble the public roots
 
@@ -67,9 +71,10 @@ The listing prints `root-a.pub` and `root-b.pub`, and nothing else.
 
 !!! warning
 
-    Never copy a private half to the server host, to a device, into an
-    installer argument or into a message, and never generate roots inside a
-    Kubernetes pod. If an unexpected file turns up in the roots directory, ask
+    In this workflow, private roots stay on their holders' machines. Never put
+    them in public import folders, device packages, containers or messages.
+    For owner-selected local storage, use the guided local setup linked above.
+    If an unexpected file turns up in the roots directory, ask
     the key holders about it rather than deleting it.
 
 ## Put the public halves where the build reads them

@@ -6,12 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Rotate deployment trust and keys
 
-Open **Settings > Certificates & keys > Rotate deployment trust and keys**.
+Open **Settings > Certificates & keys**, then **Advanced: replace deployment keys**.
 Credential replacement uses the Ubuntu installer's host worker. It supports an
-installer-owned Docker, split Docker and Kubernetes deployments. The worker
+installer-owned Docker, split Docker or Kubernetes deployment. The worker
 shows the saved layout and the keys it can maintain. Use the
 [topology-specific procedures](rotations.md) for deployments without that worker.
-Root attestations use the Console directly and do not require this host worker.
+Signed root confirmations use the Console directly and do not require this worker.
 
 For Kubernetes, the worker connection has its own CA and client/server
 certificates. Check them on the installer host with
@@ -32,16 +32,20 @@ the recovery identity separately from the server identity.
 Schedule downtime. The Console disconnects while its server is stopped; a
 request being accepted does not mean rotation finished. Keep a host session
 available for recovery. Do not delete an operation journal to clear an error.
+The Console shows the accepted operation ID. If a response is lost or refused,
+select **Refresh maintenance evidence** and review that operation before continuing.
+Returning to the page does not resubmit it. Backup and rotation history both
+block new maintenance while an operation is running or needs recovery.
 
 | Family | What changes | Required follow-through |
 | --- | --- | --- |
-| Console-to-server TLS identity | A separate encrypted management key and certificate; deployed Console trust | Worker verifies authenticated, trusted connections from the remote Console or every Console pod. |
-| Device-pinned server TLS identity | Server key, certificate and distributed onboarding pin | Remove IRIS deployments first, then onboard and verify devices. |
-| Private swarm issuing CA | Encrypted peer issuer and newly issued origin identity | Remove IRIS deployments first, then onboard and verify peers. |
-| Offline instruction signing roots | Both public roots, approved online certificate and preserved revocation list | Approve offline, remove deployments, rebuild packages, then onboard devices. |
-| Server encryption identity | Service age identity and encrypted configuration | Independent recovery recipient stays unchanged; existing backups still need their original keys. |
+| Console-to-server certificate | Internal HTTPS key, certificate and Console trust | Worker verifies authenticated, trusted connections from the remote Console or every Console pod. |
+| Device connection certificate | Server key, certificate and public copy supplied at onboarding | Remove IRIS deployments first, then onboard and verify devices. |
+| Private swarm certificate authority | Authority that signs peer certificates and the seeder's peer identity | Remove IRIS deployments first, then onboard and verify peers. |
+| Root signing keys | Both public roots, approved signing certificate and preserved revocation list | Key holders approve requests; remove deployments, rebuild packages, then onboard devices. |
+| Server encryption key | Key protecting saved server configuration | Independent recovery recipient stays unchanged; existing backups still need their original keys. |
 | Independent recovery recipient | Recovery recipient for encrypted configuration; service identity stays unchanged | Import the protected identity through the host terminal and retain original keys for older backups. |
-| Seeder announce credential | Seeder token and canonical torrent announces | Worker proves serving on an isolated tracker and again after normal restart. |
+| Seeder announce credential | Token the server sends to the tracker in an HTTPS authorization header | Worker proves serving on an isolated tracker and again after normal restart. |
 
 ## Rotate management TLS, encryption identity or seeder credentials
 
@@ -69,7 +73,7 @@ sets are retired under your backup policy.
 1. Use the normal device removal controls to remove the IRIS deployment from
    every affected device. The workflow lists blocking device IDs. An abandoned,
    missing or unknown deployment is not proof of removal.
-2. Select **Device-pinned server TLS identity** or **Private swarm issuing CA**.
+2. Select **Device connection certificate** or **Private swarm certificate authority**.
    For device TLS, enter the exact names/IP addresses devices use and choose
    CA approval or an explicit 90-day self-signed replacement.
 3. Select **Prepare replacement trust**. For CA approval, download the public
@@ -80,19 +84,20 @@ sets are retired under your backup policy.
    The worker rechecks removal after stopping all service writers.
 5. Check the matching operation's evidence after reconnecting. Onboard devices
    using the normal onboarding controls, then verify their reports and staging
-   access. Server-side proof does not attest to device acceptance.
+   access. Server-side completion alone does not prove device acceptance.
 
 Device TLS refreshes the Guest Shell bundle and onboarding pin. Native IOx and
 XR packages are deployment-neutral for catalog TLS; this change does not by
 itself require rebuilding them. Signing-root replacement does require rebuilding
 all native packages.
 
-## Replace the offline signing roots
+## Replace the root signing keys { #replace-the-offline-signing-roots }
 
-1. Each root holder uses `iris-key-setup` on their separate offline
-   machine to generate a replacement root. Follow
-   [offline approval](../install/offline-approval.md); private roots stay there.
-2. Select **Offline instruction signing roots** in the Console. Keep the
+1. Each root holder uses `iris-key-setup` to create a replacement. For keys on
+   the deployment host, use `iris-key-setup --local`. Use [separate key holders](../install/offline-approval.md)
+   or your chosen [local setup](../install/managed-package.md#guided-local-setup).
+   Return only public keys and approvals to the Console.
+2. Select **Root signing keys** in the Console. Keep the
    existing root names and choose both replacement public `.pub` files.
 3. Select **Prepare replacement trust**, then **Download public approval files**.
 4. In the key script, approve the online public key with either new
@@ -104,11 +109,11 @@ all native packages.
 7. Allow time for both IOx architectures and the XR RPM to rebuild. The worker
    verifies those packages and the refreshed Guest Shell bundle before starting
    the Console. Check evidence, onboard devices and verify their acceptance.
-8. Under **Confirm each offline root's custody**, select the second root and
-   download its attestation request. Its holder approves that payload in the
+8. Under **Confirm root key access**, select the second root and
+   download its confirmation request. Its holder approves that payload in the
    key script. Import the signed revocation list and select **Validate
-   root attestation**. Check that both root names have fresh signed evidence.
-   Repeat independent attestations before their 180-day freshness expires.
+   root confirmation**. Check that both root names have recent signed confirmations.
+   Repeat each confirmation before its 180-day freshness expires.
 
 This replaces trust during a planned maintenance window. It is not a rolling
 root-overlap protocol and does not reset instruction epochs or discard revoked
@@ -120,20 +125,20 @@ Use this procedure for the initial production review and each quarterly check.
 It keeps the existing roots and needs neither device removal nor downtime.
 Complete or cancel any pending trust replacement first.
 
-1. Select **Offline instruction signing roots**. Under **Confirm each offline
-   root's custody**, select the first root and **Download root attestation request**.
-2. Its holder runs `iris-key-setup` on their separate offline machine,
-   chooses **Approve server request**, and approves that retirement-list request with the matching
+1. Select **Root signing keys**. Under **Confirm root key access**,
+   select the first root and **Download root confirmation request**.
+2. Its holder runs `iris-key-setup`, or `iris-key-setup --local` for host-held keys,
+   chooses **Approve server request**, and approves the retirement-list request with the matching
    private root. Follow the fingerprint checks in
    [offline approval](../install/offline-approval.md).
 3. Return only the signed public file. Choose it under **Approved public
-   revocation list** and select **Validate root attestation**.
+   revocation list** and select **Validate root confirmation**.
 4. Select the other root, download a new request and repeat with its holder.
-   Check that **Fresh signed custody evidence** lists both root names.
+   Check that **Recent signed confirmations** lists both root names.
 
 The first approval creates a signed empty revocation list when none exists.
 Later approvals preserve all existing revocations and advance the sequence.
-Each holder must approve their own request; one signature does not attest both
+Each holder must approve their own request; one signature does not confirm both
 roots. Repeat quarterly, before the 180-day evidence freshness expires.
 Online certificate renewal remains a [separate approval](instruction-keys.md#renew-the-instruction-signing-certificate).
 

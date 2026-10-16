@@ -149,16 +149,47 @@ iris_ssh_forget() {
   local peer="$1"
   local dir="${IRIS_SSH_STATE_DIR:-${IRIS_STATE:-$HOME/.iris}/ssh}"
   local file="$dir/known_hosts"
-  [ -e "$file" ] || return 0   # nothing ever recorded -- already "forgotten"
-  # ssh-keygen -R's own exit status is not a reliable success signal across
-  # OpenSSH versions (some report failure when nothing matched); verify the
-  # outcome directly instead. Entries here are always PLAIN (accept-new never
-  # sets HashKnownHosts), the same format iris_ssh_policy's pinned mode
-  # writes, so a literal match is exact.
-  ssh-keygen -R "$peer" -f "$file" >/dev/null 2>&1
-  if grep -qF -- "$peer " "$file" 2>/dev/null; then
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    # A failed stat also looks absent when an ancestor cannot be searched.
+    # Find the nearest existing ancestor before accepting genuine absence.
+    local parent="$dir"
+    while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+      parent="$(dirname -- "$parent")" || return 1
+    done
+    if [ ! -d "$parent" ] || [ ! -x "$parent" ]; then
+      echo "IRIS ssh: cannot inspect persistent host-key state at $dir" >&2
+      return 1
+    fi
+    return 0   # nothing ever recorded -- already "forgotten"
+  fi
+  if [ ! -f "$file" ] || [ ! -r "$file" ] || [ -L "$file" ]; then
+    echo "IRIS ssh: cannot read the persistent known_hosts at $file" >&2
+    return 1
+  fi
+  # accept-new inherits HashKnownHosts from ssh_config. OpenSSH's own lookup
+  # handles both hashed and plain entries; a literal grep cannot prove absence.
+  # Query first so an already-absent peer succeeds even in a read-only directory.
+  local query_status
+  if ssh-keygen -F "$peer" -f "$file" >/dev/null 2>&1; then
+    if ! ssh-keygen -R "$peer" -f "$file" >/dev/null 2>&1; then
+      echo "IRIS ssh: failed to remove $peer from $file" >&2
+      return 1
+    fi
+  else
+    query_status=$?
+    [ "$query_status" -eq 1 ] && return 0
+    echo "IRIS ssh: could not check $peer in $file" >&2
+    return 1
+  fi
+  if ssh-keygen -F "$peer" -f "$file" >/dev/null 2>&1; then
     echo "IRIS ssh: failed to remove $peer from $file" >&2
     return 1
+  else
+    query_status=$?
+    if [ "$query_status" -ne 1 ]; then
+      echo "IRIS ssh: could not verify removal of $peer from $file" >&2
+      return 1
+    fi
   fi
   return 0
 }

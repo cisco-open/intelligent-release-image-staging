@@ -405,7 +405,7 @@ def _attest(record, payload):
             replacement['before']['keylist-state'] = _sha(_read(paths.keylist_state))
             _save(replacement)
         save()
-    return _view(replacement, 'instruction-roots')
+    return dict(_view(replacement, 'instruction-roots'), attestation_applied=True)
 
 
 def operate(payload):

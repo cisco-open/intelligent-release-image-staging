@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Keep IRIS running
 
-This guide is for the person who looks after the IRIS server: upgrades,
+This guide is for the person who looks after the IRIS server: new releases,
 backups, credentials, certificates, signing keys, and recovery when something
 breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 
@@ -15,8 +15,9 @@ breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 | Task | Page |
 | --- | --- |
 | Replace browser TLS or telemetry credentials in the UI | [Guided Console rotation](console-credentials.md) |
-| Change deployment trust or recovery custody | [Rotate deployment trust and keys](deployment-rotation.md) |
-| Move to a new IRIS release | [Upgrade to a new release](upgrade.md) |
+| Replace deployment trust or backup recovery keys | [Rotate deployment trust and keys](deployment-rotation.md) |
+| Deploy a new IRIS release | [Deploy a new release](upgrade.md) |
+| Remove a managed deployment | [Remove an IRIS deployment](uninstall.md) |
 | Back up the server, or restore it | [Back up and restore](backups.md) |
 | Export the audit trail, set the API request budget, reset the admin account | [Routine maintenance tasks](maintenance.md) |
 | Rotate a credential or a certificate | [Rotate credentials and certificates](rotations.md) |
@@ -27,9 +28,10 @@ breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 
 ## Pages in this guide
 
-- [Upgrade to a new release](upgrade.md): the order to upgrade the server, the Console and the device packages, per layout.
+- [Deploy a new release](upgrade.md): undeploy, remove the old deployment, install its replacement and onboard the devices.
+- [Remove an IRIS deployment](uninstall.md): review exact removal targets, choose data retention, and recover interrupted removal.
 - [Back up and restore](backups.md): what to back up per layout, and how to restore it.
 - [Routine maintenance tasks](maintenance.md): audit export, the API request budget, and the admin account reset.
 - [Rotate credentials and certificates](rotations.md): one procedure per credential, per layout.
 - [Replace or recover signing keys](instruction-keys.md): the two root keys, a lost key, a leaked key, and hand delivery of the first instruction file.
-- [Recover from an interrupted job or damaged state](recovery.md): interrupted device jobs, damaged volumes, and state rollback.
+- [Recover from an interrupted job or damaged state](recovery.md): interrupted device jobs, damaged volumes, and retained migration evidence.

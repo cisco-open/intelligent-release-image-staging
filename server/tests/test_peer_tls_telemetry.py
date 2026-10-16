@@ -4,6 +4,7 @@
 
 """Torrent TLS observations must not turn desired policy into encryption claims."""
 from pathlib import Path
+import json
 import shutil
 import subprocess
 
@@ -52,32 +53,32 @@ def test_console_and_swarm_tls_labels_execute():
     if not node:
         pytest.skip("Node required for UI behavior test")
     root = Path(__file__).resolve().parents[1]
-    app = (root / "webroot/app.js").read_text()
-    block = app[app.index("  function peerTlsCell("):app.index("  function telemetryCell(")]
-    swarm = (root / "swarmmap.html").read_text()
-    block += swarm[swarm.index("function peerTlsLabel("):swarm.index("function peerStatus(")]
-    program = '''const assert = require('node:assert/strict');
-const DATA = {now: 1000}; Date.now = () => 1000000;
+    model = (root / 'console-ui/src/inventory-model.mjs').as_uri()
+    block = f"import {{tlsBadge}} from {json.dumps(model)};\n"
+    swarm_model = (root / 'console-ui/src/swarm-map-model.mjs').as_uri()
+    block += f"import {{peerTlsLabel}} from {json.dumps(swarm_model)};\n"
+    program = '''import assert from 'node:assert/strict';
+const DATA = {now: 1000}; Date.now = () => 9000000000000;
 const esc = value => String(value).replace(/</g, '&lt;');
 const fmtDate = value => String(value);
 ''' + block + '''
 const required = {configured_mode:'required',runtime_mode:'required',runtime_source:'aria2_rpc',reported_at:990};
 const off = {...required,runtime_mode:'disabled'};
 const unverified = {...required,runtime_source:'unknown'};
-assert.match(peerTlsCell({}), /TLS unknown/);
-assert.match(peerTlsCell({peer_tls:required,last_seen:990}), />TLS required</);
-assert.match(peerTlsCell({peer_tls:off,last_seen:990}), />TLS off</);
-assert.match(peerTlsCell({peer_tls:unverified,last_seen:990}), /TLS unknown/);
-assert.match(peerTlsCell({peer_tls:required,last_seen:1}), /TLS required \\(stale\\)/);
-assert.match(peerTlsCell({peer_tls:required,last_seen:990}), /not a negotiated connection/);
-assert.equal(peerTlsLabel({}), 'TLS unknown');
-assert.equal(peerTlsLabel({peer_tls:required}), 'TLS required');
-assert.equal(peerTlsLabel({peer_tls:off}), 'TLS off');
-assert.equal(peerTlsLabel({peer_tls:unverified}), 'TLS unknown');
-assert.equal(peerTlsLabel({peer_tls:{...required,reported_at:1}}), 'TLS required (stale)');
+assert.equal(tlsBadge({}, DATA.now).label, 'TLS unknown');
+assert.equal(tlsBadge({peer_tls:required,last_seen:990}, DATA.now).label, 'TLS required');
+assert.equal(tlsBadge({peer_tls:off,last_seen:990}, DATA.now).label, 'TLS off');
+assert.equal(tlsBadge({peer_tls:unverified,last_seen:990}, DATA.now).label, 'TLS unknown');
+assert.equal(tlsBadge({peer_tls:required,last_seen:1}, DATA.now).label, 'TLS required (stale)');
+assert.match(tlsBadge({peer_tls:required,last_seen:990}, DATA.now).title, /not a negotiated connection/);
+assert.equal(peerTlsLabel({}, DATA.now), 'TLS unknown');
+assert.equal(peerTlsLabel({peer_tls:required}, DATA.now), 'TLS required');
+assert.equal(peerTlsLabel({peer_tls:off}, DATA.now), 'TLS off');
+assert.equal(peerTlsLabel({peer_tls:unverified}, DATA.now), 'TLS unknown');
+assert.equal(peerTlsLabel({peer_tls:{...required,reported_at:1}}, DATA.now), 'TLS required (stale)');
 console.log('ok');
 '''
-    result = subprocess.run([node], input=program, text=True, capture_output=True, timeout=10)
+    result = subprocess.run([node, '--input-type=module', '-'], input=program, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
 

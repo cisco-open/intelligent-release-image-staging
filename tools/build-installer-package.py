@@ -27,7 +27,8 @@ ROOT_FILES = {"VERSION", "LICENSE", "NOTICE", ".dockerignore", ".gitignore",
               "zensical.toml", "CONTRIBUTING.md", "DEVELOPMENT.md", "TESTING.md",
               "SECURITY.md", "CODE_OF_CONDUCT.md"}
 TREES = {"server", "device", "tools", "docs", "kubernetes", "bin", "deliverables"}
-LAB_FILES = {"lab/device-run.sh", "lab/xr-run.sh", "lab/xr-dialogue.pl", "lab/iris-ssh-policy.sh"}
+LAB_FILES = {"lab/device-run.sh", "lab/guest-publish.py", "lab/xr-run.sh",
+             "lab/xr-dialogue.pl", "lab/iris-ssh-policy.sh"}
 
 
 def selected(name):
@@ -78,7 +79,7 @@ def build(repo, output):
             "Maintainer: IRIS contributors\nSection: admin\nPriority: optional\n"
             "Depends: python3 (>= 3.12), age, ca-certificates, openssh-client\n"
             "Description: IRIS Ubuntu deployment installer\n"
-            " Source-build deployment with managed Ubuntu dependencies and offline signing approval.\n"
+            " Source-build deployment with managed Ubuntu dependencies and terminal signing approval.\n"
             " Authenticate published packages with the repository release attestation.\n")
         doc = root / "usr/share/doc/iris-installer"
         doc.mkdir(parents=True)

@@ -27,21 +27,25 @@ function runtimeLicenseNotices() {
   };
 }
 
-export default defineConfig({
-  plugins: [react(), runtimeLicenseNotices()],
-  // The existing Python Console owns HTML, auth and API routing. Bundle React
-  // locally as one module; never require CDN imports or inline script/style.
-  define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-  build: {
-    target: 'es2022',
-    sourcemap: false,
-    outDir: 'dist',
-    emptyOutDir: true,
-    lib: {
-      entry: fileURLToPath(new URL('./src/main.jsx', import.meta.url)),
-      formats: ['es'],
-      fileName: () => 'console.js',
-      cssFileName: 'console',
+export default defineConfig(({ mode }) => {
+  const map = mode === 'swarm-map';
+  return {
+    plugins: [react(), runtimeLicenseNotices()],
+    // Python owns HTML, auth and API routing. The Console uses local assets;
+    // the separate map is assembled into one nonce-protected HTML document.
+    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+    build: {
+      target: 'es2022',
+      sourcemap: false,
+      outDir: 'dist',
+      emptyOutDir: !map,
+      lib: {
+        entry: fileURLToPath(new URL(map ? './src/swarm-map.jsx' : './src/main.jsx', import.meta.url)),
+        formats: [map ? 'iife' : 'es'],
+        ...(map ? { name: 'IRISSwarmMap' } : {}),
+        fileName: () => map ? 'swarmmap.js' : 'console.js',
+        cssFileName: map ? 'swarmmap' : 'console',
+      },
     },
-  },
+  };
 });

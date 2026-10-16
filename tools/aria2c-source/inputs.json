@@ -1,13 +1,13 @@
 {
   "binary_sha256": {
-    "aarch64": "c12d7a0d432bc5e9b80489d8f3981b0d802a4af9d4a547775e0c4306bf43a65a",
-    "x86_64": "4442564f58cd3ba28953980b192d38fa45ee95fbca78ca6aa99da1c4052de8a7"
+    "aarch64": "631e7a8f78e33484e2aa46b95e5eb44ab96eea7701150be0607dd8253189fb7c",
+    "x86_64": "0af630efc543a233885416f97d4deaac5df8f8a022c868f6fae008a59536522e"
   },
   "components": [
     {
       "aports_commit": "f5640d3a10f664c9119720c60515265d3d6f6d01",
-      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/f5640d3a10f664c9119720c60515265d3d6f6d01/main/musl/APKBUILD",
       "origin": "musl",
+      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/f5640d3a10f664c9119720c60515265d3d6f6d01/main/musl/APKBUILD",
       "sources": [
         {
           "expected_sha512": "1adad96eddb3a2eb0cacb3e363b0046568925fcdd75cf8b0503f2139df1f693d64730779ca0ce8131b7624ab2d37f4247bb1d3393c523de6e30d2b1d7732555c",
@@ -102,8 +102,8 @@
     },
     {
       "aports_commit": "f248b33b5943c7dc69bf691031d7612ab2e8ed93",
-      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/f248b33b5943c7dc69bf691031d7612ab2e8ed93/main/zlib/APKBUILD",
       "origin": "zlib",
+      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/f248b33b5943c7dc69bf691031d7612ab2e8ed93/main/zlib/APKBUILD",
       "sources": [
         {
           "expected_sha512": "70963771ea5d763614278a69b474f09b7d237ef8f53b675a10fe31d9923aeef601504b35d7ebd1b1e7f347e9ebb048e6b3b47fffdf137e7bdc7e8d5eb4ec4692",
@@ -118,8 +118,8 @@
     },
     {
       "aports_commit": "138a6bf9dea5974644e48fef4826b7c474f2f7d8",
-      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/138a6bf9dea5974644e48fef4826b7c474f2f7d8/main/c-ares/APKBUILD",
       "origin": "c-ares",
+      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/138a6bf9dea5974644e48fef4826b7c474f2f7d8/main/c-ares/APKBUILD",
       "sources": [
         {
           "expected_sha512": "d5997a57fda9b3a3385b1685e6b2f9292c3a1d39bd27579acaabf3d2d33aa5e91bfec5d41c5e51ca6b50dbc1f4346d75e9bfbccf44a494fbd4bc7613b167143c",
@@ -134,8 +134,8 @@
     },
     {
       "aports_commit": "013edf8b29199933e8ea34dde460b5584b979042",
-      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/013edf8b29199933e8ea34dde460b5584b979042/main/openssl/APKBUILD",
       "origin": "openssl",
+      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/013edf8b29199933e8ea34dde460b5584b979042/main/openssl/APKBUILD",
       "sources": [
         {
           "expected_sha512": "62a1dbed0fad75245b332e41b85a1f7c2379189525e7628a7cf68947d115e90a47f179e3f87d27641e5b2d357c357292179fc0e64eccecdebc81c083f7a8ebe4",
@@ -158,8 +158,8 @@
     },
     {
       "aports_commit": "423a8ad043d07f2c7546c8ec3e2b0384cda360ae",
-      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/423a8ad043d07f2c7546c8ec3e2b0384cda360ae/main/gcc/APKBUILD",
       "origin": "gcc",
+      "recipe_url": "https://gitlab.alpinelinux.org/alpine/aports/-/raw/423a8ad043d07f2c7546c8ec3e2b0384cda360ae/main/gcc/APKBUILD",
       "sources": [
         {
           "expected_sha512": "89047a2e07bd9da265b507b516ed3635adb17491c7f4f67cf090f0bd5b3fc7f2ee6e4cc4008beef7ca884b6b71dffe2bb652b21f01a702e17b468cca2d10b2de",
@@ -528,9 +528,19 @@
   "copyright": "Copyright 2026 Cisco Systems, Inc. and its affiliates; SPDX-License-Identifier: Apache-2.0",
   "current_recipe_sha256": {
     "Dockerfile": "60ca2d30ae292dc2da76243caae4a156eeace735b19924909093a018f98f2cac",
-    "build.sh": "0d124ecf0126c81ce164661b31ac4d17f7708d9f3ebe30f745984976f5a8d95c"
+    "apk-lock.json": "5a6101f9c633de141f525acdbe12931eb56f83dd6a7f6c34bb3ff2c43855e176",
+    "build.sh": "0d124ecf0126c81ce164661b31ac4d17f7708d9f3ebe30f745984976f5a8d95c",
+    "rebuild-pinned.py": "133373f50f3bf89823ab2dcb20e40ab64cdd66e45d318dcc18e1162f9456a320"
   },
   "files": {
+    "candidate-build-provenance/aarch64-candidate-evidence.json": "278668e5728a26fa494731cb56b312a924ef45b47a12d5180a4d45a55a15e7bc",
+    "candidate-build-provenance/aarch64-candidate-source.json": "9a2ded9d791aa5134c14597bb2b9b394742c074970eae7af1a68609e693c4d05",
+    "candidate-build-provenance/aarch64-dependency-manifest.txt": "72177096367ada17c7bb19da17d7734e8d5c11a52a7c130a6ead0c5c850907f1",
+    "candidate-build-provenance/aarch64-verification.txt": "96a8d1052d495d5ba7d07a0d7ebfe42a2f2b3c1b3b4f8931521668489d7dfb2e",
+    "candidate-build-provenance/x86_64-candidate-evidence.json": "2a8e48b27d4156fda4436feedbef8a7712054ffef47c9bc28a0ac8784aa7cef7",
+    "candidate-build-provenance/x86_64-candidate-source.json": "9a2ded9d791aa5134c14597bb2b9b394742c074970eae7af1a68609e693c4d05",
+    "candidate-build-provenance/x86_64-dependency-manifest.txt": "b20b14cd8cfdf47420573495de635cc34ea897653696a828fff59b6b3d276ece",
+    "candidate-build-provenance/x86_64-verification.txt": "6257b242b7fd08778ff4cc4bb8dab6345fa7f8a3c53bc97f358110d89801cad0",
     "dependencies/c-ares/APKBUILD": "b739af81063f71bc3f02279b355985a39473f698f656295295ac220004332075",
     "dependencies/c-ares/licenses/LICENSE.md": "460f5e768fda3752ca2169a95df062578a10fb126bfd65f3b9b1a1bed2f84807",
     "dependencies/c-ares/source-manifest.json": "e51e0e6d7f6178a1e4cac449bc578fe5a309646898f91c743f248928e7a3a615",
@@ -622,13 +632,31 @@
     "original-producer-recipe/patches/0007-seeder-goodbye-grace.patch": "00560049df383654e5ef21b13a8b7e9c50f9458c875e5fd7787b0e9dbaafe6bd",
     "original-producer-recipe/patches/0008-required-hybrid-peer-tls.patch": "3e84b022108229a3a37281a8e105f8b907a202e79cc83c31b7c6f142f16ee614",
     "original-producer-recipe/patches/0009-test-seeder-goodbye-grace.patch": "2d14f00dcdf9887b9e11b1a50b926734bfa4bc52f7cc7d5708b5d2726f5b0776",
-    "original-producer-recipe/patches/0010-resolve-crossed-peer-handshakes.patch": "21bc23d342e722fd2ab459836e366e0965e0a005873cc2b1cb193be266291ceb"
+    "original-producer-recipe/patches/0010-resolve-crossed-peer-handshakes.patch": "21bc23d342e722fd2ab459836e366e0965e0a005873cc2b1cb193be266291ceb",
+    "p12-candidate-build-provenance/aarch64-candidate-evidence.json": "1a161242eefe4e56b6cadbc6468960edb75f1f0c6dd3d517c9ab7dcb9e79712f",
+    "p12-candidate-build-provenance/aarch64-candidate-source.json": "c84d6dbc028ec7c1035ab3e3894118d8aa33314bbe93d790bb1c38c47ae1f13b",
+    "p12-candidate-build-provenance/aarch64-dependency-manifest.txt": "72177096367ada17c7bb19da17d7734e8d5c11a52a7c130a6ead0c5c850907f1",
+    "p12-candidate-build-provenance/aarch64-verification.txt": "79674252ee327ce6e677c8621c6c1e0002b8b458cfcf341b18263e5f6e5793bf",
+    "p12-candidate-build-provenance/x86_64-candidate-evidence.json": "5aae05038145c9385219155035b046e6b95b2a8ffe8f8a3349bf9d4648682236",
+    "p12-candidate-build-provenance/x86_64-candidate-source.json": "c84d6dbc028ec7c1035ab3e3894118d8aa33314bbe93d790bb1c38c47ae1f13b",
+    "p12-candidate-build-provenance/x86_64-dependency-manifest.txt": "b20b14cd8cfdf47420573495de635cc34ea897653696a828fff59b6b3d276ece",
+    "p12-candidate-build-provenance/x86_64-verification.txt": "70f27fb4911db7da860062cdf003163821a4da0a1409dcfbedefcf171b49c229",
+    "patches/0011-withdraw-peer-identities.patch": "bbe8ff04720510e1c30be51c2905a67eb5760b77ae864aa2699f443ead968755",
+    "patches/0012-isolate-tracker-control-throttle.patch": "84d640ddf4627c9c7d6bea408a5cd4d85db93bef03304656aa042423c5810f66",
+    "tests/revocation-probe.cc": "1dab0a2a0c57c9b72eb8c5ae0754039fe6e66ee91bf03605a6c121dc1565c151",
+    "tests/test-handshake.py": "d30c18c0d2e03f349d5e29754bf9fa1fce09bec2ae25ade7f8fdcc6a44550ca4",
+    "tests/test-peer-cap.py": "580046f15248b007203d574bd7a94bd052e07cdc7f4e8d848d405cb66009a2e4",
+    "tests/test-peer-collision.py": "190d5999bbd97f78ba74ff65727bbac922edb1b13bcad88b3f0d84d35adb0f07",
+    "tests/test-peer-revocations.py": "dab263e704e6b6c3b997b28ff78484c0e8c998fe700d16b9dfa92554fec416d5",
+    "tests/test-revocation-reader.py": "b01ecef3907a86af5009602f1bdde0a74f701a97e51b4a724e421e8425078951",
+    "tests/test-tracker-throttle.py": "240353800556ac9e107ce037ed02884c54d1f944ef13984ee26180ed0ae99514",
+    "tests/test-transfer.py": "1a1ba513f370a344153c6c85bb40d6f1dc2bf7d485aab41bb0a6a90e76f0de74"
   },
   "format": 1,
   "gpl3_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
-  "name": "aria2c-2.5.6-p10-source",
-  "notice_count": 38,
-  "notice_date": "2026-09-20",
+  "name": "aria2c-2.5.6-p12-source",
+  "notice_count": 49,
+  "notice_date": "2026-10-13",
   "patches": [
     {
       "file": "0001-getpeers-keys-filter.patch",
@@ -669,6 +697,16 @@
     {
       "file": "0010-resolve-crossed-peer-handshakes.patch",
       "sha256": "21bc23d342e722fd2ab459836e366e0965e0a005873cc2b1cb193be266291ceb"
+    },
+    {
+      "file": "0011-withdraw-peer-identities.patch",
+      "path": "patches/0011-withdraw-peer-identities.patch",
+      "sha256": "bbe8ff04720510e1c30be51c2905a67eb5760b77ae864aa2699f443ead968755"
+    },
+    {
+      "file": "0012-isolate-tracker-control-throttle.patch",
+      "path": "patches/0012-isolate-tracker-control-throttle.patch",
+      "sha256": "84d640ddf4627c9c7d6bea408a5cd4d85db93bef03304656aa042423c5810f66"
     }
   ],
   "source_date_epoch": 1787100476,

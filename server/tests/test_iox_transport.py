@@ -539,11 +539,15 @@ def _read_frame(wire, deadline=None, clock=None, split=False):
         )
         return reader.read()
     finally:
-        left.close()
-        right.close()
-        if thread is not None:
-            thread.join(1)
-            assert not thread.is_alive()
+        try:
+            if thread is not None:
+                # The reader can finish before the sender's final shutdown.
+                # Let the sender release its write side before closing it.
+                thread.join(1)
+                assert not thread.is_alive()
+        finally:
+            left.close()
+            right.close()
 
 
 def test_frame_roundtrip_uses_network_length_and_handles_bytewise_arrival():
@@ -552,6 +556,41 @@ def test_frame_roundtrip_uses_network_length_and_handles_bytewise_arrival():
     assert struct.unpack("!I", wire[:4])[0] == len(wire) - 4
     assert json.loads(wire[4:].decode("utf-8")) == value
     assert _read_frame(wire, split=True) == value
+
+
+def test_frame_fixture_waits_for_sender_shutdown_before_closing(monkeypatch):
+    left, right = socket.socketpair()
+    release = threading.Event()
+    order, errors = [], []
+    original_thread = threading.Thread
+
+    class SenderSocket:
+        def sendall(self, value):
+            right.sendall(value)
+
+        def shutdown(self, how):
+            assert release.wait(1), "Fixture did not join its sender"
+            try:
+                right.shutdown(how)
+            except OSError as error:
+                errors.append(error)
+            order.append("shutdown")
+
+        def close(self):
+            order.append("close")
+            right.close()
+
+    class SenderThread(original_thread):
+        def join(self, timeout=None):
+            release.set()
+            return super().join(timeout)
+
+    monkeypatch.setattr(socket, "socketpair", lambda: (left, SenderSocket()))
+    monkeypatch.setattr(threading, "Thread", SenderThread)
+    value = {"version": 1, "type": "test"}
+    assert _read_frame(_module()._encode_frame(value), split=True) == value
+    assert not errors
+    assert order == ["shutdown", "close"]
 
 
 @pytest.mark.parametrize("wire", [

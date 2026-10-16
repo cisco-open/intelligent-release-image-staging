@@ -190,6 +190,9 @@ def test_unreachable_remote_console_keeps_known_server_and_marks_configured_host
 def test_worker_caches_success_and_failure_without_changing_jobs(tmp_path, monkeypatch):
     for name in ("state", "backups", "recovery"):
         (tmp_path / name).mkdir(mode=0o700)
+    from iris_installer.state import atomic_write
+    atomic_write(tmp_path / 'state/installation.json', json.dumps(dict(schema=1,
+        id='owned', config={'target': 'docker'}, completed={})).encode())
     worker = lifecycle_worker.Worker(*(tmp_path / name for name in ("state", "backups", "recovery")))
     calls = []
     monkeypatch.setattr(inventory, "collect", lambda state: calls.append(state) or sample())

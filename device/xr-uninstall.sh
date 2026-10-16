@@ -267,14 +267,19 @@ sweep_verify_request() {
     destructive="$(printf 'appmgr package uninstall source %s\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/%s/*\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/*.torrent\ndelete /noprompt harddisk:/*.aria2\ndelete /noprompt harddisk:/*.peers.json\n' \
       "$SOURCE_NAME" "${RPM_PATH##*/}" "${CERT_PATH##*/}" \
       "${WORK_DIR_PATH##*/}" "${WORK_DIR_PATH##*/}")"
-    # These three exact files are the active IRIS peer identity. Public
+    # These exact files are the active IRIS peer identity and revocation state. Public
     # certificate-generation directories remain inert; native images and
     # every unrelated file are preserved. Never recursively sweep peer-tls.
     # Keep the ownership manifest until last so an interrupted cleanup can
     # prove ownership again and safely finish deleting any remaining file.
     destructive="$destructive
 delete /noprompt harddisk:/peer-tls/node.key
+delete /noprompt harddisk:/peer-tls/recovery.key
 delete /noprompt harddisk:/peer-tls/enrollment.lock
+delete /noprompt harddisk:/peer-tls/revocations.txt
+delete /noprompt harddisk:/peer-tls/revocations-state.json
+delete /noprompt harddisk:/peer-tls/revocations.lock
+delete /noprompt harddisk:/peer-tls/revocations-watch.lock
 delete /noprompt harddisk:/peer-tls/current.json"
   fi
 cat <<EOF
@@ -451,18 +456,25 @@ if len(found) != 1 or not re.search(r"(?:^|\s)drwx------[.+]?(?:\s|$)", found[0]
     sys.exit(1)
 if not re.search(r"^Directory of harddisk:/?peer-tls\s*$", contents, re.M):
     sys.exit(1)
-for name in ("current.json", "node.key", "enrollment.lock"):
+active_files = ("current.json", "node.key", "recovery.key", "enrollment.lock", "revocations.txt",
+                "revocations-state.json", "revocations.lock", "revocations-watch.lock")
+for name in active_files:
     entries = rows(contents, name)
     if len(entries) > 1 or any(not re.search(r"(?:^|\s)-[rwx-]{9}[.+]?(?:\s|$)", line) for line in entries):
         sys.exit(1)
-if not any(rows(contents, name) for name in ("current.json", "node.key", "enrollment.lock")):
+if not any(rows(contents, name) for name in active_files):
     sys.exit(0 if phase == "after" or missing(manifest, "peer-tls/current.json") else 1)
 documents = [line.strip() for line in manifest.splitlines() if line.strip().startswith("{")]
 try:
     if len(documents) != 1:
         raise ValueError()
     record = json.loads(documents[0])
-    if set(record) != {"generation"} or not re.fullmatch(r"[0-9a-f]{64}", record["generation"]):
+    if (set(record) not in ({"generation"}, {"generation", "key", "device_id", "identity_sha256"})
+            or not re.fullmatch(r"[0-9a-f]{64}", record["generation"])):
+        raise ValueError()
+    if "key" in record and (record["key"] not in ("node.key", "recovery.key")
+            or not isinstance(record["device_id"], str) or not record["device_id"]
+            or not re.fullmatch(r"[0-9a-f]{64}", record["identity_sha256"])):
         raise ValueError()
     generation = record["generation"]
     entries = rows(contents, generation)

@@ -43,15 +43,12 @@ def javascript_status(rows):
     source = APP.read_text()
     start = source.index("  function rowAssignedIds(d)")
     end = source.index("  // ---- Status pill grammar", start)
-    drawer_start = source.index("  function deployImageRows(d)")
-    drawer_end = source.index("\n  function ", drawer_start + 1)
-    script = (source[start:end] + source[drawer_start:drawer_end]
-              + "\nconst esc = value => String(value);"
-              + "\nconst imageLabel = value => String(value);"
+    model = (APP.parents[1] / "console-ui/src/device-details-model.mjs").as_uri()
+    script = ("import {imageRows} from " + json.dumps(model) + ";\n" + source[start:end]
               + "\nconst rows = " + json.dumps(rows) + ";"
               + "\nprocess.stdout.write(JSON.stringify(rows.map(d => ({"
-              + "key: deviceStatus(d, 1000).key, drawer: deployImageRows(d)}))));")
-    result = subprocess.run([node], input=script, text=True, capture_output=True,
+              + "key: deviceStatus(d, 1000).key, drawer: imageRows(d).map(row => row.state)}))));")
+    result = subprocess.run([node, "--input-type=module"], input=script, text=True, capture_output=True,
                             timeout=10)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -94,7 +91,7 @@ def test_console_and_api_status_agree_for_every_runtime(handler_factory):
         assert handler._device_status_key(row) == expected, row
         assert actual["key"] == expected, row
         if image_state:
-            assert "<td>" + image_state + "</td>" in actual["drawer"], row
+            assert image_state in actual["drawer"], row
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
@@ -133,7 +130,7 @@ def test_rollout_rejects_retained_staged_membership_with_current_error(
     cat = catalog.CatalogStore(str(tmp_path))
     cat.save_image({"id": "a", "filename": "a.bin"})
     handler = handler_factory(catalog=cat)
-    handler._device_view = lambda: [{
+    handler._staging_view = lambda: [{
         "assigned_image_ids": ["a"], "staged_image_ids": ["a"],
         "errored_image_ids": ["a"], "stage_state": "error", "last_seen": 990,
     }]
@@ -151,7 +148,7 @@ def test_overview_waits_for_activity_and_excludes_current_image_errors(handler_f
          "assigned_image_ids": ["a"], "staged_image_ids": ["a"],
          "errored_image_ids": ["a"]},
     ]
-    handler._device_view = lambda: rows
+    handler._staging_view = lambda: rows
     overview = handler._overview()
     assert overview["assigned"] == 2
     assert overview["staged"] == 0
@@ -161,7 +158,7 @@ def test_overview_waits_for_activity_and_excludes_current_image_errors(handler_f
 
 def test_offline_and_terminal_devices_are_not_currently_staging(handler_factory):
     handler = handler_factory()
-    handler._device_view = lambda: [
+    handler._staging_view = lambda: [
         {"last_seen": 390, "stage_state": "staging", "assigned_image_id": "a"},
         {"last_seen": 990, "stage_state": "copy_failed", "assigned_image_id": "a"},
         {"last_seen": 990, "stage_state": "error", "assigned_image_id": "a"},
