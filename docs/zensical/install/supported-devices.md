@@ -35,9 +35,8 @@ Check your device's app-hosting support before selecting it.
 
 On IOx and IOS-XR the agent picks the staging target itself; see
 [Data formats and states](../reference/state-and-data.md). Guest Shell keeps the
-target in the table. The server build produces the Guest Shell agent bundle;
-build the IOx and IOS-XR packages yourself, with
-[Build and publish the device packages](device-packages.md). Check
+target in the table. [The Ubuntu .deb setup](managed-package.md) prepares the
+Guest Shell, IOx and IOS-XR packages automatically. Check
 [Limitations](../architecture/limitations.md) before a rollout.
 
 ## Choose between IOx and Guest Shell

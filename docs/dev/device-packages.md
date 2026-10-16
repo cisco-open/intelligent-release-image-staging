@@ -13,7 +13,7 @@ files that define the image, the commands that build each package, and what
 a package provenance manifest records. It also covers how to build `aria2c`
 yourself for development or audit, and set up ARM64 emulation for package
 builds.
-[Build and publish the device packages](../zensical/install/device-packages.md)
+[Build and publish the device packages](../zensical/reference/manual-installation/device-packages.md)
 is the operator procedure that runs these same builds during a deployment;
 this page is the detail underneath it.
 
@@ -116,7 +116,7 @@ When the pinned `aria2c` in `tools/aria2c.sha256` changes, refresh both the
 `ARIA2C_BIN_AMD64` and `ARIA2C_BIN_ARM64` inputs and rebuild every device
 package from them. Within each architecture, the embedded `aria2c` binary
 must stay file-identical across every published package.
-[Build and publish the device packages](../zensical/install/device-packages.md)
+[Build and publish the device packages](../zensical/reference/manual-installation/device-packages.md)
 covers when an operator has to run this rebuild and publish the results.
 
 ## Package footprint
@@ -170,7 +170,7 @@ tested clients for both architectures — `bin/aria2c`,
 `deliverables/aria2c-x86_64` and `deliverables/aria2c-aarch64` are committed —
 so nothing is downloaded. `tools/get-aria2c.sh` re-verifies them and fetches
 the published release only when one of those files is missing; see
-[Download the tools that build device packages](../zensical/install/build-tools.md).
+[Download the tools that build device packages](../zensical/reference/manual-installation/build-tools.md).
 
 Normal installation uses the committed tested binaries. A failed download
 is a connectivity or release-availability problem. Do not bypass verification
@@ -250,7 +250,7 @@ helpers and the arm64 IOx package. These builds run commands inside the target
 platform. The Ubuntu installer provisions and checks emulation before building.
 The host
 also needs it for an intentional `aarch64` `aria2c` source build.
-[Download the tools that build device packages](../zensical/install/build-tools.md)
+[Download the tools that build device packages](../zensical/reference/manual-installation/build-tools.md)
 covers checking whether the host already has a working handler and
 installing the distribution package that provides one. Run those checks on
 the host where the Docker daemon builds the packages, not on the Console
@@ -311,9 +311,9 @@ ordinary build, and never put a real device credential in one.
 
 ## Related
 
-- [Build and publish the device packages](../zensical/install/device-packages.md):
+- [Build and publish the device packages](../zensical/reference/manual-installation/device-packages.md):
   the operator procedure that runs these builds and publishes the results.
-- [Download the tools that build device packages](../zensical/install/build-tools.md):
+- [Download the tools that build device packages](../zensical/reference/manual-installation/build-tools.md):
   the pinned `aria2c` clients a clone already carries, and checking for ARM64
   emulation before you fall back to building anything yourself.
 - [What each part does](../zensical/architecture/index.md#what-each-part-does):

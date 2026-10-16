@@ -38,7 +38,6 @@ def test_verification_binds_every_security_identity():
     for flag, value in {
         "--repo": AUTH.REPOSITORY,
         "--cert-oidc-issuer": "https://token.actions.githubusercontent.com",
-        "--signer-workflow": AUTH.WORKFLOW,
         "--cert-identity": "https://github.com/" + AUTH.WORKFLOW + "@refs/tags/" + TAG,
         "--source-ref": "refs/tags/" + TAG,
         "--source-digest": COMMIT, "--signer-digest": COMMIT,
@@ -46,6 +45,10 @@ def test_verification_binds_every_security_identity():
     }.items():
         assert command[command.index(flag) + 1] == value
     assert "--deny-self-hosted-runners" in command
+    # GitHub CLI rejects multiple signer selectors. The exact certificate SAN
+    # already binds both the workflow path and release tag.
+    selectors = ("--cert-identity", "--cert-identity-regex", "--signer-repo", "--signer-workflow")
+    assert sum(flag in command for flag in selectors) == 1
 
 
 @pytest.mark.parametrize("tag", ["main", "v2026.09.29;echo injected", "../v2026.09.29", "v1.2.3"])

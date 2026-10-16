@@ -37,9 +37,10 @@ SPDX-License-Identifier: Apache-2.0
             IRIS stages Cisco images and patches on routers and switches using peer-to-peer delivery. Devices share downloaded pieces, verify the image, and stop at staging.
           </p>
           <div class="hero-actions" aria-label="Primary actions">
-            <a class="button primary" href="docs/">Read the docs</a>
-            <a class="button secondary" href="#architecture">See how it works</a>
+            <a class="button primary" href="docs/install/managed-package/">Ubuntu .deb installer</a>
+            <a class="button secondary" href="docs/">Read the docs</a>
           </div>
+          <p>Run <code>irisctl setup</code> to deploy IRIS on Docker or Kubernetes, create signing keys and prepare device packages. The installation guide lists download availability.</p>
         </div>
 
         <div class="delivery-card" aria-label="IRIS delivery summary">
@@ -62,7 +63,7 @@ SPDX-License-Identifier: Apache-2.0
         </div>
         <div>
           <strong>Encrypted</strong>
-          <span>HTTPS for the Console and service APIs, TLS between peers when you turn it on</span>
+          <span>HTTPS for the Console and service APIs, mutual TLS between peers by default</span>
         </div>
         <div>
           <strong>Resumable</strong>
@@ -127,7 +128,7 @@ SPDX-License-Identifier: Apache-2.0
               </svg>
               <div class="flow-legend" aria-hidden="true"><span class="control-key">Management &amp; coordination</span><span class="data-key">Image pieces</span></div>
             </div>
-            <p>Tracker and origin seeder run in one distribution container. A separate Console provides the management UI. IRIS combines peer delivery with server-side Cisco hash checks and on-device checks against the catalog hash. Turn on mutual TLS to encrypt peer transfers.</p>
+            <p>Tracker and origin seeder run in one distribution container. A separate Console provides the management UI. IRIS combines peer delivery with server-side Cisco hash checks and on-device checks against the catalog hash. The installer enables mutual TLS to encrypt peer transfers.</p>
           </div>
         </div>
       </section>
@@ -208,7 +209,7 @@ SPDX-License-Identifier: Apache-2.0
             The server and web Console run in separate containers on one Docker host, separate Docker hosts, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
           </p>
           <p>
-            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. The Ubuntu managed installer requires mutual TLS for peer transfers by default; manually provisioned deployments can enable it explicitly.
+            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. The Ubuntu managed installer requires mutual TLS for peer transfers by default.
           </p>
         </div>
       </section>
@@ -220,6 +221,7 @@ SPDX-License-Identifier: Apache-2.0
           <h2>Install, run and understand IRIS.</h2>
         </div>
         <div class="doc-links">
+          <a href="docs/install/managed-package/">Ubuntu .deb installation</a>
           <a href="docs/">Open the documentation</a>
         </div>
       </section>

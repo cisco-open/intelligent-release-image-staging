@@ -367,7 +367,7 @@ exercise the same operator API as the one-host Compose and Kubernetes
 deployments.
 
 For the log commands this drill reads, see
-[Install on separate Docker hosts](../zensical/install/separate-docker-hosts.md).
+[Install on separate Docker hosts](../zensical/reference/manual-installation/separate-docker-hosts.md).
 For what each symptom means, see
 [Troubleshoot: symptoms and first steps](../zensical/user-guide/troubleshooting.md).
 

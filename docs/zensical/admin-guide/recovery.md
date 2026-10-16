@@ -61,7 +61,7 @@ from the authenticated backup.
 ## Replace the independent recovery recipient
 
 Create the replacement with
-[iris-key-setup](../install/offline-approval.md#create-an-independent-recovery-identity).
+[iris-key-setup](../reference/manual-installation/offline-approval.md#create-an-independent-recovery-identity).
 Keep an independent private copy off the deployment host. Put a protected copy
 of this recovery key on the installer host, outside deployment and backup folders.
 Then run:
@@ -198,7 +198,7 @@ the device.
 
 A storage driver that rewrites permissions on mount widens the private files
 holding the deployment authority and the IOx transcripts, and the server
-refuses to start. [Install on Kubernetes](../install/kubernetes.md) has the
+refuses to start. [Install on Kubernetes](../reference/manual-installation/kubernetes.md) has the
 mount settings that prevent this. Keep the failure evidence, then repair the
 storage:
 

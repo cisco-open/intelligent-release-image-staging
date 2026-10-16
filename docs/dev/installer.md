@@ -114,7 +114,7 @@ Neither status is a production READY declaration.
 `iris-key-setup` guides separate key holders through key creation and approvals,
 copying only public files. Use `iris-key-setup --local` for later approvals with
 locally held keys. Managed roots reuse their saved passphrases; request review
-and SHA256 confirmation remain required. See [offline approval](../zensical/install/offline-approval.md).
+and SHA256 confirmation remain required. See [offline approval](../zensical/reference/manual-installation/offline-approval.md).
 
 The installer also has explicit `docker-split` and `kubernetes` targets; see the
 [managed installation procedure](../zensical/install/managed-package.md).

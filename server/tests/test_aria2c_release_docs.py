@@ -42,10 +42,11 @@ def test_release_guides_require_source_beside_precompiled_binaries():
     assert "Keep older release tags and assets intact" in checklist
 
 
-def test_local_p12_source_record_does_not_claim_a_published_release():
+def test_p12_source_record_links_the_matching_clients_and_source_release():
     source = read("tools/aria2c-source/README.md")
     assert "aria2c-2.5.6-p12-source.tar.gz" in source
-    assert "does not claim that a p12 release has been published" in source
+    assert "releases/tag/aria2c-2.5.6-p12" in source
+    assert "both tested clients and their corresponding source archive" in source
     assert "p10 assets or retained p11 artifacts with p12 bytes" in source
     assert "tests/" in read("tools/aria2c-source/BUNDLE-README.md")
     assert "--offline" in read("tools/aria2c-source/BUNDLE-README.md")

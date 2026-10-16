@@ -19,18 +19,18 @@ https://cisco-open.github.io/intelligent-release-image-staging/docs/.
 
 ## Start here
 
-- [Documentation](docs/zensical/index.md) — start of the manual, with a reading
-  order for each guide.
-- [Installation Guide](docs/zensical/install/index.md) — deploy IRIS and stage
-  your first image, using the Ubuntu managed package or manual provisioning.
+- [Documentation](docs/zensical/index.md) — start of the manual and reading order.
+- [Ubuntu .deb installer](docs/zensical/install/managed-package.md) — package availability,
+  verification and automated deployment with `irisctl setup`.
+- [Installation Guide](docs/zensical/install/index.md) — prepare the host,
+  choose a layout, onboard devices and stage your first image.
 - [Administration Guide](docs/zensical/admin-guide/index.md) — new releases,
   backups, credentials, signing keys, and recovery.
 - [User Guide](docs/zensical/user-guide/index.md) — everyday tasks,
   monitoring, and troubleshooting.
 - [Architecture Guide](docs/zensical/architecture/index.md) — components, trust
   boundaries, and limitations.
-- [Reference](docs/zensical/reference/index.md) — routes, file formats, and
-  terms.
+- [Reference](docs/zensical/reference/index.md) — routes, file formats, and terms.
 
 The server and stateless Console run on one Docker host, separate Docker
 hosts, or Kubernetes; see the Installation Guide for each layout. Device
@@ -39,7 +39,7 @@ prerequisites vary by model and software.
 
 Control services use HTTPS. Image pieces move between devices over the
 private swarm. The managed installer requires mutual TLS for peer transfers by
-default; manually provisioned deployments can enable it explicitly. See
+default. See
 [Security model and trust boundaries](docs/zensical/architecture/security-model.md)
 for how that setting works.
 

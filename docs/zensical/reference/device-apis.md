@@ -63,7 +63,7 @@ are set in [Server configuration](server-configuration.md).
 | Route | Auth | What it does |
 | --- | --- | --- |
 | `GET /healthz` | Anonymous | `{"ok": true}` when the telemetry process is running. |
-| `GET /readyz` | Anonymous | Checks the tracker, catalog, artifact server and management API together. Docker Compose and Kubernetes use this to decide when the server is ready. See [Install on Kubernetes](../install/kubernetes.md). |
+| `GET /readyz` | Anonymous | Checks the tracker, catalog, artifact server and management API together. Docker Compose and Kubernetes use this to decide when the server is ready. See [Install on Kubernetes](manual-installation/kubernetes.md). |
 | `GET /metrics` | Monitoring credential | Prometheus-format metrics, when monitoring is on. See [Telemetry signals](telemetry-signals.md). |
 | `GET /swarm` | Management credential | Peer counts for every image, for the Console. |
 | `GET /status` | Management credential | Listener and telemetry-export status, for the Console. |

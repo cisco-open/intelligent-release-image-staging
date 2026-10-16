@@ -18,7 +18,7 @@ series takes.
 1. Check the device against [What a device needs before onboarding](device-requirements.md).
 2. Pick a management type, which is how the agent reaches the network: on its
    own address, on your management VLAN, or through the router. See [Choose a management type](management-types.md).
-3. Build and publish the IOx packages. See [Build and publish the device packages](device-packages.md).
+3. Finish [the Ubuntu .deb setup](managed-package.md) and check the prepared IOx packages in **Settings > Device packages**.
 4. Read `show app-hosting infra` and note the package verification state.
 
 !!! warning

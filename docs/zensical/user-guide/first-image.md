@@ -15,12 +15,10 @@ the image yourself.
 ## Before you start
 
 - A running server and a Console sign-in. See [Install IRIS](../install/index.md).
-- Instruction signing turned on. An instruction is the signed message the
-  server sends a device saying which images to stage and how. See
-  [Turn on instruction signing](../install/activate-signing.md).
-- The device packages published, and one device that meets the requirements.
-  See [Build and publish the device packages](../install/device-packages.md)
-  and [What a device needs before onboarding](../install/device-requirements.md).
+- [The Ubuntu .deb setup](../install/managed-package.md) has completed signing
+  and device package preparation. Check **Settings > Certificates & keys** and
+  **Settings > Device packages**.
+- One device that meets [the onboarding requirements](../install/device-requirements.md).
 - The image file, and the Bulk Hash for it, the checksum Cisco publishes for
   an image.
 
@@ -85,7 +83,7 @@ signed-instruction status separately from staging status.
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
-| Onboarding fails on every device | The server cannot stamp instructions yet | Finish [Turn on instruction signing](../install/activate-signing.md), then retry the job |
+| Onboarding fails on every device | The server cannot stamp instructions yet | Check **Settings > Certificates & keys**; finish [setup](../install/managed-package.md#approve-and-resume) or [renew the signing certificate](../admin-guide/instruction-keys.md), then retry the job |
 | Onboarding fails on one device | The connectivity fields or the credential profile do not match the management type | Read the job output, correct the device entry, then onboard again |
 | The device onboards but no report appears | No assignment reached the agent, or the agent cannot reach the server | Confirm the assignment, then check the device's route to the server |
 | The image is published but no device gets it | The file failed the Cisco hash check | Refresh the Bulk Hash feed, then compare the published checksum with your file |

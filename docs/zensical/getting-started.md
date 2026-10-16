@@ -3,5 +3,5 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 template: redirect.html
-location: ../install/one-docker-host/
+location: ../reference/manual-installation/one-docker-host/
 ---

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exercise the installation guide's public-certificate export contract."""
+"""Exercise public install guidance and the manual reference recipes."""
 
 from pathlib import Path
 import re
@@ -14,12 +14,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL = ROOT / "docs/zensical/install"
+MANUAL = ROOT / "docs/zensical/reference/manual-installation"
 
 
 def test_signing_root_commands_keep_private_keys_on_separate_holders(tmp_path):
     if not shutil.which("ssh-keygen"):
         pytest.skip("ssh-keygen required")
-    page = (INSTALL / "signing-roots.md").read_text()
+    page = (MANUAL / "signing-roots.md").read_text()
     blocks = re.findall(r"```bash\n(.*?)```", page, re.DOTALL)
     holders = [tmp_path / "holder-a", tmp_path / "holder-b"]
     build = tmp_path / "build"
@@ -54,7 +55,7 @@ def test_documented_export_does_not_distribute_private_key(tmp_path):
     ], check=True, capture_output=True)
     combined = tmp_path / "combined.pem"
     combined.write_bytes(cert.read_bytes() + key.read_bytes())
-    page = (INSTALL / "certificates-and-tokens.md").read_text()
+    page = (MANUAL / "certificates-and-tokens.md").read_text()
     command = re.search(
         r"openssl x509 -in /run/iris/tls/console-fallback\.pem -outform PEM",
         page,
@@ -83,7 +84,7 @@ def test_browser_certificate_guidance_allows_multiple_addresses():
 
 
 def test_split_install_prepares_environment_before_build():
-    page = (INSTALL / "separate-docker-hosts.md").read_text()
+    page = (MANUAL / "separate-docker-hosts.md").read_text()
     for service in ("server", "console"):
         assert page.index(f"cp server/{service}.env.example") < page.index(
             f"iris_{service} build --pull")
@@ -95,7 +96,7 @@ def test_split_install_prepares_environment_before_build():
 
 
 def test_cluster_certificates_are_created_before_secret_imports():
-    page = (INSTALL / "kubernetes.md").read_text()
+    page = (MANUAL / "kubernetes.md").read_text()
     assert page.index("tools/prepare-docker-hosts.py") < page.index(
         "create secret tls iris-management-tls")
     for name in ("iris-server-api", "iris-server-api.iris", "iris-server-api.iris.svc"):
