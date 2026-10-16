@@ -17,12 +17,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.10.16]
+
 - Make the Ubuntu .deb installer and automatic setup the main installation guide;
   keep manual provisioning under Reference with redirects for existing links.
 
 - Close Inventory filters reliably when Escape follows immediately after opening.
-
-## [2026.10.16]
 
 - Keep peer permissions within the selected instruction's expiry when a device
   returns to a previously used role, so onboarding can complete after role changes.

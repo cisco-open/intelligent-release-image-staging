@@ -15,10 +15,10 @@ Use `irisctl setup` for Docker on one host, separate Docker hosts, or Kubernetes
 It creates and approves the signing keys, starts instruction signing, and
 prepares the device packages automatically.
 
-!!! note "Installer download pending"
-    The public releases currently contain aria2 clients only. The IRIS installer
-    `.deb` has not been published yet. Use the procedure below once a release
-    includes `iris-installer_*_amd64.deb`, `release-auth.py`, and `attestations.jsonl`.
+!!! note "Choose the IRIS installer release"
+    Select a release containing `iris-installer_*_amd64.deb`, `release-auth.py`,
+    and `attestations.jsonl`. The separate `aria2c-*` releases provide the
+    transfer clients.
 
 ## Download and authenticate
 

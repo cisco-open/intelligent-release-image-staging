@@ -5,8 +5,9 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 ## Verify the matching source
 
-The current local development clients match `aria2c-2.5.6-p12-source.tar.gz`.
-This source record does not claim that a p12 release has been published.
+The [p12 release](https://github.com/cisco-open/intelligent-release-image-staging/releases/tag/aria2c-2.5.6-p12)
+contains both tested clients and their corresponding source archive,
+`aria2c-2.5.6-p12-source.tar.gz`.
 Verify the archive against the tracked [source.sha256](source.sha256) before
 extraction. Inside the extracted directory, run
 `sha256sum -c SHA256SUMS` to check its members.
