@@ -12,8 +12,8 @@ certificate changes and monitoring.
 
 ## Before you start
 
-- Finish [Install IRIS with the Ubuntu .deb package](managed-package.md).
-- Know the installation's state directory and Console address.
+- Have a running IRIS deployment and know its Console address.
+- For a managed installation, know its state directory.
 - For Settings changes, [sign in as the administrator](first-sign-in.md).
 
 ## Default browser identity
@@ -22,7 +22,10 @@ The default browser identity is generated and stored encrypted in
 `tls/console-fallback.pem.age`, and reused on restart. Separate Docker hosts and
 Kubernetes mount their own browser identity.
 
-Setup exports the public Console certificate to `requests/console-cert.pem`
+For a manually provisioned deployment, follow the
+[public certificate export procedure](../reference/manual-installation/certificates-and-tokens.md#default-browser-identity).
+
+For a managed installation, setup exports the public Console certificate to `requests/console-cert.pem`
 inside the installation's state directory. Obtain it through your authenticated
 host connection. For an installation using `/var/lib/iris-installer/my-iris`:
 

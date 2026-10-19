@@ -19,6 +19,9 @@ for installations you provision yourself. For guided setup, use
 4. [Create the two offline signing keys](signing-roots.md).
    [Create keys and approve signing requests](offline-approval.md) covers the key helper.
 
+For managed installation with offline signing keys, use
+[Install with separate key holders](offline-approval.md#install-with-separate-key-holders).
+
 ## Choose a layout
 
 | Layout | Procedure |

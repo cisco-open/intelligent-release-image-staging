@@ -95,6 +95,65 @@ To replace a recovery key in an existing deployment, follow
     Private roots stay on their holders' machines in this workflow. Never upload
     a private root or its passphrase to the Console.
 
+## Install with separate key holders
+
+Use this procedure on the deployment controller after
+[authenticating and installing the Ubuntu package](../../install/managed-package.md#download-and-authenticate).
+The controller needs network access for builds and dependencies. Key holders
+can remain offline.
+
+1. Create both signing roots using [Create your root](#create-your-root).
+   Assemble only `root-a.pub` and `root-b.pub` in the
+   [public roots directory](signing-roots.md#build-host-assemble-the-public-roots).
+   Check their fingerprints with the holders.
+2. [Create an independent recovery identity](#create-an-independent-recovery-identity).
+   Bring only its public `age1...` recipient to the controller.
+3. Choose a new instance and empty state directory. Replace the placeholders
+   below and append the options for your
+   [layout](../../install/managed-package.md#choose-the-layout) to the same command:
+
+```bash
+sudo irisctl install --instance my-iris \
+  --state-dir /var/lib/iris-installer/my-iris \
+  --host <device-facing-ipv4> \
+  --roots-dir /path/to/two-reviewed-public-roots \
+  --recovery-recipient <independent-age-public-recipient> \
+  --accept-changes
+```
+
+The installer prepares the deployment and returns exit `20` while waiting for
+signing approval. Its public request is `requests/online.pub` inside the state
+directory. Record its SHA256 value on the controller:
+
+```bash
+sudo sha256sum /var/lib/iris-installer/my-iris/requests/online.pub
+```
+
+Transfer only that public request to a key holder through your approved process.
+Share the SHA256 value independently so the holder can compare it before approval.
+On the holder's machine, run:
+
+```bash
+iris-key-setup
+```
+
+Choose **Approve server request**, then **Server signing key**, and follow
+[Approve a public request](#approve-a-public-request). Return only the public
+certificate, `online-cert.pub`, to the controller. Apply it there:
+
+```bash
+sudo irisctl resume --state-dir /var/lib/iris-installer/my-iris \
+  --certificate /path/to/online-cert.pub
+```
+
+Keep the same installer version, state directory and source until setup finishes.
+Resume checks recorded identities and prepares the device packages before
+starting the Console. Exit `21` means you must
+[claim the administrator account](../../install/first-sign-in.md).
+Exit `22` means the deployment needs production review. Complete
+[root attestations](../../admin-guide/deployment-rotation.md#attest-existing-signing-roots),
+backup access and renewal arrangements before production use.
+
 ## If approval stops
 
 Check the request, key and output location, then rerun the script. Use a new

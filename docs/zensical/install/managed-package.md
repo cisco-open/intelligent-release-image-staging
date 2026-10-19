@@ -262,7 +262,7 @@ the saved files to a separate folder for inspection.
 ### Separate key holders
 
 Organizations that keep signing keys on separate offline machines can use the
-[separate key holder reference](../reference/manual-installation/offline-approval.md).
+[separate key holder installation procedure](../reference/manual-installation/offline-approval.md#install-with-separate-key-holders).
 That advanced workflow uses `irisctl install` and explicit public approvals.
 
 ## If maintenance stops

@@ -10,8 +10,8 @@ Claim the administrator account on your new Console, then finish setup.
 
 ## Before you start
 
-- Setup has displayed the Console address: see
-  [Install IRIS with the Ubuntu .deb package](managed-package.md).
+- Have a running Console from [automatic setup](managed-package.md) or your
+  [manual deployment procedure](../reference/manual-installation/index.md#choose-a-layout).
 - You know the Console address and port, and you are on the management network
   that reaches it.
 
@@ -28,7 +28,8 @@ Open your Console address and port in a browser:
 https://<console-address>:8080/
 ```
 
-The sign-in page appears. Use the exact address and port displayed by setup.
+The sign-in page appears. Use the configured Console address and port.
+Managed setup prints them when it finishes.
 
 ### What the browser shows
 

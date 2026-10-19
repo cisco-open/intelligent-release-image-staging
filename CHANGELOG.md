@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Complete manual certificate export and separate key holder installation links,
+  and use the packaged API checker after installing the Ubuntu .deb.
+
 ## [2026.10.16.1]
 
 - Verify release attestations with compatible GitHub CLI options while retaining
