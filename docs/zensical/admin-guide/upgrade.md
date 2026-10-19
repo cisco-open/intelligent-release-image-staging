@@ -56,9 +56,9 @@ Download and authenticate the selected release. Follow the matching installation
 guide:
 
 - [Install with the managed package](../install/managed-package.md)
-- [Install on one Docker host](../install/one-docker-host.md)
-- [Install on separate Docker hosts](../install/separate-docker-hosts.md)
-- [Install on Kubernetes](../install/kubernetes.md)
+- [Install on one Docker host](../reference/manual-installation/one-docker-host.md)
+- [Install on separate Docker hosts](../reference/manual-installation/separate-docker-hosts.md)
+- [Install on Kubernetes](../reference/manual-installation/kubernetes.md)
 
 A managed replacement is a new installation. Choose a new state directory and
 instance name, or a fresh dedicated Kubernetes namespace. Complete its normal

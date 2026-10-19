@@ -337,10 +337,10 @@ def test_migration_guard_recovery_keeps_evidence_without_old_code_rollout():
 
 
 def test_changed_package_source_uses_build_only_then_deployment_replacement():
-    page = _page("install/device-packages.md")
+    page = _page("reference/manual-installation/device-packages.md")
     rebuild = _section(page, "When to rebuild the packages")
     assert "docker compose -f server/docker-compose.yml build --pull" in rebuild
-    assert "[Deploy a new release](../admin-guide/upgrade.md)" in rebuild
+    assert "[Deploy a new release](../../admin-guide/upgrade.md)" in rebuild
     assert "removes\nand re-onboards" in rebuild
     assert "Verify readiness on the new deployment before onboarding" in rebuild
     assert "same release and public roots when generating or signing its packages" in rebuild
@@ -407,25 +407,46 @@ def test_entry_points_stay_short_and_task_oriented():
 
 
 def test_section_landing_pages_link_every_page():
-    """A guide's landing page is the reader's map of that guide: every other
-    page in the section has to be linked from it, so a page cannot join a
-    guide without appearing in it.
+    """Each landing links its own pages and any nested guide's landing.
 
-    Only sections whose first nav entry is a landing page (`index.md`) are
-    checked, which is every guide once its folder exists and no section
-    before that."""
+    A nested guide keeps its detailed page map on its own landing page. Groups
+    without a landing remain part of the enclosing guide's page map.
+    """
+    def direct_pages(entries):
+        for entry in entries:
+            for target in entry.values():
+                if isinstance(target, list):
+                    pages = _nav_pages(target)
+                    if pages and PurePosixPath(pages[0]).name == "index.md":
+                        yield pages[0]
+                    else:
+                        yield from direct_pages(target)
+                else:
+                    yield target
+
     missing = []
-    for title, pages in _nav_sections().items():
-        if not pages or PurePosixPath(pages[0]).name != "index.md":
-            continue
-        landing = pages[0]
-        folder = posixpath.dirname(landing)
-        index = _page(landing)
-        for page in pages[1:]:
-            relative = posixpath.relpath(page, folder) if folder else page
-            if ("(%s)" % relative) not in index and ("(%s)" % page) not in index:
-                missing.append("%s does not link %s (section %r)"
-                               % (landing, page, title))
+
+    def check_group(title, entries):
+        pages = list(direct_pages(entries))
+        if pages and PurePosixPath(pages[0]).name == "index.md":
+            landing = pages[0]
+            folder = posixpath.dirname(landing)
+            links = {target.split("#", 1)[0]
+                     for target in re.findall(r"\]\(([^)]+)\)", _page(landing))}
+            for page in pages[1:]:
+                relative = posixpath.relpath(page, folder) if folder else page
+                if relative not in links and page not in links:
+                    missing.append("%s does not link %s (section %r)"
+                                   % (landing, page, title))
+        for entry in entries:
+            for subtitle, target in entry.items():
+                if isinstance(target, list):
+                    check_group(subtitle, target)
+
+    for entry in _nav():
+        for title, target in entry.items():
+            if isinstance(target, list):
+                check_group(title, target)
     assert not missing, "\n".join(missing)
 
 
@@ -570,9 +591,9 @@ PAGE_MAP = {
     "console.md": "user-guide/console.md",
     "containers.md": "architecture/data-path.md",
     "device-agents.md": "architecture/data-path.md",
-    "docker-hosts.md": "install/separate-docker-hosts.md",
+    "docker-hosts.md": "reference/manual-installation/separate-docker-hosts.md",
     "iox.md": "install/iox.md",
-    "kubernetes.md": "install/kubernetes.md",
+    "kubernetes.md": "reference/manual-installation/kubernetes.md",
     "network-ports.md": "architecture/network-ports.md",
     "observability.md": "user-guide/monitoring.md",
     "security.md": "architecture/security-model.md",
@@ -1454,13 +1475,13 @@ def test_role_docs_explain_reciprocal_edits_and_per_device_instruction_revisions
 
 
 def test_key_holder_guides_use_plain_language_and_preserve_saved_links():
-    for name in ("install/signing-roots.md", "admin-guide/index.md",
+    for name in ("reference/manual-installation/signing-roots.md", "admin-guide/index.md",
                  "admin-guide/instruction-keys.md", "admin-guide/recovery.md",
-                 "install/separate-docker-hosts.md"):
+                 "reference/manual-installation/separate-docker-hosts.md"):
         prose = re.sub(r"\{ #[^}\n]+ \}", "", _without_code_blocks(_page(name)))
         prose = re.sub(r"(?<=\])\([^)]*\)", "", prose)
         assert not re.search(r"\b(?:custody|custodians?)\b", prose), name
-    roots = _page("install/signing-roots.md")
+    roots = _page("reference/manual-installation/signing-roots.md")
     for holder, order in (("a", "first"), ("b", "second")):
         assert f"{{ #holder-{holder}-on-the-{order}-custody-machine }}" in roots
 
@@ -1779,7 +1800,7 @@ def test_docs_phase1_network_process_and_state_topology():
 
 
 def test_docs_phase1_kubernetes_and_split_host_custody():
-    kubernetes = _page("install/kubernetes.md")
+    kubernetes = _page("reference/manual-installation/kubernetes.md")
     _assert_unit(kubernetes, ("existing", "iris-data", "PVC"),
                  "instruction state must use the existing PVC")
     _assert_unit(kubernetes, ("no new", "Secret", "port", "Service",
@@ -1790,7 +1811,7 @@ def test_docs_phase1_kubernetes_and_split_host_custody():
                            "no cross-pod"),
                  "instruction single-writer state must explain replica one")
 
-    split = _page("install/separate-docker-hosts.md")
+    split = _page("reference/manual-installation/separate-docker-hosts.md")
     _assert_unit(split, ("Only the server host", "signing-key.age",
                          "age identity", "runtime plaintext", "instruction state"),
                  "private custody material must remain on the server host")
@@ -2071,15 +2092,15 @@ def test_docs_phase2_csv_template_and_validation_are_mapped():
 def test_installer_guides_use_terminal_key_and_recovery_tools():
     """A headless install must not send readers to removed desktop windows."""
     for page in (
-        "install/managed-package.md", "install/offline-approval.md",
-        "install/signing-roots.md", "admin-guide/backups.md",
+        "install/managed-package.md", "reference/manual-installation/offline-approval.md",
+        "reference/manual-installation/signing-roots.md", "admin-guide/backups.md",
         "admin-guide/recovery.md", "admin-guide/deployment-rotation.md",
     ):
         content = _page(page)
         assert "custody-ui" not in content, page
         assert "maintenance-ui" not in content, page
         assert "desktop display" not in content, page
-    keys = _page("install/offline-approval.md")
+    keys = _page("reference/manual-installation/offline-approval.md")
     for required in ("iris-key-setup", "separate offline machine", "SHA256",
                      "Copy public file", "independent copy", "Private roots stay"):
         assert required in keys, required
@@ -2095,7 +2116,7 @@ def test_managed_installer_offers_local_and_separate_holder_workflows():
                    "--key-directory", "all three layouts", "independent copy",
                    "does not include these private setup keys"):
         assert phrase in managed, phrase
-    approval = _page("install/offline-approval.md")
+    approval = _page("reference/manual-installation/offline-approval.md")
     for phrase in ("local setup", "iris-key-setup --local", "LOCAL KEY HOLDER",
                    "only public approval files", "separate-holder"):
         assert phrase in approval, phrase
@@ -2116,7 +2137,7 @@ def test_automatic_setup_docs_keep_passphrases_recovery_and_manual_keys_distinct
             "Existing manual keys are never replaced or unlocked automatically",
             "--key-mode manual", "original `--key-directory`"):
         assert phrase in managed, phrase
-    approval = " ".join(_page("install/offline-approval.md").split())
+    approval = " ".join(_page("reference/manual-installation/offline-approval.md").split())
     assert "advanced workflow for separate key holders and later local approvals" in approval
     assert "automatic setup does not unlock them" in approval
     assert "Automatically managed keys use their saved passphrase" in approval
@@ -2167,15 +2188,15 @@ def test_contributor_deployment_runbook_matches_managed_setup():
 
 
 def test_signing_guides_distinguish_root_approval_from_instruction_signing():
-    roots = " ".join(_page("install/signing-roots.md").split())
+    roots = " ".join(_page("reference/manual-installation/signing-roots.md").split())
     glossary = " ".join(_section(_page("reference/glossary.md"), "root key, signing root").split())
     assert "online instruction-signing key" in roots
     assert "The online key signs the instructions" in roots
     assert "key-retirement list" in roots and "key-retirement list" in glossary
     assert "The online key signs device instructions" in glossary
-    assert "chosen protected local storage" in _page("install/activate-signing.md")
-    assert "iris-key-setup --local" in _page("install/activate-signing.md")
-    signing = " ".join(_page("install/activate-signing.md").split())
+    assert "chosen protected local storage" in _page("reference/manual-installation/activate-signing.md")
+    assert "iris-key-setup --local" in _page("reference/manual-installation/activate-signing.md")
+    signing = " ".join(_page("reference/manual-installation/activate-signing.md").split())
     helper = Path(REPO, "tools/iris_installer/key_setup.py").read_text()
     for label in ("Approve server request", "Server signing key"):
         assert label in signing and label in helper, label

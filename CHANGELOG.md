@@ -17,9 +17,20 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
-- Close Inventory filters reliably when Escape follows immediately after opening.
+- Complete manual certificate export and separate key holder installation links,
+  and use the packaged API checker after installing the Ubuntu .deb.
+
+## [2026.10.16.1]
+
+- Verify release attestations with compatible GitHub CLI options while retaining
+  the exact workflow identity, release tag, source commit and hosted-runner checks.
 
 ## [2026.10.16]
+
+- Make the Ubuntu .deb installer and automatic setup the main installation guide;
+  keep manual provisioning under Reference with redirects for existing links.
+
+- Close Inventory filters reliably when Escape follows immediately after opening.
 
 - Keep peer permissions within the selected instruction's expiry when a device
   returns to a previously used role, so onboarding can complete after role changes.

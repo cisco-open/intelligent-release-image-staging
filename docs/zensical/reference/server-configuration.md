@@ -46,7 +46,7 @@ as unknown. See [Deployment information](../user-guide/console.md#deployment-inf
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `COMPOSE_PROJECT_NAME` | `server` | Compose project name and volume prefix. Set it to run a second stack on this host; see [One Docker host](../install/one-docker-host.md#running-a-second-stack-on-the-same-host). |
+| `COMPOSE_PROJECT_NAME` | `server` | Compose project name and volume prefix. Set it to run a second stack on this host; see [One Docker host](manual-installation/one-docker-host.md#running-a-second-stack-on-the-same-host). |
 | `IRIS_CONTAINER` | `iris` | Server container name, used by helper scripts such as `tools/apply-assignments.sh`. |
 | `IRIS_CONSOLE_CONTAINER` | `iris-console` | Console container name. |
 | `IRIS_OBSERVABILITY_TOKEN_FILE_HOST` / `_PREVIOUS_TOKEN_FILE_HOST` | `/dev/null` | Host path of the raw observability bearer token, mode 600, and its previous value during a rotation overlap. Required when `IRIS_OBSERVABILITY=1` and something scrapes `/metrics`. |
@@ -217,7 +217,7 @@ artifact, and catalog traffic is outside this limit. See
 
 These affect only how the device packages are built, not a running
 deployment. See
-[Build and publish the device packages](../install/device-packages.md#embedded-agent-packages).
+[Build and publish the device packages](manual-installation/device-packages.md#embedded-agent-packages).
 
 | Variable | Effect |
 | --- | --- |
@@ -228,7 +228,7 @@ deployment. See
 
 ## Deployment settings for separate hosts
 
-[Install on separate Docker hosts](../install/separate-docker-hosts.md)
+[Install on separate Docker hosts](manual-installation/separate-docker-hosts.md)
 splits these across the server host and the Console host. Tokens and private
 keys stay in the provisioned files; the environment only names their
 directory paths.
@@ -267,4 +267,4 @@ Prometheus can read `current` as its `credentials_file`. Use distinct random
 values for management and observability: a raw token has no embedded scope.
 JSON records must match the listener's scope. See
 [Rotate credentials and certificates](../admin-guide/rotations.md) and
-[Install on Kubernetes](../install/kubernetes.md).
+[Install on Kubernetes](manual-installation/kubernetes.md).

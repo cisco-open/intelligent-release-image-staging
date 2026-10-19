@@ -37,7 +37,7 @@ an attacker-held key unusable until devices receive its signed revocation.
    replacement public-file SHA256 values. Confirm the downloaded file with the
    key holder through an independently trusted channel.
 2. The key holder uses
-   [iris-key-setup](../install/offline-approval.md#approve-a-public-request)
+   [iris-key-setup](../reference/manual-installation/offline-approval.md#approve-a-public-request)
    and chooses **Approve server request**. To provide the filenames directly,
    use this command; add `--local` before `approve` for host-held keys:
 
@@ -63,7 +63,7 @@ pending requires cancelling and preparing a new request.
    `keylist.payload` preserves existing revocations and adds the previous key.
 2. Have that root's holder review the request, sequence and revocation-list hash
    against your independent record. In
-   [iris-key-setup](../install/offline-approval.md#approve-a-public-request),
+   [iris-key-setup](../reference/manual-installation/offline-approval.md#approve-a-public-request),
    choose **Approve server request** and select the retirement-list type.
    To provide the filenames directly:
 

@@ -37,7 +37,7 @@ Renew the existing key's 30-day certificate here. To change the key itself, use 
    seven days before expiry.
 2. Select **Download public renewal request**. Send `iris-online.pub` to the
    root signing key holder, who selects **Approve server request** in
-   [iris-key-setup](../install/offline-approval.md#approve-a-public-request).
+   [iris-key-setup](../reference/manual-installation/offline-approval.md#approve-a-public-request).
    To provide filenames directly, use this command; add `--local` before `approve` for host-held keys:
 
    ```bash
@@ -195,7 +195,7 @@ certificate follows the shorter renewal window in steps 3 and 4.
 4. Build fresh Guest Shell bundles, the unified container image, both IOx tars
    and the XR RPM with the new public roots and the current pinned aria2c
    binaries, for both architectures. See [Build and publish the device
-   packages](../install/device-packages.md) and the [build entry
+   packages](../reference/manual-installation/device-packages.md) and the [build entry
    points](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/docs/dev/device-packages.md).
 5. Re-onboard every device with the new trust material, then check the
    accepted identity and the key state on each one. A disconnected device takes
@@ -287,8 +287,8 @@ stays pending or unavailable.
 
 ## Related
 
-- [Turn on instruction signing](../install/activate-signing.md)
-- [Create the two root signing keys](../install/signing-roots.md)
+- [Turn on instruction signing](../reference/manual-installation/activate-signing.md)
+- [Create the two root signing keys](../reference/manual-installation/signing-roots.md)
 - [How instructions are signed and trusted](../architecture/security-model.md)
 - [Find your way around the Console](../user-guide/console.md)
 - [Rotate credentials and certificates](rotations.md)

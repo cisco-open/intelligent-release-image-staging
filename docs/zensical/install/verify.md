@@ -10,14 +10,14 @@ Check that your server works before the first device reaches it.
 
 ## Before you start
 
-- Finish the deployment page for your layout:
-  [Install on one Docker host](one-docker-host.md),
-  [Install on separate Docker hosts](separate-docker-hosts.md), or
-  [Install on Kubernetes](kubernetes.md).
+- Finish [automatic setup](managed-package.md) or your
+  [manual layout procedure](../reference/manual-installation/index.md#choose-a-layout).
+  Automatic setup checks the services, signing and device packages before it finishes.
+- For manual deployments, complete [instruction signing](../reference/manual-installation/activate-signing.md)
+  and [device package preparation](../reference/manual-installation/device-packages.md).
 - Create the Console administrator and sign in once:
   [Sign in for the first time](first-sign-in.md).
-- Publish the device packages if you onboard IOx or IOS-XR devices:
-  [Build and publish the device packages](device-packages.md).
+- Open **Settings > Device packages** and check that the prepared packages are ready.
 
 !!! warning
 
@@ -27,8 +27,8 @@ Check that your server works before the first device reaches it.
 ## Check the deployment for your layout
 
 Read the column for the layout you deployed and confirm every row. The
-"Devices and signing" row checks the state
-[Turn on instruction signing](activate-signing.md) sets up.
+"Devices and signing" row describes the signing state that `irisctl setup`
+configures automatically.
 
 | Check | Docker on one host | Docker on separate hosts | Kubernetes |
 | --- | --- | --- | --- |
@@ -43,16 +43,20 @@ Read the column for the layout you deployed and confirm every row. The
 
 ## Run one read-only API check
 
-`tools/api-exercise.py` signs in to the Console API and sends read-only
-requests. Run it once per layout, against that layout's Console address.
+The API check signs in to the Console and sends read-only requests.
+The `.deb` installs it at `/usr/lib/iris-installer/source/tools/api-exercise.py`.
+Run it once per layout, against that layout's Console address, from any directory:
 
 ```bash
-python3 tools/api-exercise.py \
+python3 /usr/lib/iris-installer/source/tools/api-exercise.py \
   --base "https://<console-url>" \
   --cafile "<path to the Console CA file>" \
   --password-file "<path to the admin password file>" \
   --output "<path to the report file>"
 ```
+
+For a manual deployment, run the same command from your source checkout,
+using `tools/api-exercise.py` in place of the packaged path.
 
 The run writes the report file. The check passes when the report's `errors`
 list is empty. Keep the password in a file. Never disable TLS verification. For

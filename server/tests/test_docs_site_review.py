@@ -16,13 +16,13 @@ DOCS = ROOT / "docs/zensical"
 
 
 @pytest.mark.parametrize("old_page,fragment,expected", [
-    ("getting-started", "create-the-console-admin", "install/one-docker-host"),
-    ("development", "embedded-agent-packages", "install/device-packages"),
+    ("getting-started", "create-the-console-admin", "reference/manual-installation/one-docker-host"),
+    ("development", "embedded-agent-packages", "reference/manual-installation/device-packages"),
     ("operations", "instruction-root-ceremony-and-recovery", "admin-guide/recovery"),
     ("operations", "rollback-after-the-shard-migration", "admin-guide/recovery"),
     ("operations", "f3-offline-bootstrap-envelope-redelivery", "admin-guide/instruction-keys"),
-    ("aiagent", "build-and-publish-the-arm64-iox-package", "install/device-packages"),
-    ("aiagent", "initialise-instruction-custody", "install/activate-signing"),
+    ("aiagent", "build-and-publish-the-arm64-iox-package", "reference/manual-installation/device-packages"),
+    ("aiagent", "initialise-instruction-custody", "reference/manual-installation/activate-signing"),
 ])
 def test_retained_legacy_sections_reach_their_new_page(old_page, fragment, expected):
     meta = yaml.safe_load((DOCS / (old_page + ".md")).read_text().split("---")[1])
@@ -53,7 +53,7 @@ def test_comparison_is_compact_static_and_has_distinct_piece_states():
     assert ".flow-svg .node .piece.empty {" in comparison_css
     assert 'class="load' not in markup
     assert "seeds each image once" not in markup and "seeds once" not in markup
-    assert "Turn on mutual TLS" in markup
+    assert "installer enables mutual TLS to encrypt peer transfers" in markup
     assert "HTTPS for every control path" not in markup
     assert "HTTPS for the Console and service APIs" in markup
     assert "manual or separately scripted" in markup

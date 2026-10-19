@@ -19,8 +19,8 @@ switches with app-hosting storage you can run it as an IOx app instead;
 2. Choose how the agent reaches the network:
    [Choose a management type](management-types.md). A Catalyst 8000 series
    router uses an IRIS-managed VirtualPortGroup and stages to `bootflash:`.
-3. Publish the packages the artifact server hands to devices:
-   [Build and publish the device packages](device-packages.md).
+3. Finish [the Ubuntu .deb setup](managed-package.md), which prepares the
+   device packages. Check their status in **Settings > Device packages**.
 
 ## What the installer configures
 

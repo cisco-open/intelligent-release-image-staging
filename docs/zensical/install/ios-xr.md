@@ -20,8 +20,8 @@ and [Supported devices and platforms](supported-devices.md).
 
 ## Before you start
 
-- A current `artifacts/iris-xr.rpm` on the server. See
-  [Build and publish the device packages](device-packages.md).
+- A current `iris-xr.rpm` prepared by [the Ubuntu .deb setup](managed-package.md).
+  Check it in **Settings > Device packages**.
 - SSH access to the router and a saved credential profile.
 - On the router: bash, curl with HTTPS, and SHA-256 tools.
 - A route to the artifact server, normally TCP port 8000. See

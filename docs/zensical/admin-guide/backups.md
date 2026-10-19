@@ -262,4 +262,4 @@ restore to change permissions.
 - [Recover from an interrupted job or damaged state](recovery.md)
 - [Data formats and states](../reference/state-and-data.md)
 - [Server configuration](../reference/server-configuration.md)
-- [Install on separate Docker hosts](../install/separate-docker-hosts.md)
+- [Install on separate Docker hosts](../reference/manual-installation/separate-docker-hosts.md)

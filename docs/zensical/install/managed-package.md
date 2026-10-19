@@ -4,19 +4,26 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Install with the managed package
+# Install IRIS with the Ubuntu .deb package
 
-The Ubuntu 24.04 amd64 installer builds the server, Console, both IOx
+The Ubuntu 24.04 amd64 `.deb` installer builds the server, Console, both IOx
 architectures, IOS-XR RPM and Guest Shell bundles. It installs the tools it needs,
 creates the server's keys, and completes local signing approval by default.
 Run it over SSH or in a local terminal. You create your Console account yourself.
 
-Published packages carry GitHub artifact attestations from the public IRIS
-release workflow. Verify the package before installation using the procedure
-below. A checksum alone does not authenticate its publisher.
+Use `irisctl setup` for Docker on one host, separate Docker hosts, or Kubernetes.
+It creates and approves the signing keys, starts instruction signing, and
+prepares the device packages automatically.
+
+!!! note "Choose the IRIS installer release"
+    Select a release containing `iris-installer_*_amd64.deb`, `release-auth.py`,
+    and `attestations.jsonl`. The separate `aria2c-*` releases provide the
+    transfer clients.
 
 ## Download and authenticate
 
+The release workflow supplies GitHub artifact attestations. Verify the package
+before installation; a checksum alone does not authenticate its publisher.
 Use GitHub CLI with `gh attestation verify` support. Select the release tag and
 its full source commit from the
 [public releases](https://github.com/cisco-open/intelligent-release-image-staging/releases).
@@ -32,7 +39,6 @@ gh attestation verify iris-download/release-auth.py --repo "$repo" \
   --bundle iris-download/attestations.jsonl \
   --cert-oidc-issuer https://token.actions.githubusercontent.com \
   --cert-identity "https://github.com/$repo/.github/workflows/release.yml@refs/tags/$tag" \
-  --signer-workflow "$repo/.github/workflows/release.yml" \
   --source-ref "refs/tags/$tag" --source-digest "$commit" \
   --signer-digest "$commit" --deny-self-hosted-runners
 ```
@@ -51,7 +57,7 @@ includes the matching aria2 source archive, licenses, both client binaries,
 and source inventories. See GitHub's
 [verification reference](https://cli.github.com/manual/gh_attestation_verify).
 
-## Prepare once
+## Install the package
 
 Use an Ubuntu host with a synchronized clock and network access for builds and
 dependencies. Install the authenticated package:
@@ -60,7 +66,7 @@ dependencies. Install the authenticated package:
 sudo apt install ./iris-download/iris-installer_*_amd64.deb
 ```
 
-### Guided local setup
+## Guided local setup
 
 Run this as your normal user, without `sudo`:
 
@@ -68,7 +74,7 @@ Run this as your normal user, without `sudo`:
 irisctl setup
 ```
 
-Automatic key setup is the default (`--key-mode automatic`). Follow its four steps:
+Automatic key setup is the default (`--key-mode automatic`). Setup has four steps:
 
 1. Review the server and Console addresses, then confirm **Start setup?**
 2. Setup creates protected local signing and recovery keys, then builds the server.
@@ -93,13 +99,6 @@ original `--key-directory`, then enter their passphrases when OpenSSH asks.
 Manual mode also lets you choose key passphrases for a new installation.
 Add the layout options below for split Docker or Kubernetes; setup supports all three layouts.
 
-### Separate key holders
-
-To keep signing keys on separate offline machines from the start, each holder
-runs `iris-key-setup` there. Follow
-[Create keys and approve signing requests](offline-approval.md), then use
-`sudo irisctl install` with the public inputs shown below.
-
 Choose a new instance name and an empty state directory. Existing deployments
 are refused, not adopted. Restrict access to the Console before exposing its
 first-account claim. The installer does not select your NTP source or configure
@@ -107,21 +106,17 @@ your organization's firewall.
 
 ## Choose the layout
 
-For separate key holders, all layouts use these common options. Append the
-layout options below to the same command. Replace the placeholders first.
-With guided local setup, append only the layout options to `irisctl setup`;
-the script supplies `--roots-dir` and `--recovery-recipient` for you.
+For a named installation, start with the command below. Append the options for
+your layout to the same command. Replace the placeholders first. Setup supplies
+the signing keys and recovery recipient.
 
 ```bash
-sudo irisctl install --instance my-iris \
+irisctl setup --instance my-iris \
   --state-dir /var/lib/iris-installer/my-iris \
-  --host <device-facing-ipv4> \
-  --roots-dir /path/to/two-reviewed-public-roots \
-  --recovery-recipient <independent-age-public-recipient> \
-  --accept-changes
+  --host <device-facing-ipv4>
 ```
 
-Add `--observability` to a new `irisctl setup` or `irisctl install` command to
+Add `--observability` to a new `irisctl setup` command to
 enable authenticated `/metrics` on port 9101 in any layout. It is off by default.
 The choice is saved for resume. Set the scraper token through
 [Rotate telemetry credentials](../admin-guide/console-credentials.md#replace-the-metrics-scraping-token).
@@ -230,41 +225,18 @@ For a local single-node k3s lab, replace `--kube-registry` with
 built images without changing registry trust. Static storage still requires an
 administrator-provisioned PV bound to this namespace's `iris-data` claim.
 
-## Approve and resume
+## Finish setup { #approve-and-resume }
 
-Continue local setup with `irisctl setup`, keeping the same key mode and paths.
-For separate key holders, use `irisctl resume` with the same `--state-dir`.
-Keep the original installer version until setup finishes. Resume checks recorded
-inputs and preserves changed or unknown files.
+Setup approves its own server signing request, builds and verifies the device
+packages, and starts the Console. Open the displayed address and create your
+administrator account. Complete the Console setup checks, root attestations,
+backup access and renewal arrangements using the
+[certificate workflows](../admin-guide/rotations.md).
+
+If setup stops, rerun `irisctl setup` with the same instance, key mode and paths.
+Keep the original installer version until setup finishes. It reuses recorded
+identities and checks source, topology and resource ownership.
 For failed builds, see [Installer command failures](../user-guide/troubleshooting.md#installer-command-failures).
-
-Automatic setup approves its own server request and resumes for you. Manual
-local setup asks you to approve it. With separate key holders, exit `20` means
-the installer is waiting for approval. Transfer only
-`requests/online.pub` from the state directory to a key holder. Record its SHA256
-value and share that value separately so the holder can check the request.
-On the holder's machine, run:
-
-```bash
-iris-key-setup
-```
-
-Choose **Approve server request**, then **Copy public file** to return the
-approved certificate. Private signing keys stay on the holder's machine.
-
-Return only the public certificate to the controller:
-
-```bash
-sudo irisctl resume --state-dir /var/lib/iris-installer/my-iris \
-  --certificate /path/to/online-cert.pub
-```
-
-Resume reuses recorded identities and checks source, topology and resource
-ownership. It builds and verifies the device packages before starting the
-Console. Exit `21` means you must claim your administrator account yourself.
-Exit `22` means the running deployment still needs production review, not that
-it is production-ready. Complete root attestations, backup access and renewal
-arrangements using the [certificate workflows](../admin-guide/rotations.md).
 
 The installer starts a maintenance service after signing approval
 and package verification. It starts automatically at boot and creates private,
@@ -286,6 +258,12 @@ maintenance. Keep encrypted copies and a separate recovery key off the controlle
 checking its current keys and security records. It preserves instruction counters
 and stops if the keys have changed. **Extract for isolated recovery** copies
 the saved files to a separate folder for inspection.
+
+### Separate key holders
+
+Organizations that keep signing keys on separate offline machines can use the
+[separate key holder installation procedure](../reference/manual-installation/offline-approval.md#install-with-separate-key-holders).
+That advanced workflow uses `irisctl install` and explicit public approvals.
 
 ## If maintenance stops
 

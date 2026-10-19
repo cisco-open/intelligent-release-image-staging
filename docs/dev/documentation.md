@@ -118,9 +118,10 @@ credentials and certificates"). An explanation or lookup page is a noun phrase
 ("Network ports and flows", "Helper commands"). Never a bare product word
 ("Server", "Operations"). Tab labels are the guide names, in Title Case because
 they are names, like a book title; every other heading is sentence case.
-Per-layout variants use the fixed H3 names "On one Docker host", "On separate
+Manual installation procedures live under Reference; the Installation Guide follows
+the managed installer. Per-layout variants use the fixed H3 names "On one Docker host", "On separate
 Docker hosts", "On Kubernetes"; per-platform variants use "Guest Shell", "IOx",
-"IOS-XR", except on `install/device-packages.md`, which keeps its five
+"IOS-XR", except on `reference/manual-installation/device-packages.md`, which keeps its five
 test-pinned H3s verbatim.
 
 Three rules decide whether a heading may change:
@@ -152,8 +153,8 @@ Three rules decide whether a heading may change:
 - Architecture page: a one-paragraph summary; a diagram where a picture shows
   the mechanism; the sections; "Limits"; "Related".
 - Reference page: one sentence of intro; tables; each item links the task that
-  uses it. Procedures never live in Reference; `user-guide/automation.md` is
-  where the API is shown as a procedure.
+  uses it. The manual installation collection preserves individual provisioning procedures;
+  other Reference pages describe values. `user-guide/automation.md` gives API procedures.
 - Landing page (`index.md` of a guide): what the guide covers, the order to
   read it in (the Installation Guide gives a reading list per layout and
   platform), a common-tasks table where the guide has tasks, and every page in
@@ -211,15 +212,22 @@ here for every pair you create.
 
 The table below records the retained aliases for the reorganization.
 
+The former manual pages under `install/` redirect to matching pages under
+`reference/manual-installation/`. Their headings and explicit aliases remain
+unchanged; redirects preserve the incoming fragment. They appear only in the
+Reference navigation. The Installation Guide uses the managed installer.
+
 | Alias id | Page and new heading text | Who depends on the id |
 | --- | --- | --- |
+| `approve-and-resume` | `install/managed-package.md` "Finish setup" | Existing installer resume and troubleshooting links |
+| `choose-a-layout` | `install/index.md` → Install and sign in | Architecture overview and saved layout-selection links. |
 | `managed-single-host-docker` | `admin-guide/upgrade.md` → Managed deployment replacement | Retained historical heading link |
 | `publish-a-new-guest-shell-agent-bundle` | `admin-guide/instruction-keys.md` → Replace a Guest Shell agent | Retained link to the former bundle-publication procedure |
-| `build-and-publish-the-arm64-iox-package` | `install/device-packages.md` "Build the packages" | `test_aiagent_arm_package_docs.py`, in-docs links from two install pages. |
-| `embedded-agent-packages` | `install/device-packages.md` "When to rebuild the packages" | `help-server.html:118` (shipped in images). |
-| `initialise-instruction-custody` | `install/activate-signing.md` "Start signing instructions" | `test_aiagent_arm_package_docs.py`; in-docs links. The id keeps the old spelling; the text is American. |
-| `holder-a-on-the-first-custody-machine` | `install/signing-roots.md` "Holder A: on the first offline machine" | Saved links to the separate-holder instructions. |
-| `holder-b-on-the-second-custody-machine` | `install/signing-roots.md` "Holder B: on the second offline machine" | Saved links to the separate-holder instructions. |
+| `build-and-publish-the-arm64-iox-package` | `reference/manual-installation/device-packages.md` "Build the packages" | `test_aiagent_arm_package_docs.py`, in-docs links from two install pages. |
+| `embedded-agent-packages` | `reference/manual-installation/device-packages.md` "When to rebuild the packages" | `help-server.html:118` (shipped in images). |
+| `initialise-instruction-custody` | `reference/manual-installation/activate-signing.md` "Start signing instructions" | `test_aiagent_arm_package_docs.py`; in-docs links. The id keeps the old spelling; the text is American. |
+| `holder-a-on-the-first-custody-machine` | `reference/manual-installation/signing-roots.md` "Holder A: on the first offline machine" | Saved links to the separate-holder instructions. |
+| `holder-b-on-the-second-custody-machine` | `reference/manual-installation/signing-roots.md` "Holder B: on the second offline machine" | Saved links to the separate-holder instructions. |
 | `instruction-root-ceremony-and-recovery` | `admin-guide/instruction-keys.md` "Replace the two root keys"; the pointer section on `admin-guide/recovery.md` | `tools/start-compose-server.sh`, `kubernetes/README.md:426`, older script copies, CHANGELOG. |
 | `f3-offline-bootstrap-envelope-redelivery` | `admin-guide/instruction-keys.md` "Deliver the first instruction file by hand" | Four in-docs pages, CHANGELOG. |
 | `device-administrator-trust-boundary` | `architecture/security-model.md` "What a device administrator can still change" | The literal link `test_docs_map.py` pins on `architecture/data-path.md`. |

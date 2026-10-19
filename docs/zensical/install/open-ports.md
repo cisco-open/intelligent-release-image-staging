@@ -12,9 +12,8 @@ lists destination ports only.
 
 ## Before you start
 
-- Pick your layout: [one Docker host](one-docker-host.md),
-  [separate Docker hosts](separate-docker-hosts.md), or
-  [Kubernetes](kubernetes.md).
+- Pick your [installation layout](managed-package.md#choose-the-layout): one
+  Docker host, separate Docker hosts, or Kubernetes.
 - Know the server address devices use, and the Console address operators use.
 - Know each device's [management type](management-types.md).
 
@@ -79,6 +78,5 @@ Fix any closed path before you install.
 ## Next steps
 
 - [Check the host before you install](check-the-host.md)
-- [Download the tools that build device packages](build-tools.md)
-- [Install on one Docker host](one-docker-host.md)
+- [Install IRIS with the Ubuntu .deb package](managed-package.md)
 - [Network ports and flows](../architecture/network-ports.md)

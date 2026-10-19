@@ -60,7 +60,7 @@ does not adopt the plan identity the server sends. Its reports stay at
 `planned` and never reach `seeding_started`. Replace its IRIS agent through undeploy and onboarding, as described
 in [Deploy a new release](../admin-guide/upgrade.md). Any change to the agent
 needs a fresh build of every device package before rollout. See
-[Build and publish the device packages](../install/device-packages.md#embedded-agent-packages).
+[Build and publish the device packages](../reference/manual-installation/device-packages.md#embedded-agent-packages).
 
 ## Telemetry costs a little on each link
 

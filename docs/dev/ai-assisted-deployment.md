@@ -74,7 +74,7 @@ reuse qualified images without building device packages or onboarding devices.
 The tested aria2c clients are committed: `bin/aria2c` for amd64 and
 `deliverables/aria2c-aarch64` for ARM64. Builders verify their pinned checksums.
 Normal installation does not fetch or compile replacement clients. See
-[Build and publish the device packages](../zensical/install/device-packages.md)
+[Build and publish the device packages](../zensical/reference/manual-installation/device-packages.md)
 for manual package assembly and the shared-agent rebuild rule.
 
 The two approved public instruction roots are build inputs. Keep private keys
@@ -109,7 +109,7 @@ saved passphrases; the owner still reviews and confirms the request SHA256.
 Private-key operations
 are refused inside containers in both modes. A host compromise can expose both
 locally stored keys and their passphrases. Explain that tradeoff before setup.
-See [Create keys and approve signing requests](../zensical/install/offline-approval.md).
+See [Create keys and approve signing requests](../zensical/reference/manual-installation/offline-approval.md).
 
 ## Start signing instructions
 
@@ -119,7 +119,7 @@ Use its guided approval or resume workflow rather than recreating keys manually.
 Only public requests and approvals move between the deployment and key holder.
 
 For a manual deployment, use
-[Turn on instruction signing](../zensical/install/activate-signing.md).
+[Turn on instruction signing](../zensical/reference/manual-installation/activate-signing.md).
 Check that every input file exists before giving the owner its approval command.
 Read the complete signing status and producer health before onboarding; two
 status booleans alone do not establish readiness. Root confirmations, renewal

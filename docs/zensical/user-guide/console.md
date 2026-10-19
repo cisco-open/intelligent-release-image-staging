@@ -149,9 +149,9 @@ Each wrapper row compares the SHA-256 of the served package with its adjacent
 provenance manifest. **Done** means they agree; the check does not authenticate
 that manifest or verify a native signature. **Artifact updated** is the file's
 modification time. Guest Shell uses separate startup provisioning evidence.
-Build or repair packages for the platforms you use on the build host, then
-select **Re-check packages**. See
-[Build and publish the device packages](../install/device-packages.md).
+[The Ubuntu .deb setup](../install/managed-package.md) prepares these packages.
+Select **Re-check packages** to refresh their status. If setup stopped, follow
+[Installer command failures](troubleshooting.md#installer-command-failures).
 
 The card also turns non-green when the certificate the live service presents
 differs from the copy onboarding distributes. Reconcile the two, then onboard
