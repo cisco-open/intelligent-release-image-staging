@@ -2304,6 +2304,7 @@ class IoxController(object):
                 "instruction_bootstrap_materializer")):
             raise ValueError("IOx instruction bootstrap materializer is required")
         for key, default in (("install_timeout", 300),
+                             ("fetch_timeout", 1800),
                              ("activate_timeout", 300),
                              ("start_timeout", 300),
                              ("state_poll", 5)):
@@ -4281,6 +4282,17 @@ class IoxController(object):
                                  failure.category if failure else None,
                                  failure.detail if failure else "")
 
+    def _prepare_record(self, attempt, prepare):
+        # Service callbacks write the same shared store as concurrent IOx
+        # jobs. Each write uses the remaining ordinary budget, not the short
+        # standalone wait. No lock is held across the callback itself.
+        wait_budget = (self.store.lock_wait_budget(
+            attempt.ordinary_deadline, attempt.check, self._monotonic)
+            if isinstance(self.store, deployment_records.DeploymentRecordStore)
+            else _NoopContext())
+        with wait_budget:
+            return prepare(attempt.request, copy.deepcopy(attempt.identity))
+
     def run_install(self, request, prepare, preflight, on_output, cancel):
         execution_started = self._monotonic()
         self._validate_request(request, "install")
@@ -4338,8 +4350,7 @@ class IoxController(object):
                         attempt.is_cancelled,
                         self._monotonic) as instruction_snapshot:
                     attempt.instruction_snapshot = instruction_snapshot
-                    record_id = prepare(
-                        request, copy.deepcopy(attempt.identity))
+                    record_id = self._prepare_record(attempt, prepare)
                     if (not isinstance(record_id, str) or
                             not _RECORD_ID.fullmatch(record_id)):
                         raise ValueError("prepare returned invalid record_id")
@@ -4426,7 +4437,7 @@ class IoxController(object):
                 attempt.journal = operation_journal
             attempt.check()
             preflight(request, copy.deepcopy(attempt.identity))
-            authorized = prepare(request, copy.deepcopy(attempt.identity))
+            authorized = self._prepare_record(attempt, prepare)
             mode = _get(request, "teardown_mode")
             if mode == "recorded":
                 if authorized != attempt.record_id:
@@ -5144,7 +5155,8 @@ class IoxController(object):
                     _INSTRUCTION_UPLOAD_SECONDS, ordinary=True)
             return attempt.instruction_upload_deadline
         if attempt.upload_deadline is None:
-            attempt.upload_deadline = attempt.deadline(1800, ordinary=True)
+            attempt.upload_deadline = attempt.deadline(
+                self.config["fetch_timeout"], ordinary=True)
         return attempt.upload_deadline
 
     def _ensure_trustpoint(self, attempt, protocol):
@@ -5852,6 +5864,20 @@ class IoxController(object):
                 except _ControllerFailure as exc:
                     self._report_step(on_output, recipe_capture, operation,
                                       arguments, step_started, exc)
+                    # An admitted lifecycle wait can expire before executing
+                    # its next poll. Return that timeout over the live channel
+                    # so the recipe can perform its cleanup/finish handshake.
+                    # Closing here instead makes the recipe report a broken
+                    # protocol and hides the actual lifecycle failure.
+                    if exc.category == "timeout":
+                        if attempt.primary is None:
+                            attempt.primary = exc
+                        response = self._ipc_result(
+                            sequence, exc.code, attempt,
+                            category=exc.category, detail=exc.detail)
+                        self._send_response(parent, sequence, attempt, response, {})
+                        sequence += 1
+                        continue
                     raise
                 outputs = {"stdout": b"", "stderr": b""}
                 transport_result = None

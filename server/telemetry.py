@@ -1784,10 +1784,18 @@ class Telemetry:
         except Exception:
             catalog_images = {}
         image_ids = {}
+        catalog_names = {}
         if isinstance(catalog_images, dict):
             for image_id, entry in catalog_images.items():
                 if isinstance(entry, dict) and entry.get("info_hash_hex"):
                     image_ids.setdefault(str(entry["info_hash_hex"]), []).append(image_id)
+            for info_hash, ids in image_ids.items():
+                if len(ids) == 1:
+                    filename = catalog_images[ids[0]].get("filename")
+                    if isinstance(filename, str) and filename:
+                        catalog_names[info_hash] = filename
+
+        names = {**self._names, **catalog_names}
 
         images = []
         for info_hash, peers in self._registry.snapshot(now=now).items():
@@ -1819,7 +1827,7 @@ class Telemetry:
                     mutual_origin_preflight, now,
                     self._torrent_observed_at, ambiguous_ips, ambiguous_endpoints))
             image = {
-                "image": self._names.get(info_hash, info_hash),
+                "image": names.get(info_hash, info_hash),
                 "info_hash": info_hash,
                 "total_bytes": total,
                 "seeders": sum(1 for p in peers if p["is_seeder"]),
@@ -1834,21 +1842,22 @@ class Telemetry:
             images.append(image)
         return {
             "now": now,
-            "server": self._server_source(now),
+            "server": self._server_source(now, names),
             "images": images,
         }
 
-    def _server_source(self, now):
+    def _server_source(self, now, names=None):
         """The ``server`` source object (spec §10.3): the origin seeder's own
         ``server_observation`` — global current rates/connections/active
         torrents plus per-torrent control-state ``upload_length_bytes`` gauges.
         No secret, no session token; ``aria_session_id`` is the nonsecret epoch
         id already surfaced by the seeder poll."""
+        names = self._names if names is None else names
         torrents = []
         for info_hash in sorted(self._upload_len):
             torrents.append({
                 "info_hash": info_hash,
-                "image": self._names.get(info_hash, info_hash),
+                "image": names.get(info_hash, info_hash),
                 # control-state uploadLength gauge (BitTorrent piece payload over
                 # the torrent's control-state lifetime — may exceed image size,
                 # never a per-device total).

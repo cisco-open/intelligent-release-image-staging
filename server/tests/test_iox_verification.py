@@ -2024,8 +2024,10 @@ def test_disable_is_refused_when_install_ceiling_would_spend_restoration_reserve
     assert journal["phase"] == "observed"
 
 
+@pytest.mark.parametrize("fetch_timeout,install_timeout,session_seconds", [
+    (1800, 300, 2200), (3600, 900, 7200)])
 def test_controller_uses_exact_identity_upload_and_application_deadlines(
-        tmp_path):
+        tmp_path, fetch_timeout, install_timeout, session_seconds):
     clock = _ExactClock()
     factory = _TransportFactory(
         clock=clock,
@@ -2033,7 +2035,9 @@ def test_controller_uses_exact_identity_upload_and_application_deadlines(
                   "app_activate": 250, "fetch_certificate": 890})
     result, _store, _timeline, _wrapper = _run_scripted_install(
         tmp_path, factory, clock=clock,
-        authority={"session_seconds": 2200,
+        authority={"session_seconds": session_seconds,
+                   "fetch_timeout": fetch_timeout,
+                   "install_timeout": install_timeout,
                    "restoration_reserve_seconds": 180})
     assert result["result_code"] == 0
 
@@ -2047,21 +2051,23 @@ def test_controller_uses_exact_identity_upload_and_application_deadlines(
     commands = dict((call[4], call) for call in deadline_calls)
     for purpose in ("identity_discovery", "identity_revalidation"):
         call = commands[purpose]
-        assert call[3] == min(call[5] + 75, clock.origin + 2200)
+        assert call[3] == min(call[5] + 75, clock.origin + session_seconds)
 
-    ordinary_deadline = clock.origin + 2200 - 180
+    ordinary_deadline = clock.origin + session_seconds - 180
     for purpose in ("app_install", "app_activate", "app_start"):
         call = commands[purpose]
-        assert call[3] == min(call[5] + 300, ordinary_deadline)
+        budget = install_timeout if purpose == "app_install" else 300
+        assert call[3] == min(call[5] + budget, ordinary_deadline)
     assert commands["app_install"][3] < ordinary_deadline
-    assert commands["app_start"][3] == ordinary_deadline
+    if session_seconds == 2200:
+        assert commands["app_start"][3] == ordinary_deadline
 
     uploads = _command_calls(factory, "fetch_wrapper", "fetch_certificate",
                              "fetch_instructions")
     assert [call[4] for call in uploads] == [
         "fetch_wrapper", "fetch_certificate", "fetch_instructions"]
     combined_upload_deadline = min(
-        uploads[0][5] + 1800, ordinary_deadline)
+        uploads[0][5] + fetch_timeout, ordinary_deadline)
     assert combined_upload_deadline < ordinary_deadline
     assert [call[3] for call in uploads[:2]] == [
         combined_upload_deadline, combined_upload_deadline]
@@ -3715,6 +3721,34 @@ def test_transcript_quota_check_and_creation_share_the_store_lock(
     assert observed == [True]
 
 
+def test_prepare_callback_uses_real_store_operation_budget(tmp_path):
+    import deployment_records
+
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    controller = _controller(tmp_path, store, _TransportFactory())
+    checked = []
+    attempt = _Bag(request={"device_id": "edge-01"}, identity={"board": _BOARD},
+                   ordinary_deadline=7777, check=lambda: checked.append(True))
+
+    def prepare(request, identity):
+        deadline, check, clock = store._lock_wait_local.budget
+        assert deadline == attempt.ordinary_deadline
+        assert clock == controller._monotonic
+        check()
+        assert request is attempt.request
+        identity["board"] = "changed callback copy"
+        raise ValueError("callback failed")
+
+    try:
+        with pytest.raises(ValueError, match="callback failed"):
+            controller._prepare_record(attempt, prepare)
+        assert checked == [True]
+        assert attempt.identity["board"] == _BOARD
+        assert store._lock_wait_local.budget is None
+    finally:
+        controller.close()
+
+
 def test_attempt_admission_store_deadline_returns_closed_timeout(
         tmp_path, monkeypatch):
     import contextlib
@@ -4772,6 +4806,29 @@ _INSTALL_HEADERS = [
     "(waiting for RUNNING)",
     "[8/8] save configuration",
 ]
+
+
+def test_production_recipe_poll_deadline_returns_timeout_and_recovers(tmp_path, monkeypatch):
+    import iox_verification as iv
+    original = iv.IoxController._admit_recipe_step
+
+    def expire_poll(self, attempt, action, operation, arguments, protocol):
+        if operation == "command" and arguments.get("name") == "app_list":
+            raise iv._ControllerFailure("timeout", "lifecycle polling deadline elapsed", 4)
+        return original(self, attempt, action, operation, arguments, protocol)
+
+    monkeypatch.setattr(iv.IoxController, "_admit_recipe_step", expire_poll)
+    recipe = Path(__file__).resolve().parents[2] / "device/iox/install.sh"
+    factory = _TransportFactory(recipe_compatible=True)
+    result, store, timeline, unused_wrapper = _run_scripted_install(
+        tmp_path, factory, recipe_argv=["/bin/bash", str(recipe)])
+    rendered = _rendered_output(timeline)
+    assert result["result_code"] == 4
+    assert result["returncode"] == 4
+    assert "lifecycle polling deadline elapsed" in rendered
+    assert "invalid private IOx controller protocol" not in rendered
+    assert store.records["new-r1"]["iox_verification"]["phase"] == "restored"
+    assert not _command_calls(factory, "app_activate")
 
 
 def test_production_bash_recipe_job_log_is_step_level(tmp_path):

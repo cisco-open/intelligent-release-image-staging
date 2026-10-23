@@ -13,6 +13,11 @@ Catalyst 9000 series switches the agent normally runs in [Guest Shell](guest-she
 [Supported devices and platforms](supported-devices.md) says which path each
 series takes.
 
+Managed onboarding allows up to 60 minutes for package and certificate delivery
+and 15 minutes for application installation. These waits share the two-hour job
+limit, with three minutes reserved for cleanup. Preparation waits for busy
+deployment records within the remaining job budget and can be cancelled.
+
 ## Before you start
 
 1. Check the device against [What a device needs before onboarding](device-requirements.md).

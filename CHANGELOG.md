@@ -17,6 +17,18 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Keep Swarm image names available from the catalog when a seeder is inactive.
+  Resume embedded maps through a readiness handshake and retry stalled reads.
+  Reseed relocated images only after their contents match catalog checksums.
+
+- Let IOx preparation wait for the shared record lock within the remaining
+  onboarding budget, with cancellation checks. Managed onboarding allows an
+  hour for package delivery and fifteen minutes for application installation.
+
+- Support explicit SHA256 manifest preparation for unsigned packages on legacy
+  IOx CAF runtimes, and report lifecycle polling timeouts without a misleading
+  private controller protocol error.
+
 - Complete manual certificate export and separate key holder installation links,
   and use the packaged API checker after installing the Ubuntu .deb.
 

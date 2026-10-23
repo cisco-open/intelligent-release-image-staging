@@ -2524,7 +2524,8 @@ class OnboardService:
                         if not self._transition_or_note(
                                 job_id, prepared, "applying"):
                             raise ValueError(
-                                "the job's record is no longer active")
+                                "deployment record could not enter applying; "
+                                "see the preceding record error")
                     # The production controller owns the one credential mint.
                     # Small injected controller fakes do not; retain the
                     # service's historical mint callback for those callers.
