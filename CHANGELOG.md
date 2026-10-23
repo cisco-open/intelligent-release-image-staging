@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Support explicit SHA256 manifest preparation for unsigned packages on legacy
+  IOx CAF runtimes, and report lifecycle polling timeouts without a misleading
+  private controller protocol error.
+
 - Complete manual certificate export and separate key holder installation links,
   and use the packaged API checker after installing the Ubuntu .deb.
 

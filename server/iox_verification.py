@@ -5852,6 +5852,20 @@ class IoxController(object):
                 except _ControllerFailure as exc:
                     self._report_step(on_output, recipe_capture, operation,
                                       arguments, step_started, exc)
+                    # An admitted lifecycle wait can expire before executing
+                    # its next poll. Return that timeout over the live channel
+                    # so the recipe can perform its cleanup/finish handshake.
+                    # Closing here instead makes the recipe report a broken
+                    # protocol and hides the actual lifecycle failure.
+                    if exc.category == "timeout":
+                        if attempt.primary is None:
+                            attempt.primary = exc
+                        response = self._ipc_result(
+                            sequence, exc.code, attempt,
+                            category=exc.category, detail=exc.detail)
+                        self._send_response(parent, sequence, attempt, response, {})
+                        sequence += 1
+                        continue
                     raise
                 outputs = {"stdout": b"", "stderr": b""}
                 transport_result = None

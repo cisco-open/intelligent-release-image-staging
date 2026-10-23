@@ -4774,6 +4774,29 @@ _INSTALL_HEADERS = [
 ]
 
 
+def test_production_recipe_poll_deadline_returns_timeout_and_recovers(tmp_path, monkeypatch):
+    import iox_verification as iv
+    original = iv.IoxController._admit_recipe_step
+
+    def expire_poll(self, attempt, action, operation, arguments, protocol):
+        if operation == "command" and arguments.get("name") == "app_list":
+            raise iv._ControllerFailure("timeout", "lifecycle polling deadline elapsed", 4)
+        return original(self, attempt, action, operation, arguments, protocol)
+
+    monkeypatch.setattr(iv.IoxController, "_admit_recipe_step", expire_poll)
+    recipe = Path(__file__).resolve().parents[2] / "device/iox/install.sh"
+    factory = _TransportFactory(recipe_compatible=True)
+    result, store, timeline, unused_wrapper = _run_scripted_install(
+        tmp_path, factory, recipe_argv=["/bin/bash", str(recipe)])
+    rendered = _rendered_output(timeline)
+    assert result["result_code"] == 4
+    assert result["returncode"] == 4
+    assert "lifecycle polling deadline elapsed" in rendered
+    assert "invalid private IOx controller protocol" not in rendered
+    assert store.records["new-r1"]["iox_verification"]["phase"] == "restored"
+    assert not _command_calls(factory, "app_activate")
+
+
 def test_production_bash_recipe_job_log_is_step_level(tmp_path):
     """device/iox/install.sh through the real controller: the job log is the
     recipe's numbered headers, its poll outcomes and the controller's line
