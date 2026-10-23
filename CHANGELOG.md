@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Keep Swarm image names available from the catalog when a seeder is inactive.
+  Resume embedded maps through a readiness handshake and retry stalled reads.
+  Reseed relocated images only after their contents match catalog checksums.
+
 - Let IOx preparation wait for the shared record lock within the remaining
   onboarding budget, with cancellation checks. Managed onboarding allows an
   hour for package delivery and fifteen minutes for application installation.

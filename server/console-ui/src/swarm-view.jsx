@@ -2,12 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-import {useSyncExternalStore} from 'react';
+import {useEffect, useSyncExternalStore} from 'react';
 import {createRoot} from 'react-dom/client';
 import {SwarmViewController} from './swarm-view-controller.mjs';
 
 function SwarmView({controller}) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot), summary = state.summary;
+  useEffect(() => {
+    const ready = event => controller.frameReady(event);
+    window.addEventListener('message', ready);
+    return () => window.removeEventListener('message', ready);
+  }, [controller]);
   return <>
     <div className="page-header"><h2 className="page-title">Swarm</h2></div>
     <p className="muted" id="swarm-summary" role="status" aria-live="polite">
