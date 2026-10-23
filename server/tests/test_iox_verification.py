@@ -3721,6 +3721,34 @@ def test_transcript_quota_check_and_creation_share_the_store_lock(
     assert observed == [True]
 
 
+def test_prepare_callback_uses_real_store_operation_budget(tmp_path):
+    import deployment_records
+
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    controller = _controller(tmp_path, store, _TransportFactory())
+    checked = []
+    attempt = _Bag(request={"device_id": "edge-01"}, identity={"board": _BOARD},
+                   ordinary_deadline=7777, check=lambda: checked.append(True))
+
+    def prepare(request, identity):
+        deadline, check, clock = store._lock_wait_local.budget
+        assert deadline == attempt.ordinary_deadline
+        assert clock == controller._monotonic
+        check()
+        assert request is attempt.request
+        identity["board"] = "changed callback copy"
+        raise ValueError("callback failed")
+
+    try:
+        with pytest.raises(ValueError, match="callback failed"):
+            controller._prepare_record(attempt, prepare)
+        assert checked == [True]
+        assert attempt.identity["board"] == _BOARD
+        assert store._lock_wait_local.budget is None
+    finally:
+        controller.close()
+
+
 def test_attempt_admission_store_deadline_returns_closed_timeout(
         tmp_path, monkeypatch):
     import contextlib

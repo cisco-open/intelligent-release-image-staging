@@ -4282,6 +4282,17 @@ class IoxController(object):
                                  failure.category if failure else None,
                                  failure.detail if failure else "")
 
+    def _prepare_record(self, attempt, prepare):
+        # Service callbacks write the same shared store as concurrent IOx
+        # jobs. Each write uses the remaining ordinary budget, not the short
+        # standalone wait. No lock is held across the callback itself.
+        wait_budget = (self.store.lock_wait_budget(
+            attempt.ordinary_deadline, attempt.check, self._monotonic)
+            if isinstance(self.store, deployment_records.DeploymentRecordStore)
+            else _NoopContext())
+        with wait_budget:
+            return prepare(attempt.request, copy.deepcopy(attempt.identity))
+
     def run_install(self, request, prepare, preflight, on_output, cancel):
         execution_started = self._monotonic()
         self._validate_request(request, "install")
@@ -4339,18 +4350,7 @@ class IoxController(object):
                         attempt.is_cancelled,
                         self._monotonic) as instruction_snapshot:
                     attempt.instruction_snapshot = instruction_snapshot
-                    # The service's prepare callback writes the same shared
-                    # store as concurrent IOx jobs. Its writes must use this
-                    # attempt's remaining budget rather than the short default
-                    # intended for standalone store callers.
-                    wait_budget = (self.store.lock_wait_budget(
-                        attempt.ordinary_deadline, attempt.check,
-                        self._monotonic) if isinstance(
-                            self.store, deployment_records.DeploymentRecordStore)
-                        else _NoopContext())
-                    with wait_budget:
-                        record_id = prepare(
-                            request, copy.deepcopy(attempt.identity))
+                    record_id = self._prepare_record(attempt, prepare)
                     if (not isinstance(record_id, str) or
                             not _RECORD_ID.fullmatch(record_id)):
                         raise ValueError("prepare returned invalid record_id")
@@ -4437,7 +4437,7 @@ class IoxController(object):
                 attempt.journal = operation_journal
             attempt.check()
             preflight(request, copy.deepcopy(attempt.identity))
-            authorized = prepare(request, copy.deepcopy(attempt.identity))
+            authorized = self._prepare_record(attempt, prepare)
             mode = _get(request, "teardown_mode")
             if mode == "recorded":
                 if authorized != attempt.record_id:
