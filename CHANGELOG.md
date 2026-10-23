@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Let IOx preparation wait for the shared record lock within the remaining
+  onboarding budget, with cancellation checks. Managed onboarding allows an
+  hour for package delivery and fifteen minutes for application installation.
+
 - Support explicit SHA256 manifest preparation for unsigned packages on legacy
   IOx CAF runtimes, and report lifecycle polling timeouts without a misleading
   private controller protocol error.

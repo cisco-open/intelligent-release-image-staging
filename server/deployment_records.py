@@ -736,10 +736,34 @@ class DeploymentRecordStore:
         _ensure_state_directory(self.state_dir)
         self.path = os.path.join(self.state_dir, "deployment_records.json")
         self._now = now_fn
+        self._lock_wait_local = threading.local()
+
+    @contextlib.contextmanager
+    def lock_wait_budget(self, deadline, check, monotonic_fn=time.monotonic):
+        """Use an operation's bounded, cancellable wait for callback writes.
+
+        This does not hold the store lock. Each write still acquires and
+        releases it independently, and other threads retain their own budget.
+        """
+        if (not isinstance(deadline, (int, float)) or isinstance(deadline, bool)
+                or not 0 <= deadline <= _MAX_INTEGER or not callable(check)
+                or not callable(monotonic_fn)):
+            raise ValueError("invalid store lock wait budget")
+        previous = getattr(self._lock_wait_local, "budget", None)
+        self._lock_wait_local.budget = (deadline, check, monotonic_fn)
+        try:
+            yield
+        finally:
+            self._lock_wait_local.budget = previous
 
     @contextlib.contextmanager
     def _store_lock(self, deadline=None, monotonic_fn=None):
         """Take the shared store lock without an unbounded flock wait."""
+        budget = getattr(self._lock_wait_local, "budget", None)
+        if budget is not None and deadline is None:
+            deadline, check, monotonic_fn = budget
+        else:
+            check = None
         clock = time.monotonic if monotonic_fn is None else monotonic_fn
         if not callable(clock):
             raise ValueError("invalid store lock clock")
@@ -774,6 +798,8 @@ class DeploymentRecordStore:
         acquired = False
         try:
             while True:
+                if check is not None:
+                    check()
                 if clock() >= deadline:
                     raise StoreLockTimeout(
                         "deployment record store lock timed out")
@@ -785,6 +811,8 @@ class DeploymentRecordStore:
                         raise StoreLockTimeout(
                             "deployment record store lock timed out")
                     acquired = True
+                    if check is not None:
+                        check()
                     break
                 except (IOError, OSError) as exc:
                     if exc.errno not in (errno.EACCES, errno.EAGAIN):

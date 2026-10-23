@@ -2304,6 +2304,7 @@ class IoxController(object):
                 "instruction_bootstrap_materializer")):
             raise ValueError("IOx instruction bootstrap materializer is required")
         for key, default in (("install_timeout", 300),
+                             ("fetch_timeout", 1800),
                              ("activate_timeout", 300),
                              ("start_timeout", 300),
                              ("state_poll", 5)):
@@ -4338,8 +4339,18 @@ class IoxController(object):
                         attempt.is_cancelled,
                         self._monotonic) as instruction_snapshot:
                     attempt.instruction_snapshot = instruction_snapshot
-                    record_id = prepare(
-                        request, copy.deepcopy(attempt.identity))
+                    # The service's prepare callback writes the same shared
+                    # store as concurrent IOx jobs. Its writes must use this
+                    # attempt's remaining budget rather than the short default
+                    # intended for standalone store callers.
+                    wait_budget = (self.store.lock_wait_budget(
+                        attempt.ordinary_deadline, attempt.check,
+                        self._monotonic) if isinstance(
+                            self.store, deployment_records.DeploymentRecordStore)
+                        else _NoopContext())
+                    with wait_budget:
+                        record_id = prepare(
+                            request, copy.deepcopy(attempt.identity))
                     if (not isinstance(record_id, str) or
                             not _RECORD_ID.fullmatch(record_id)):
                         raise ValueError("prepare returned invalid record_id")
@@ -5144,7 +5155,8 @@ class IoxController(object):
                     _INSTRUCTION_UPLOAD_SECONDS, ordinary=True)
             return attempt.instruction_upload_deadline
         if attempt.upload_deadline is None:
-            attempt.upload_deadline = attempt.deadline(1800, ordinary=True)
+            attempt.upload_deadline = attempt.deadline(
+                self.config["fetch_timeout"], ordinary=True)
         return attempt.upload_deadline
 
     def _ensure_trustpoint(self, attempt, protocol):
