@@ -25,6 +25,23 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- poll_seeder (aria2 RPC) ---
 
+def test_swarm_names_survive_inactive_seeder_using_catalog():
+    registry = PeerRegistry()
+    registry.announce("abc", "peer", "192.0.2.1", 6881, left=5, now=0)
+    catalog = {"image-a": {"info_hash_hex": "abc", "filename": "image-a.bin"}}
+    hub = telemetry.Telemetry(registry, images_info=lambda: catalog)
+    hub._upload_len = {"abc": 12}
+    hub._seeder = {"rpc_up": True, "upload_speed": 0, "download_speed": 0,
+                   "connections": 0, "active_torrents": 0}
+    snapshot = hub.swarm_snapshot(now=0)
+    assert snapshot["images"][0]["image"] == "image-a.bin"
+    assert snapshot["images"][0]["image_id"] == "image-a"
+    assert snapshot["server"]["server_observation"]["torrent"][0]["image"] == "image-a.bin"
+    catalog["other"] = {"info_hash_hex": "abc", "filename": "other.bin"}
+    assert hub.swarm_snapshot(now=0)["images"][0]["image"] == "abc"
+    hub._names = {"abc": "observed.bin"}
+    assert hub.swarm_snapshot(now=0)["images"][0]["image"] == "observed.bin"
+
 def _fake_rpc(global_stat, active):
     def rpc(method, _params=None):
         if method == "aria2.getGlobalStat":

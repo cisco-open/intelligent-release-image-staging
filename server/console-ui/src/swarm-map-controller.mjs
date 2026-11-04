@@ -114,8 +114,7 @@ export class SwarmMapController {
     const reader = new AbortController(), generation = ++this.generation;
     this.reader = reader; this.update({loading: true});
     try {
-      const reply = await this.request(this.config.swarmUrl, {cache: 'no-store', signal: reader.signal, headers: {'X-IRIS-Poll': '1'}});
-      const data = reply.status === 200 ? await reply.json() : null;
+      const data = await this.readSnapshot(reader);
       if (generation !== this.generation || !this.controlsVisible()) return false;
       if (!validSnapshot(data)) throw Error();
       const priorPeer = this.selectedPeer();
@@ -134,6 +133,25 @@ export class SwarmMapController {
         this.reader = null; this.update({loading: false});
         if (this.controlsVisible()) this.pollTimer = this.services.setTimeout(() => this.poll(), this.state.backoff * 1000);
       }
+    }
+  }
+  async readSnapshot(reader) {
+    // Bound both the headers and body read so one stalled transport cannot
+    // prevent the next poll. Abort also settles transports that ignore signals.
+    let abort;
+    const cancelled = new Promise((_, reject) => {
+      abort = () => reject(Error('Swarm read interrupted'));
+      reader.signal.addEventListener('abort', abort, {once: true});
+    });
+    const timer = this.services.setTimeout(() => reader.abort(), 15000);
+    try {
+      return await Promise.race([cancelled, (async () => {
+        const reply = await this.request(this.config.swarmUrl, {cache: 'no-store', signal: reader.signal, headers: {'X-IRIS-Poll': '1'}});
+        return reply.status === 200 ? await reply.json() : null;
+      })()]);
+    } finally {
+      this.services.clearTimeout(timer);
+      reader.signal.removeEventListener('abort', abort);
     }
   }
   select(key) {

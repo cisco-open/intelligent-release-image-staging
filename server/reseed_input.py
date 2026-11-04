@@ -8,14 +8,33 @@ no catalog row (left behind by a publish that failed after mktorrent ran) and a
 torrent whose image is quarantined (its quarantine force-removed it from the
 seeder on purpose) are skipped, so a restart can never serve what the API says
 is absent or withheld. A catalog entry's recorded source_dir is authoritative
-for WHERE; otherwise fall back to walking the image roots (colon-separated,
+for WHERE; a relocated file must match its catalog checksum before reuse.
+Otherwise fall back to walking the image roots (colon-separated,
 earlier roots win a basename collision — callers pass the writable upload dir
 first). Split out of seed-launch.sh so this mapping is unit-testable. Stdlib
 only."""
 import glob
+import hashlib
 import json
 import os
 import sys
+
+
+def _matches_catalog(path, entry):
+    """Relocation must not seed same-named, unrelated bytes unverified."""
+    expected = {name: entry[name].lower() for name in ("sha256", "sha512")
+                if isinstance(entry.get(name), str) and entry[name]}
+    if not expected:
+        return False
+    hashes = {name: hashlib.new(name) for name in expected}
+    try:
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                for digest in hashes.values():
+                    digest.update(chunk)
+    except OSError:
+        return False
+    return all(hashes[name].hexdigest() == value for name, value in expected.items())
 
 
 def build(state, images_roots, default_dir, skipped=None):
@@ -41,7 +60,7 @@ def build(state, images_roots, default_dir, skipped=None):
         if images_root and os.path.isdir(images_root):
             for root, _dirs, files in os.walk(images_root):
                 for f in files:
-                    loc.setdefault(f, root)
+                    loc.setdefault(f, []).append(root)
     lines = []
     for t in sorted(glob.glob(os.path.join(state, "torrents", "*.torrent"))):
         iid = os.path.basename(t)[:-len(".torrent")]
@@ -59,12 +78,21 @@ def build(state, images_roots, default_dir, skipped=None):
         # basename walk cannot tell two same-named files in different roots
         # apart, and the seeder runs with bt-seed-unverified — so guessing wrong
         # serves the wrong bytes under the right piece hashes. Entries predating
-        # source_dir, or whose recorded directory has since gone away, still fall
-        # back to the walk.
+        # source_dir use the legacy walk. Relocated recorded sources require
+        # matching content, even when the old directory itself still exists.
         src = entry.get("source_dir")
-        d = src if src and os.path.isdir(src) else None
-        if d is None:
-            d = loc.get(fn) if fn else None
+        d = src if (isinstance(src, str) and isinstance(fn, str)
+                    and os.path.isfile(os.path.join(src, fn))) else None
+        candidates = loc.get(fn, []) if isinstance(fn, str) else []
+        if d is None and "source_dir" in entry:
+            d = next((root for root in candidates
+                      if _matches_catalog(os.path.join(root, fn), entry)), None)
+            if d is None:
+                if skipped is not None:
+                    skipped.append((iid, "recorded source missing; no checksum-matched replacement"))
+                continue
+        elif d is None:
+            d = next(iter(candidates), None)
         if d is None:
             d = default_dir
         lines.append(t)

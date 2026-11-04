@@ -76,7 +76,7 @@ IRIS_IMAGES_DIR="${IRIS_IMAGES_DIR:-/var/lib/iris-images}"
 RUN_DIR="${IRIS_RUN:-$IRIS_STATE}"
 INPUT="$RUN_DIR/seeder.input"
 mkdir -p "$RUN_DIR" 2>/dev/null || true
-python3 "$SCRIPT_DIR/reseed_input.py" "$IRIS_STATE" "$IRIS_IMAGES_DIR:$IMAGES_ROOT" "$IMAGES_DIR" > "$INPUT" 2>/dev/null || : > "$INPUT"
+python3 "$SCRIPT_DIR/reseed_input.py" "$IRIS_STATE" "$IRIS_IMAGES_DIR:$IMAGES_ROOT" "$IMAGES_DIR" > "$INPUT" || : > "$INPUT"
 
 # Credentials go through a mode-0600 aria2 config, never the argv. Validate
 # both before replacing the runtime file: aria2 options are line-oriented,

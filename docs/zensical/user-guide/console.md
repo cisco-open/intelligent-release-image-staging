@@ -55,6 +55,11 @@ status is on [Assign images and check staging status](assignments.md).
 
 ### Peer transfers
 
+The visible Swarm Map refreshes every five seconds after a successful read.
+Stalled reads time out after fifteen seconds and retry automatically. Hidden
+views stop polling; **Pause** keeps the map paused until you select **Resume**.
+Image names come from the catalog even when the origin seeder is inactive.
+
 On the Swarm Map, green arrows show server-to-device traffic. Blue arrows show
 device-to-device traffic reported by an agent. Select a device for direction,
 speed and report age. Gray spokes show participation. Old observations expire,

@@ -8399,6 +8399,8 @@ def main():
                 "record_store": os.path.realpath(record_store.path),
                 "session_seconds": 7200,
                 "restoration_reserve_seconds": 180,
+                "fetch_timeout": 3600,
+                "install_timeout": 900,
                 "application_id": "iris",
                 "credential_resolver": _iox_credential_projection(creds),
                 "enrollment_token_minter": lambda device_id:

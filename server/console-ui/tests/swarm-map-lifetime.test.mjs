@@ -99,3 +99,28 @@ test('the first host resume cannot reverse a manual pause set while embedded', a
   assert.deepEqual(f.calls.map(call => call.url).sort(), ['/api/v1/session', '/api/v1/swarm']);
   c.stop(); assert.equal(f.timers.size, 0);
 });
+
+for (const stage of ['headers', 'body']) {
+  test(`a stalled snapshot ${stage} times out and polling recovers without reload`, async () => {
+    const held = deferred(); let stalled = true, signal;
+    const f = fixture({fetch: async (url, init) => {
+      if (url === '/api/v1/session') return response(200, {csrf: 'fixture'});
+      signal = init.signal;
+      if (!stalled) return response(200, data);
+      return stage === 'headers' ? held.promise : {status: 200, json: () => held.promise};
+    }}), c = f.controller;
+    const starting = c.start(); await flush();
+    const timeout = [...f.timers.values()].find(timer => timer.delay === 15000);
+    assert.ok(timeout); timeout.callback(); await starting;
+    assert.equal(signal.aborted, true);
+    assert.equal(c.state.loadFailed, true);
+    stalled = false;
+    const retry = [...f.timers.values()].find(timer => timer.delay === 10000);
+    assert.ok(retry); await retry.callback();
+    assert.equal(c.state.loadFailed, false);
+    assert.equal(c.state.data, data);
+    held.resolve(stage === 'headers' ? response(200, {now: 0, images: []}) : {now: 0, images: []});
+    await flush(); assert.equal(c.state.data, data);
+    c.stop();
+  });
+}
