@@ -16,7 +16,7 @@ FROM python:3.12-alpine3.24@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb
 # rebuild BOTH XML extensions: ElementTree checks the exact Expat capsule ABI.
 # Sources, compiler and upstream tests stay out of the runtime image.
 FROM python-base AS xml-build
-RUN apk add --no-cache gcc=15.2.0-r5 musl-dev=1.2.6-r2 patch=2.8-r0
+RUN apk add --no-cache gcc=15.2.0-r5 musl-dev=1.2.6-r3 patch=2.8-r0
 ADD --checksum=sha256:5c8462af5790baf43a321a1559dbe0db06d1be4300fb85fb53c40060668e548a https://www.python.org/ftp/python/3.12.14/Python-3.12.14.tar.xz /src/python.tar.xz
 ADD --checksum=sha256:ff8e455739170216c358d2fdbf2782a8257a4dc7230179a31ba62a54a4ded384 https://github.com/python/cpython/commit/278c3c2f0733e06613cf3e7a1d9c8c3c03248638.patch /src/expat.patch
 COPY rebuild-xml.py /src/rebuild-xml.py

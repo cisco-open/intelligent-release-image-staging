@@ -4290,8 +4290,18 @@ class IoxController(object):
             attempt.ordinary_deadline, attempt.check, self._monotonic)
             if isinstance(self.store, deployment_records.DeploymentRecordStore)
             else _NoopContext())
-        with wait_budget:
-            return prepare(attempt.request, copy.deepcopy(attempt.identity))
+        try:
+            with wait_budget:
+                return prepare(attempt.request, copy.deepcopy(attempt.identity))
+        except deployment_records.StoreLockTimeout:
+            attempt.check()
+            raise _ControllerFailure(
+                "timeout", "deployment-record store lock timed out", 4) from None
+        except Exception:
+            # Service state can close after a record write commits but before
+            # its callback returns. Preserve an operator cancellation then too.
+            attempt.check()
+            raise
 
     def run_install(self, request, prepare, preflight, on_output, cancel):
         execution_started = self._monotonic()

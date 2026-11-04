@@ -7,7 +7,7 @@
 # IRIS instruction keys are Ed25519. Use upstream OpenSSH's complete SSHSIG,
 # allowed_signers and KRL implementation, without a crypto-library dependency.
 set -eu
-apk add --no-cache gcc=15.2.0-r5 musl-dev=1.2.6-r2 make=4.4.1-r4
+apk add --no-cache gcc=15.2.0-r5 musl-dev=1.2.6-r3 make=4.4.1-r4
 mkdir /src /out
 tar xzf /openssh.tar.gz -C /src --strip-components=1
 cd /src

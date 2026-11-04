@@ -17,6 +17,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Keep IOx preparation cancellable during record-store contention, preserve
+  cancellation and timeout results, and retire abandoned preparation records.
+  Align the runtime-source profile and linked helper builds with musl 1.2.6-r3.
+
 - Keep Swarm image names available from the catalog when a seeder is inactive.
   Resume embedded maps through a readiness handshake and retry stalled reads.
   Reseed relocated images only after their contents match catalog checksums.

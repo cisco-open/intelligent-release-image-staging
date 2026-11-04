@@ -3742,7 +3742,7 @@ def test_prepare_callback_uses_real_store_operation_budget(tmp_path):
     try:
         with pytest.raises(ValueError, match="callback failed"):
             controller._prepare_record(attempt, prepare)
-        assert checked == [True]
+        assert checked == [True, True]
         assert attempt.identity["board"] == _BOARD
         assert store._lock_wait_local.budget is None
     finally:

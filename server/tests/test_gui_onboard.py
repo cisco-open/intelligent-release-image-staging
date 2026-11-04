@@ -4954,7 +4954,7 @@ def test_iox_deferred_authority_recheck_releases_locks_for_controller_and_probe(
             raise gui_onboard.ScheduledAdmissionError("device_revoked")
 
     def prepare():
-        assert outer.locked() and service._lock.locked()
+        assert outer.locked() and not service._lock.locked()
         prepared.append(True)
         return "new-record"
 
@@ -5092,3 +5092,118 @@ def test_build_env_inherits_saved_peer_mode_over_process_default(tmp_path, monke
         assert env['IRIS_PEER_TLS_MODE'] == 'required'
     finally:
         svc.shutdown()
+
+
+@pytest.mark.parametrize('phase,outcome', [
+    ('create', 'cancelled'), ('applying', 'cancelled'),
+    ('committed', 'cancelled'), ('committed', 'revoked'),
+    ('create', 'timeout'), ('applying', 'timeout'),
+])
+def test_iox_preparation_contention_preserves_abort_authority_and_results(
+        tmp_path, monkeypatch, phase, outcome):
+    import test_iox_verification as spec
+    import test_deployment_records as records_spec
+
+    wrapper = spec._write_wrapper(tmp_path, markers=('package.sign', 'package.cert'))
+    with open(wrapper, 'rb') as stream:
+        (tmp_path / 'iris-arm64.tar').write_bytes(stream.read())
+    store = deployment_records.DeploymentRecordStore(str(tmp_path / 'state'))
+    clock = [1000.0]
+    controller = spec._controller(tmp_path, store, spec._TransportFactory(),
+                                  clock=lambda: clock[0],
+                                  credential_resolver=lambda _ref: {
+                                      'device_user': 'admin', 'device_pass': 'fixture'})
+    service = gui_onboard.OnboardService(
+        _iox_fleet(platform='iox', model='IE-3400-8T2S'), _iox_creds(),
+        host_ip='10.9.9.9', artifacts_dir=str(tmp_path), record_store=store,
+        iox_controller=controller,
+        iox_preflight_fn=_iox_preflight_ok(identity=spec._BOARD, model='IE-3400-8T2S'))
+    entered, release = threading.Event(), threading.Event()
+    holders, authority_checks = [], []
+    valid = [True]
+    original_create, original_transition = store.create, store.transition
+
+    def stall():
+        if outcome == 'timeout':
+            # Expire the ordinary budget while the later session budget is open.
+            clock[0] = store._lock_wait_local.budget[0]
+            return
+        if phase == 'committed':
+            entered.set()
+            assert release.wait(5)
+            return
+        acquired = threading.Event()
+        def hold():
+            with store._store_lock():
+                acquired.set()
+                release.wait(5)
+        thread = threading.Thread(target=hold, daemon=True)
+        holders.append(thread); thread.start()
+        assert acquired.wait(2)
+        entered.set()
+
+    def create(record):
+        if phase == 'create':
+            stall()
+        result = original_create(record)
+        if phase == 'committed':
+            stall()
+        return result
+
+    def transition(record_id, state, *args, **kwargs):
+        if state == 'applying':
+            stall()
+        return original_transition(record_id, state, *args, **kwargs)
+
+    monkeypatch.setattr(store, 'create', create)
+    if phase == 'applying':
+        monkeypatch.setattr(store, 'transition', transition)
+
+    def authority_check(stage):
+        authority_checks.append(stage)
+        if not valid[0]:
+            raise gui_onboard.ScheduledAdmissionError('device_revoked')
+
+    def prepare():
+        return store.create(records_spec._record(
+            record_id='prepared', device_id='d1',
+            resolved={'platform': 'iox', 'device_identity': spec._BOARD}
+        ))['record_id']
+
+    try:
+        jid = service.start('d1', prepare=prepare, pre_apply=lambda _e: None,
+                            authority_check=authority_check,
+                            schedule_context=_schedule_context('d1'))
+        if outcome != 'timeout':
+            assert entered.wait(3), service.get_job(jid)["lines"]
+            if outcome == 'cancelled':
+                result = []
+                aborter = threading.Thread(target=lambda: result.append(service.abort(jid)), daemon=True)
+                aborter.start(); aborter.join(1)
+                assert not aborter.is_alive(), 'abort blocked behind record preparation'
+                assert result == [True]
+            else:
+                valid[0] = False
+            # Status reads must also stay responsive while preparation waits.
+            assert service.get_job(jid)['state'] in ('running', 'cancelled')
+            release.set()
+        job = _wait(service, jid)
+        expected = {'cancelled': 130, 'timeout': 4, 'revoked': 2}[outcome]
+        assert job['result_code'] == expected, job['lines']
+        assert job['state'] == ('cancelled' if outcome == 'cancelled' else 'error')
+        if outcome != 'revoked':
+            assert job['error_category'] == outcome
+        else:
+            assert job['admission_reason'] == 'device_revoked'
+            assert authority_checks.count('iox_prepare') == 2
+        record = store.get('prepared')
+        if phase == 'create':
+            assert record is None
+        else:
+            assert record['state'] == 'removed'
+    finally:
+        release.set()
+        for thread in holders:
+            thread.join(2)
+        service.shutdown()
+        controller.close()
