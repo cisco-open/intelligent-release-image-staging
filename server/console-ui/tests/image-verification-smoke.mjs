@@ -73,7 +73,11 @@ try {
   const count = writes.length;
   await page.evaluate(() => {location.hash = '#settings/general';}); await navigate(false);
   assert.equal(await page.locator('#iv-refresh').isDisabled(), true); assert.equal(writes.length, count);
-  await pending.fulfill({json: success}); await idle(); behavior = '';
+  // Wait for the follow-up status read before using the upload control.
+  const refreshRead = page.waitForResponse(response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname === '/api/v1/settings/image-verification');
+  await pending.fulfill({json: success}); await refreshRead; await idle(); behavior = '';
+  await page.locator('#iv-offline-dropzone[aria-disabled="false"]').waitFor();
   assert.match(await page.locator('#iv-refresh-msg').innerText(), /2 matched, 1 mismatched/);
   await page.evaluate(() => {
     const assignments = window.irisAssignments;
