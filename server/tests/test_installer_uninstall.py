@@ -321,3 +321,38 @@ def test_pending_capture_blocks_new_removal_but_keeps_uninstall_status(deploymen
     assert [row for row in deployment.adapter.calls if row[0] == 'remove'] == removals_before
     assert api.status(deployment.args) == 0
     assert api.read(deployment.base)['phase'] != 'uninstalled'
+
+
+def test_uninstall_reviews_and_stops_renewal_before_removing_resources(deployment, monkeypatch):
+    from iris_installer import signing_renewal as renewal
+    units = deployment.unit.parent
+    monkeypatch.setattr(renewal, 'UNITS', units)
+    record = {'instance_id': deployment.document['id'], 'state_dir': str(deployment.base),
+              'root_key': '/private/root-a', 'holder_uid': 1000, 'runtime': '/pinned/public/runtime',
+              'public_key_sha256': 'a'*64, 'root_public': 'fixture'}
+    (deployment.base/renewal.RECORD).write_text('fixture')
+    monkeypatch.setattr(renewal, 'checked_record', lambda *a: record)
+    for name, content in renewal.unit_files(record).items():
+        atomic_write(units/name, content, mode=0o644)
+    reviewed = prepared(deployment)
+    assert len(reviewed['plan']['signing_renewal']['units']) == 2
+    first_remove = deployment.adapter.remove
+    def remove(*args):
+        for name in renewal.unit_files(record):
+            command = ['systemctl', 'disable', '--now', name] if name.endswith('.timer') else ['systemctl', 'stop', name]
+            assert command in deployment.calls
+        return first_remove(*args)
+    deployment.adapter.remove = remove
+    assert api.apply(deployment.args) == 0
+    assert all(not (units/name).exists() for name in renewal.unit_files(record))
+    assert (deployment.base/renewal.RECORD).exists()
+
+
+def test_uninstall_refuses_renewal_enrollment_added_after_review(deployment, monkeypatch):
+    from iris_installer import signing_renewal as renewal
+    monkeypatch.setattr(renewal, 'UNITS', deployment.unit.parent)
+    prepared(deployment)
+    (deployment.base/renewal.RECORD).write_text('unexpected enrollment')
+    with pytest.raises(InstallError):
+        api.apply(deployment.args)
+    assert deployment.adapter.calls == []

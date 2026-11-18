@@ -82,6 +82,15 @@ try {
   await page.locator('#telemetry-health').getByText('Telemetry export: ok', {exact: true}).waitFor();
   assert.match(await page.locator('#telemetry-health').getAttribute('title'), /queued 2/);
 
+  fixtures['/api/v1/overview'].signing_attention = {message: 'Signing certificate renewal needs attention.'};
+  await refresh();
+  await page.locator('#overview-signing-attention').waitFor();
+  assert.match(await page.locator('#overview-signing-attention').innerText(), /renewal needs attention/);
+  assert.equal(await page.locator('#overview-signing-attention a').getAttribute('href'), '#settings/certificates');
+  fixtures['/api/v1/overview'].signing_attention = null;
+  await refresh();
+  await page.locator('#overview-signing-attention').waitFor({state: 'detached'});
+
   // Runtime details start compact, open with the keyboard, and remain open
   // across status refreshes without moving focus away from their disclosure.
   const deploymentDetails = page.locator('#deployment-details');

@@ -7,7 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 # Schedule key maintenance
 
 Open **Settings > Certificates & keys > Scheduled key maintenance**.
-Create a schedule for each credential you maintain. All schedules start disabled.
+Routine instruction certificate renewal uses the separate [automatic renewal service](automatic-signing-renewal.md).
+Create a schedule here for other credential maintenance. These schedules start disabled.
 The management service checks due work every 30 seconds.
 
 ## Choose the action

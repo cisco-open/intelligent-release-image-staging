@@ -2484,54 +2484,63 @@ class OnboardService:
                         published["model"] = bound["model"]
                     return published
 
+                # A callback may create a plan and then lose admission or be
+                # cancelled. Retire it after the scoped store budget unwinds.
+                unclaimed_plan = [None]
+
                 def controller_prepare(_request, identity):
                     del identity
-                    with self._authority(j, "iox_prepare"):
+                    import deployment_records
+
+                    def check():
                         with self._condition:
                             current = self._jobs.get(job_id)
                             if (current is None or current["state"] != "running"
                                     or current.get("_abort_requested")):
                                 raise ValueError("window_closed")
                             self._check_authority(j, "iox_prepare")
-                            prepared = prepare() if prepare else j.get("record_id")
-                            if (j.get("record_id") is not None and prepared !=
-                                    j.get("record_id")):
-                                raise ValueError("prepared record does not match request")
-                            if prepared:
-                                current["record_id"] = prepared
-                    try:
-                        if (action == "onboard" and
-                                preflight_evidence[0] is not None):
-                            final_resolved = (
-                                pre_apply(preflight_evidence[0])
-                                if pre_apply else bind_preflight(
-                                    j.get("resolved") or resolved or dev,
-                                    preflight_evidence[0], platform="iox"))
-                            if final_resolved is not None:
-                                with self._lock:
-                                    current = self._jobs.get(job_id)
-                                    if current is not None:
-                                        current["resolved"] = final_resolved
-                    except Exception:
-                        # Wrapper admission and record creation are still
-                        # pre-mutation here. Retire a new planned record so a
-                        # failed evidence bind cannot leave false teardown
-                        # authority behind.
+
+                    def authorized(operation):
+                        def write():
+                            check()
+                            result = operation()
+                            check()
+                            return result
+                        guard = lambda: self._authority(j, "iox_prepare")
+                        if isinstance(self.record_store, deployment_records.DeploymentRecordStore):
+                            return self.record_store.authorized_write(guard, write)
+                        with guard():
+                            return write()
+
+                    def create():
+                        prepared = prepare() if prepare else j.get("record_id")
                         if action == "onboard" and prepared:
-                            self._retire_planned_or_note(job_id, prepared)
-                        raise
-                    if prepared:
-                        if not self._transition_or_note(
-                                job_id, prepared, "applying"):
-                            raise ValueError(
-                                "the job's record is no longer active")
-                    # The production controller owns the one credential mint.
-                    # Small injected controller fakes do not; retain the
-                    # service's historical mint callback for those callers.
+                            unclaimed_plan[0] = prepared
+                        return prepared
+
+                    prepared = authorized(create)
+                    with self._condition:
+                        if j.get("record_id") is not None and prepared != j.get("record_id"):
+                            raise ValueError("prepared record does not match request")
+                        if prepared:
+                            j["record_id"] = prepared
+                    if action == "onboard" and preflight_evidence[0] is not None:
+                        final_resolved = authorized(lambda: (
+                            pre_apply(preflight_evidence[0]) if pre_apply else bind_preflight(
+                                j.get("resolved") or resolved or dev,
+                                preflight_evidence[0], platform="iox")))
+                        if final_resolved is not None:
+                            with self._lock:
+                                j["resolved"] = final_resolved
+                    if prepared and self.record_store is not None:
+                        # Every retry reacquires and revalidates authority. A
+                        # closed window or revocation while waiting cannot
+                        # advance the plan to device-capable work.
+                        authorized(lambda: self.record_store.transition(prepared, "applying"))
                     if (action == "onboard" and not getattr(
-                            self._iox_controller,
-                            "_mints_enrollment_token", False)):
+                            self._iox_controller, "_mints_enrollment_token", False)):
                         self._mint(device_id)
+                    unclaimed_plan[0] = None
                     return prepared
 
                 try:
@@ -2583,6 +2592,8 @@ class OnboardService:
                          if isinstance(exc, ValueError) else
                          "IOx authority operation failed")))
                 finally:
+                    if unclaimed_plan[0] is not None:
+                        self._retire_planned_or_note(job_id, unclaimed_plan[0])
                     for stream, data in output_buffers.items():
                         if data:
                             self._append(

@@ -2,12 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verbatim IOS-XE output recorded from lab hardware on 2026-09-10.
+"""Verbatim IOS-XE output recorded from lab hardware.
 
 Every byte string in this module was copied out of a transcript the IOx
 transport persisted under /var/lib/iris/iox/transcripts during the
-2026-09-10 lab runs -- the runs that exposed the dialects listed in issue
-#226. The transport stores its NORMALISED capture (CRLF folded to LF,
+lab runs identified below -- including the 2026-09-10 runs that exposed
+the dialects listed in issue #226. The transport stores its NORMALISED capture (CRLF folded to LF,
 configured credentials already replaced by ``<redacted>``), so these are the
 exact bytes the classifiers in server/iox_transport.py and
 server/iox_verification.py saw on the day. Nothing here is typed from
@@ -24,6 +24,9 @@ Provenance -- transcript id prefix, command id(s), UTC time:
     7cc6dc12 cmd 7                       06:46  teardown, SVI already absent
     8f972895 cmd 3-11                    07:04  complete recorded undeploy
     b7d4c09b cmd 7                       10:55  forced teardown, no discriminator
+
+  IE-3400-8T2S, IOS-XE 26.2.1, 2026-11-18
+    ffda0c5d cmd 10                     15:27  HTTP password storage advisory
 
   Catalyst 8000V, IOS-XE 17.15.5, hostnames iris-c8kv-101..104,
   boards 97XHUO6BK8W / 9NV64Y4FKZI / 9M2OJSX7LS9 / 9BTKNF1NCMS
@@ -451,3 +454,15 @@ SAVE_STEPS = ((b'write memory', SAVE_CONFIRMED),)
 # folded as the transport would). No IOx transcript of 2026-09-10 carries
 # it; it is here only to pin how the IOx classifiers would read it.
 GUESTSHELL_BAD_IP = b'% Bad IP address or host name% Unknown command or computer name, or unable to find computer address\n'
+
+
+# IE-3400-8T2S, IOS XE 26.2.1, 2026-11-18 15:27 UTC.
+# Transcript ffda0c5db1870e53542584125611c936, command 10. IOS itself masks
+# the password as "*". This is a storage advisory before an HTTPS copy.
+IE3400_HTTP_PASSWORD_WARNING_262 = (
+    b" SECURITY WARNING - Module: HTTP, Command: ip http client password 0 *"
+    b" - Reason: Sensitive information like passwords and keys are stored"
+    b" using weak or no protection - Remediation: Please consider migrating"
+    b" to a secure alternative such as Type-6 or Type-9 - The configuration"
+    b" is inconsistent with secure network operation and is not recommended\n"
+)

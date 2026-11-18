@@ -29,7 +29,9 @@ Root confirmations show how many roots were confirmed within the last 180 days.
 
 ## Renew the instruction signing certificate
 
-Renew the existing key's 30-day certificate here. To change the key itself, use [Replace signing key](signer-rotation.md).
+Locally managed roots support [automatic renewal](automatic-signing-renewal.md).
+For offline roots, renew the existing key's 30-day certificate below. To change
+the key itself, use [Replace signing key](signer-rotation.md).
 
 1. Open **Settings → Certificates & keys**, then **Renew signing certificate**.
    The overview shows renewal and expiry dates. **Technical details: all public keys,
@@ -51,7 +53,7 @@ Renew the existing key's 30-day certificate here. To change the key itself, use 
    invalidates a pending request; prepare it again before importing.
 
 Keys created by automatic local setup use their saved passphrases for approval.
-Review each request. Renewal is not automatic; manual keys still ask for passphrases.
+For this manual workflow, review each request. Manual keys still ask for passphrases.
 
 If the response is unavailable, the server may already have applied the renewal.
 Download a fresh public renewal request before submitting again. Leaving the

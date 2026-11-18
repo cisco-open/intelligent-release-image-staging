@@ -676,6 +676,7 @@ class KubeInstall(DockerInstall):
         self.journal.checkpoint("guestshell", guest)
 
     def finish(self):
+        self.verify_signing_ready()
         self.ensure(next(o for o in self.manifests() if o["kind"] == "Deployment" and o["metadata"]["name"] == SERVICES["console"]))
         self.kube("rollout", "status", "deployment/iris-console", "--timeout=300s", timeout=330)
         # Prove the authenticated hop from the actual Console, with CA and DNS

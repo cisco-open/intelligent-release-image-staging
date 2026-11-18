@@ -3564,3 +3564,36 @@ def test_vlan_cleanup_does_not_accept_extra_refusal(tmp_path, peer_factory, comm
     result,unused=_replay(tmp_path,peer_factory,"cleanup_config",steps,hw.IE3400_HOST)
     assert result["framing_complete"] is False
     assert result["error_category"] is not None
+
+
+
+@pytest.mark.parametrize('payload,category', [
+    (hw.IE3400_HTTP_PASSWORD_WARNING_262, None),
+    (hw.IE3400_HTTP_PASSWORD_WARNING_262 + b"%ERROR: Security policy check failed, configuration can't be applied\n", 'rejected'),
+    (hw.IE3400_HTTP_PASSWORD_WARNING_262 + b"Unexpected output\n", 'unsupported_response'),
+    (hw.IE3400_HTTP_PASSWORD_WARNING_262.replace(b'Module: HTTP', b'Module: FTP'), 'unsupported_response'),
+])
+def test_xe262_http_password_advisory_preserves_https_credential_dialogue(
+        tmp_path, peer_factory, payload, category):
+    steps = (
+        (b'configure terminal', hw.CONFIG_BANNER),
+        (b'ip http client username edge-01', b''),
+        (b'ip http client password 0 unit-token-SECRET', payload),
+        (b'end', b''),
+    )
+    result, peer = _replay(tmp_path, peer_factory, 'http_client_credentials', steps, hw.IE3400_HOST)
+    assert _value(result, 'error_category') == category
+    assert b'unit-token-SECRET' not in _value(result, 'stdout')
+    if category is None:
+        assert _value(result, 'framing_complete') is True
+        assert peer.received()[-2:] == ['end', 'exit']
+
+
+@pytest.mark.parametrize('purpose,command', [
+    ('prepare_iox_scp', b'ip http client password 0 fixture'),
+    ('http_client_credentials', b'ip http client username edge-01'),
+    ('http_client_credentials', b'ip http client password 7 fixture'),
+    ('http_client_credentials', b'ip http client password 0 fixture\niox'),
+])
+def test_xe262_password_advisory_is_bound_to_its_command(purpose, command):
+    assert not _module()._http_password_advisory(purpose, command, hw.IE3400_HTTP_PASSWORD_WARNING_262)

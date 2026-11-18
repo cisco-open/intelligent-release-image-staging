@@ -2733,6 +2733,10 @@ class _ScheduledExecutor(object):
                 raise gui_onboard.ScheduledAdmissionError(exc.reason) from None
             except gui_onboard.ScheduledAdmissionError:
                 raise
+            except deployment_records.StoreLockTimeout:
+                # The IOx controller owns this operation's wait budget and
+                # must preserve timeout/4 through the scheduled guard.
+                raise
             except Exception as exc:
                 raise gui_onboard.ScheduledAdmissionError(
                     self._map_exception(exc)) from None
@@ -5652,7 +5656,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # surfaced so an operator doesn't read the gap as "undeployed"
             awaiting = sum(1 for row in rows
                            if self._awaiting_heartbeat(row))
+            import signing_renewal
             return {
+                "signing_attention": signing_renewal.attention(now=int(now)),
                 "images": len(imgs), "devices": len(rows),
                 "assigned": assigned_total, "staged": staged_total,
                 "staging_now": staging_now,
@@ -8399,6 +8405,8 @@ def main():
                 "record_store": os.path.realpath(record_store.path),
                 "session_seconds": 7200,
                 "restoration_reserve_seconds": 180,
+                "fetch_timeout": 3600,
+                "install_timeout": 900,
                 "application_id": "iris",
                 "credential_resolver": _iox_credential_projection(creds),
                 "enrollment_token_minter": lambda device_id:

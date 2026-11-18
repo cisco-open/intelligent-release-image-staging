@@ -15,6 +15,10 @@ export class SwarmViewController {
   connect(services) {this.services = services;}
   visible() {return this.services.visible?.() === true;}
   attachFrame(frame) {this.frame = frame;}
+  frameReady(event) {
+    if (event.data === 'MAP_READY' && event.origin === this.services.origin
+        && event.source === this.frame?.contentWindow) this.syncVisibility();
+  }
   syncVisibility() {
     if (this.frame?.contentWindow) {
       this.frame.contentWindow.postMessage(this.visible() ? 'MAP_RESUME' : 'MAP_PAUSE', this.services.origin);

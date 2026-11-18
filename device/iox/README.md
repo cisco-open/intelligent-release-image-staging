@@ -68,6 +68,13 @@ causes preparation to fail rather than being invalidated. The Polaris signing
 step signs the final `package.mf` bytes and adds `package.sign`; it requires an
 authorized signing service and is separate from IRIS instruction signing.
 
+For an unsigned package targeting a CAF runtime that rejects SHA512 manifest
+entries, `package_manifest.py --algorithm SHA256 INPUT.tar OUTPUT.tar` prepares
+a compatible wrapper after verifying the original hashes. Image payloads remain
+unchanged. Refresh the output's provenance sidecar with its new wrapper SHA-256
+before staging it. This option refuses signed packages; native signing inputs
+continue to use the default SHA512 format.
+
 ## Config delivery
 
 `device/container/entrypoint.sh` (PID 1) generates `iris/iris-agent.conf` under the CAF persistent

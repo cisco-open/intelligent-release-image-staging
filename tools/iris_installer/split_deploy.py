@@ -518,6 +518,9 @@ class SplitDockerInstall(DockerInstall):
                 provision(self)
         self.remote('provision')
 
+    def verify_signing_ownership(self):
+        super().verify_resource_ownership()
+
     def verify_resource_ownership(self):
         super().verify_resource_ownership()
         if 'split-prepared' in self.journal.document['completed']:
@@ -664,6 +667,7 @@ class SplitDockerInstall(DockerInstall):
     lifecycle_consumer_proof = verify_console_management
 
     def finish(self):
+        self.verify_signing_ready()
         self.sync_console_credentials()
         certificate = self.remote('browser', host=self.config['console_bind'])
         atomic_write(self.base / 'requests/console-cert.pem', certificate, 0o644)

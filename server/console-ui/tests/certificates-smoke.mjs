@@ -16,7 +16,7 @@ try {
   let rotation = {state: 'awaiting-approval', request_id: id, previous_public_key: 'ssh-ed25519 AAAA old\n', public_key: 'ssh-ed25519 BBBB new\n',
     previous_sha256: 'aa'.repeat(32), replacement_sha256: 'bb'.repeat(32), created_at: 1790160000, activated_at: null,
     retired_keylist_seq: null, root_ids: ['root-a', 'root-b']};
-  let mode = 'wrong-state', hold, reached, inventoryAvailable = true;
+  let mode = 'wrong-state', hold, reached, inventoryAvailable = true, automaticRenewal;
   page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
   await page.addInitScript(() => {window.csp = []; window.addEventListener('securitypolicyviolation', event => window.csp.push(event.violatedDirective));});
   await page.route('**/*', async route => {
@@ -29,7 +29,7 @@ try {
         if (mode === 'wrong-id') return route.fulfill({json: {...rotation, state: 'retirement-pending', activated_at: 1790160001, request_id: '22222222-2222-4222-8222-222222222222'}});
         return route.fulfill({json: rotation}); // A valid status, but not the requested transition.
       }
-      const inventory = {scope: 'server-certificate-files', observed_at: 1790160000, custody: null, items: [
+      const inventory = {automatic_renewal: automaticRenewal, scope: 'server-certificate-files', observed_at: 1790160000, custody: null, items: [
         {id: 'root-<img src=x onerror=alert(1)>', label: 'Offline root ignored', kind: 'public-key', source: 'server-file', state: 'public-key-present',
           fingerprint_sha256: 'SHA256:fixture', valid_from: null, expires_at: null, renew_at: null, refuse_at: null, impact: 'Confirm the public root with its holder.'},
         ...['device-tls', 'management-tls', 'peer-ca', 'instruction-signer'].map(id => ({id, label: id, kind: 'certificate', source: 'server-file',
@@ -135,6 +135,16 @@ try {
   await page.locator('#rotation-state').getByText('New key active; old key retirement needed.', {exact: true}).waitFor();
   assert.match(await page.locator('#rotation-next-step').innerText(), /holder must approve/);
   assert.equal(writes.length, 3); assert.match(await page.locator('#rotation-result').innerText(), /Replacement signer active/);
+  automaticRenewal = {enabled: true, observed: true, state: 'waiting', checked_at: 1790160000, renew_at: 1790160000, last_success_at: null};
+  await page.locator('#certificate-refresh').click(); await idle();
+  assert.match(await page.locator('#certificate-automatic-renewal').innerText(), /checks daily.*after startup/);
+  assert.match(await page.locator('#certificate-next-action').innerText(), /Automatic renewal is enabled/);
+  automaticRenewal = {...automaticRenewal, observed: false};
+  await page.locator('#certificate-refresh').click(); await idle();
+  assert.match(await page.locator('#certificate-automatic-renewal').innerText(), /overdue/);
+  automaticRenewal = {...automaticRenewal, observed: true, state: 'error'};
+  await page.locator('#certificate-refresh').click(); await idle();
+  assert.match(await page.locator('#certificate-automatic-renewal').innerText(), /needs attention/);
   inventoryAvailable = false; await page.locator('#certificate-refresh').click(); await idle();
   assert.equal(await page.locator('#certificate-rows tr').count(), 0); assert.match(await page.locator('#certificate-observed').innerText(), /unavailable/);
   mode = 'wrong-state';

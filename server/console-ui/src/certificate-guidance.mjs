@@ -12,8 +12,10 @@ const purposes = {
   'instruction-signer': ['Instruction signing certificate', 'Authorizes the server key that signs instructions for devices.', 'Use Renew signing certificate below to keep the current key. A root signing key holder must approve the request.'],
   'online-key': ['Server instruction signing key', 'Signs the instructions that devices verify before acting.', 'Renew its certificate for routine expiry. Use Replace signing key below when the key itself needs replacing.'],
 };
-export function certificateGuidance(row) {
+export function certificateGuidance(row, automatic) {
   const known = lookup(purposes, row.id);
+  if (row.id === 'instruction-signer' && automatic?.enabled === true) return {title: known[0], purpose: known[1],
+    next: 'Automatic renewal keeps the existing key. Check renewal status below if it needs attention.'};
   if (known) return {title: known[0], purpose: known[1], next: known[2]};
   if (row.id.startsWith('root-')) return {title: 'Root signing key: ' + row.id.slice('root-'.length), purpose: 'Public trust used by devices to check signing approvals.',
     next: 'Ask this root signing key holder for signed confirmation under Advanced: replace deployment keys. Replacing the root requires new packages and re-onboarding.'};
@@ -29,7 +31,9 @@ export function certificatePriority(state) {
     'renewal-due': 'warning', unknown: 'warning', 'within-validity': 'neutral',
     'public-key-present': 'neutral'}, state) || 'warning';
 }
-export function renewalGuidance(row) {
+export function renewalGuidance(row, automatic) {
+  if (automatic?.enabled === true && (!automatic.observed || ['error', 'review-required'].includes(automatic.state))) return 'Automatic renewal needs attention. Check the host renewal service before the signing cutoff.';
+  if (automatic?.enabled === true && automatic.observed && ['within-validity', 'renewal-due'].includes(row?.state)) return 'Automatic renewal is enabled. IRIS checks daily and renews this certificate before the signing cutoff.';
   if (!row || row.state === 'unknown') return 'Check the signing certificate status before planning renewal.';
   if (['expired', 'signing-refused'].includes(row.state)) return 'Renew the signing certificate to resume new instruction signing.';
   if (row.state === 'renewal-due') return 'Renew the signing certificate now. Keep the existing signing key.';

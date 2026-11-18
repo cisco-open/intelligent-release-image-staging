@@ -32,12 +32,22 @@ function Certificates({controller: c, roots}) {
   const button = (action, label, ghost = false) => <button className={'btn' + (ghost ? ' ghost' : '')} id={'rotation-' + action} disabled={blocked(action)} onClick={() => c.perform(action)}>{label}</button>;
   const file = (action, id, label, disabled, accept) => <><label htmlFor={id}>{label}</label><input key={s.fileEpoch + action} id={id} type="file" accept={accept} disabled={disabled} onChange={event => c.file(action, event.target.files[0])} /></>;
   const rows = s.valid.inventory ? s.inventory.items : [], signing = rows.find(row => row.id === 'instruction-signer');
+  const automatic = s.valid.inventory ? s.inventory.automatic_renewal : null;
   const inventory = <div className="card certificate-overview" data-certificate-group="inventory"><h3>What your certificates protect</h3>
     <p>Check dates here. Open a task below only when you need to renew or change something.</p>
-    <p className="certificate-next" id="certificate-next-action">{renewalGuidance(signing)}</p>
+    <p className="certificate-next" id="certificate-next-action">{renewalGuidance(signing, automatic)}</p>
+    {automatic?.enabled === true && <div id="certificate-automatic-renewal" role="status" aria-live="polite">
+      <strong>Automatic signing renewal is enabled</strong>
+      <p>{!automatic.observed ? 'Renewal checks are overdue. Check the host renewal service before the signing cutoff.'
+        : ['error', 'review-required'].includes(automatic.state) ? 'Automatic renewal needs attention. Check the managed signing key and host renewal service.'
+        : 'IRIS checks daily and after startup, and renews before new instruction signing would stop. Failed renewals retry after an hour.'}</p>
+      <p>Renewal due: {date(automatic.renew_at)}. Last check: {date(automatic.checked_at)}.</p>
+      {automatic.last_success_at != null && <p>Last successful renewal: {date(automatic.last_success_at)}.</p>}
+    </div>}
+    {s.valid.inventory && s.inventory?.signing_readiness?.ready === false && <p className="certificate-next" role="alert">Onboarding readiness needs attention: {s.inventory.signing_readiness.signing_ready ? 'the instruction producer is not ready.' : 'instruction signing is not ready.'} Review signing status before onboarding devices.</p>}
     <p className="certificate-actions"><button className="btn" id="certificate-open-renewal" onClick={() => openSection('certificate-renewal-controls')}>{['renewal-due', 'signing-refused', 'expired'].includes(signing?.state) ? 'Renew signing certificate' : 'View signing renewal'}</button>
       <a className="btn ghost" href="#settings/tls">Check browser certificate</a></p>
-    <div className="certificate-protection-list" aria-label="Certificate status overview">{rows.filter(row => row.kind === 'certificate').map(row => {const guide = certificateGuidance(row); return <div className="certificate-protection" key={row.id}>
+    <div className="certificate-protection-list" aria-label="Certificate status overview">{rows.filter(row => row.kind === 'certificate').map(row => {const guide = certificateGuidance(row, automatic); return <div className="certificate-protection" key={row.id}>
       <div><strong>{guide.title}</strong><p>{guide.purpose}</p></div>
       <div><span className={'certificate-state certificate-state-' + certificatePriority(row.state)}>{certificateState(row.state)}</span><span className="certificate-expiry">Expires {date(row.expires_at)}</span>
         {row.id === 'instruction-signer' && <span className="certificate-expiry">Renew from {date(row.renew_at)}</span>}
@@ -47,7 +57,7 @@ function Certificates({controller: c, roots}) {
     <p className="muted">Dates describe public server files, not a live connection check. Times use your browser's timezone.</p>
     <details id="certificate-file-details" className="certificate-technical"><summary>Technical details: all public keys, dates and fingerprints</summary>
     <div className="table-scroll" role="region" aria-label="Certificate deadlines" tabIndex={0}><table className="tbl"><thead><tr>{['Certificate or key', 'Status', 'Renew from', 'Expires', 'Your next step'].map(label => <th key={label} scope="col">{label}</th>)}</tr></thead>
-      <tbody id="certificate-rows">{rows.map(row => {const guide = certificateGuidance(row); return <tr key={row.id}>
+      <tbody id="certificate-rows">{rows.map(row => {const guide = certificateGuidance(row, automatic); return <tr key={row.id}>
         <td><strong>{guide.title}</strong><p>{guide.purpose}</p><details><summary>Public fingerprint</summary><small className="machine">{row.fingerprint_sha256 || 'Fingerprint unavailable'}</small></details></td>
         <td>{certificateState(row.state)}</td><td>{row.kind === 'public-key' ? 'Holder review' : date(row.renew_at)}</td>
         <td>{row.kind === 'public-key' ? 'No expiry date' : date(row.expires_at)}</td><td>{row.state === 'unknown' ? 'Refresh to check this file before making changes. ' : ''}{guide.next}{row.refuse_at == null ? null : <><p>New instruction signing stops: {date(row.refuse_at)}</p></>}</td></tr>;})}</tbody></table></div>
@@ -57,7 +67,7 @@ function Certificates({controller: c, roots}) {
     <p className="certificate-actions"><button className="btn ghost" id="certificate-refresh" disabled={s.busy || s.loading.inventory} onClick={() => c.refresh('inventory', true)}>Refresh certificates</button>{' '}
       </p></div>;
   const renewal = <details className="card certificate-task" id="certificate-renewal-controls" data-certificate-group="renew"><summary><strong>Renew signing certificate</strong><span>{s.unknown.renew ? 'Outcome unknown: download a fresh request before continuing' : s.messages.renew?.text || 'Routine renewal keeps the existing key'}</span></summary><div className="certificate-task-body">
-    <p>Use this for routine expiry. The server keeps its signing key; a root signing key holder approves a new 30-day certificate for it.</p>
+    <p>{automatic?.enabled ? 'IRIS renews this certificate automatically using the enrolled local signing root. The manual approval steps below remain available if needed.' : 'Use this for routine expiry. The server keeps its signing key; a root signing key holder approves a new 30-day certificate for it.'}</p>
     <ol><li>Download the current public key below.</li><li>Approve it on the machine holding your signing keys.</li><li>Import the returned public certificate and apply the renewal.</li></ol>
     <details className="certificate-technical"><summary>How to approve this request</summary><p>With keys kept on the deployment host, run <code>iris-key-setup --local</code> there. Automatic setup keys use their saved passphrases; you still review and confirm the request SHA256. With separate key holders, use <code>iris-key-setup</code> on the holder's machine. Manually managed keys ask for their existing passphrases.</p><p>Return only the public approval file to the Console. The Console does not read your private signing keys.</p></details>
     <p className="muted">Start when the overview shows Renewal due. New instruction signing stops seven days before expiry. Import public approvals only; never upload a root private key.</p>

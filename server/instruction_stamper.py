@@ -1683,7 +1683,8 @@ class InstructionStamper:
                   desired_sha)
         return "superseded" if superseded else "updated"
 
-    def run_once(self):
+    def run_once(self, progress=None):
+        self.producer_ready = False
         counts = {"seen": 0, "updated": 0, "unchanged": 0, "failed": 0}
         errors = {}
         try:
@@ -1694,9 +1695,14 @@ class InstructionStamper:
                                     else "degraded")
         try:
             rows = self.fleet.list_devices()
+            self.producer_ready = True
         except Exception:
             rows = []
             errors["fleet_unavailable"] = 1
+        def report():
+            if progress:
+                progress(counts, errors, 'ok' if not errors else 'degraded', self.producer_ready)
+        report()
         for row in rows:
             counts["seen"] += 1
             try:
@@ -1708,11 +1714,14 @@ class InstructionStamper:
             except Exception:
                 counts["failed"] += 1
                 errors["stamp_commit"] = errors.get("stamp_commit", 0) + 1
+            report()
         try:
             gc_roles(self.paths, self.catalog, now=_time(self.now()))
         except StamperError as exc:
+            self.producer_ready = False
             errors[exc.code] = errors.get(exc.code, 0) + 1
         except Exception:
+            self.producer_ready = False
             errors["role_unavailable"] = errors.get(
                 "role_unavailable", 0) + 1
         state = "ok" if not errors else "degraded"
@@ -1863,7 +1872,7 @@ def gc_roles(paths=None, catalog_store=None, now=None):
         return changed
 
 
-def _status_document(now, last_success_at, state, counts, errors):
+def _status_document(now, last_success_at, state, counts, errors, *, producer_ready=False):
     now = _time(now)
     if last_success_at is not None:
         _i63(last_success_at, "status_write")
@@ -1879,32 +1888,40 @@ def _status_document(now, last_success_at, state, counts, errors):
         _i63(value, "status_write")
     return {"schema": STATUS_SCHEMA, "updated_at": now,
             "last_success_at": last_success_at, "state": state,
-            "counts": counts, "errors": errors}
+            "counts": counts, "errors": errors, "producer_ready": bool(producer_ready)}
 
 
 def status_loop(stop_event, stamper=None, interval=PASS_INTERVAL):
     stamper = stamper or InstructionStamper()
     last_success = None
-    while True:
-        now = None
-        try:
-            now = _time(stamper.now(), "status_write")
-            counts, errors, state = stamper.run_once()
-            if state == "ok":
-                last_success = now
-        except Exception:
-            if now is None:
-                try:
-                    now = _time(time.time(), "status_write")
-                except Exception:
-                    now = 0
-            counts = {"seen": 0, "updated": 0, "unchanged": 0, "failed": 1}
-            errors = {"stamp_commit": 1}
-            state = "degraded"
+    last_published = None
+
+    def publish(counts, errors, state, producer_ready, *, complete=False):
+        nonlocal last_success, last_published
+        now = _time(stamper.now(), "status_write")
+        if not complete and last_published is not None and 0 <= now - last_published < 60:
+            return
+        if complete and state == "ok":
+            last_success = now
         try:
             _atomic_json(stamper.paths.status, _status_document(
-                now, last_success, state, counts, errors))
+                now, last_success, state, counts, errors, producer_ready=producer_ready))
+            last_published = now
         except Exception:
             pass
+
+    while True:
+        try:
+            counts, errors, state = stamper.run_once(progress=publish)
+            publish(counts, errors, state, stamper.producer_ready, complete=True)
+        except Exception:
+            try:
+                now = _time(time.time(), "status_write")
+                _atomic_json(stamper.paths.status, _status_document(
+                    now, last_success, "degraded",
+                    {"seen": 0, "updated": 0, "unchanged": 0, "failed": 1},
+                    {"stamp_commit": 1}))
+            except Exception:
+                pass
         if stop_event.wait(interval):
             return

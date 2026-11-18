@@ -1337,6 +1337,70 @@ def test_failed_parent_sync_reports_uncertain_committed_write_without_rollback(
     assert b'"iox_verification"' in after
 
 
+def test_callback_lock_budget_survives_contention_and_is_thread_local(tmp_path, monkeypatch):
+    import errno
+    import fcntl
+    import threading
+
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="r1"))
+    clock = [0.0]
+    checks = []
+    original = deployment_records.fcntl.flock
+
+    def contended(fd, operation):
+        if operation & fcntl.LOCK_NB and clock[0] < 35:
+            raise OSError(errno.EAGAIN, "another onboard holds the store")
+        return original(fd, operation)
+
+    monkeypatch.setattr(deployment_records.fcntl, "flock", contended)
+    monkeypatch.setattr(deployment_records.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(deployment_records.time, "sleep",
+                        lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    sibling = []
+    with store.lock_wait_budget(60, lambda: checks.append(clock[0]), lambda: clock[0]):
+        worker = threading.Thread(target=lambda: sibling.append(
+            getattr(store._lock_wait_local, "budget", None)))
+        worker.start()
+        worker.join()
+        store.transition("r1", "applying")
+    assert sibling == [None]
+    assert store.get("r1")["state"] == "applying"
+    assert checks[-1] >= 35
+    assert store._lock_wait_local.budget is None
+    clock[0] = 0
+    with pytest.raises(deployment_records.StoreLockTimeout):
+        store.transition("r1", "active")
+    assert store.get("r1")["state"] == "applying"
+
+
+def test_callback_lock_budget_cancels_without_mutating_record(tmp_path, monkeypatch):
+    import errno
+    import fcntl
+
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="r1"))
+    clock = [0.0]
+
+    def contended(fd, operation):
+        if operation & fcntl.LOCK_NB:
+            raise OSError(errno.EAGAIN, "held")
+
+    def cancel():
+        if clock[0] >= 0.02:
+            raise RuntimeError("cancelled")
+
+    monkeypatch.setattr(deployment_records.fcntl, "flock", contended)
+    monkeypatch.setattr(deployment_records.time, "sleep",
+                        lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(RuntimeError, match="cancelled"):
+        with store.lock_wait_budget(60, cancel, lambda: clock[0]):
+            store.transition("r1", "applying")
+    assert clock[0] == 0.02
+    assert store.get("r1")["state"] == "planned"
+    assert store._lock_wait_local.budget is None
+
+
 def test_iox_store_lock_wait_honors_supplied_absolute_deadline(
         tmp_path, monkeypatch):
     import errno

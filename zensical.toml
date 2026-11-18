@@ -53,6 +53,7 @@ nav = [
     { "Rotate browser and telemetry credentials in the Console" = "admin-guide/console-credentials.md" },
     { "Rotate deployment trust and keys" = "admin-guide/deployment-rotation.md" },
     { "Replace or recover signing keys" = "admin-guide/instruction-keys.md" },
+    { "Automatic signing renewal" = "admin-guide/automatic-signing-renewal.md" },
     { "Rotate the online signer" = "admin-guide/signer-rotation.md" },
     { "Schedule key maintenance" = "admin-guide/key-maintenance.md" },
     { "Recover from damage" = "admin-guide/recovery.md" },

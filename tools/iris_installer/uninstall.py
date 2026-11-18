@@ -19,7 +19,7 @@ import stat
 import uuid
 
 from . import deploy, managed_worker, uninstall_runtime as runtime
-from . import upgrade_runtime
+from . import upgrade_runtime, signing_renewal_units
 from .state import InstallError, Journal, atomic_write, regular_bytes
 from .upgrade_plan import canonical, fingerprint, identifier, require, sha256
 
@@ -74,6 +74,7 @@ def public(base, record):
                 for location, snapshot in record.get('removal_view', plan)['snapshots'].items()
                 for key in snapshot['resources'] if [location, key] not in plan['targets']],
             'preserves': plan['preserves'],
+            'renewal_units': sorted((plan.get('signing_renewal') or {}).get('units', {})),
             'completed': record.get('completed', []), 'pending': record.get('pending')}
 
 
@@ -144,6 +145,7 @@ def plan(args):
             review = {'schema': 1, 'operation_id': str(uuid.uuid4()), 'instance_id': original['id'],
                       'installation': original, 'worker': worker, 'requests': requests, 'snapshots': snapshots,
                       'kube_fence_authority': fence_authority,
+                      'signing_renewal': signing_renewal_units.snapshot(base, original['id']),
                       'targets': targets, 'retained': retained, 'purge_data': args.purge_data,
                       'preserves': ['installation-history', 'holder-keys', 'backup-and-recovery-storage',
                                     'external-image-root', 'host-packages', 'shared-images', 'namespace',
@@ -242,6 +244,8 @@ def apply(args, *, recovery=False):
             elif review['kube_fence_authority'] is not None and record['phase'] == 'removing':
                 runtime.check_kube_fence_journal(install, review['installation'], review['kube_fence_authority'], recover=False)
             check_worker(base, review['worker'], unit_may_be_absent=record.get('worker_remove_intent') is True)
+            signing_renewal_units.check(base, record['instance_id'], review.get('signing_renewal'),
+                                        absent=record.get('renewal_remove_intent') is True)
             view = record.get('removal_view', review)
             adapters = {location: runtime.driver(install, location, request)
                         for location, request in view['requests'].items()}
@@ -255,6 +259,7 @@ def apply(args, *, recovery=False):
                 record['phase'] = 'fencing'
                 save(base, record)
             if record['phase'] == 'fencing':
+                signing_renewal_units.stop(review.get('signing_renewal'))
                 saved = review['worker']
                 managed_worker.command(['systemctl', 'disable', saved['record']['unit']])
                 managed_worker.command(['systemctl', 'stop', saved['record']['unit']], timeout=3600)
@@ -307,6 +312,9 @@ def apply(args, *, recovery=False):
                 require(location != 'kubernetes' or not observed['pods'], 'Owned Kubernetes pods still exist')
             # Delete only captured service definition bytes. Keep pinned runtime,
             # records, all private keys and backups for inspection or recovery.
+            record['renewal_remove_intent'] = True
+            save(base, record)
+            signing_renewal_units.remove(base, record['instance_id'], review.get('signing_renewal'))
             record['worker_remove_intent'] = True
             save(base, record)
             check_worker(base, review['worker'], unit_may_be_absent=True)

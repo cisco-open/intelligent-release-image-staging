@@ -729,6 +729,10 @@ class StoreLockTimeout(ValueError):
     """The shared store lock was not acquired by its caller deadline."""
 
 
+class StoreLockBusy(StoreLockTimeout):
+    """An authority-scoped attempt must release its outer locks and retry."""
+
+
 class DeploymentRecordStore:
     """Lock-protected record store persisted beneath ``IRIS_STATE``."""
     def __init__(self, state_dir, now_fn=time.time):
@@ -736,10 +740,65 @@ class DeploymentRecordStore:
         _ensure_state_directory(self.state_dir)
         self.path = os.path.join(self.state_dir, "deployment_records.json")
         self._now = now_fn
+        self._lock_wait_local = threading.local()
+
+    @contextlib.contextmanager
+    def lock_wait_budget(self, deadline, check, monotonic_fn=time.monotonic):
+        """Use an operation's bounded, cancellable wait for callback writes.
+
+        This does not hold the store lock. Each write still acquires and
+        releases it independently, and other threads retain their own budget.
+        """
+        if (not isinstance(deadline, (int, float)) or isinstance(deadline, bool)
+                or not 0 <= deadline <= _MAX_INTEGER or not callable(check)
+                or not callable(monotonic_fn)):
+            raise ValueError("invalid store lock wait budget")
+        previous = getattr(self._lock_wait_local, "budget", None)
+        self._lock_wait_local.budget = (deadline, check, monotonic_fn)
+        try:
+            yield
+        finally:
+            self._lock_wait_local.budget = previous
+
+    def authorized_write(self, authority, operation):
+        """Retry one transaction without holding authority during contention.
+
+        Acquisition order remains authority -> record store. Only the failed
+        nonblocking attempt is retried; operation must perform one transaction.
+        The controller's original cancellation/deadline budget still applies.
+        """
+        budget = getattr(self._lock_wait_local, "budget", None)
+        if budget is None:
+            budget = (time.monotonic() + 30, lambda: None, time.monotonic)
+        deadline, check, clock = budget
+        previous = getattr(self._lock_wait_local, "nonblocking", False)
+        try:
+            while True:
+                check()
+                if clock() >= deadline:
+                    raise StoreLockTimeout("deployment record store lock timed out")
+                try:
+                    with authority():
+                        self._lock_wait_local.nonblocking = True
+                        return operation()
+                except StoreLockBusy:
+                    self._lock_wait_local.nonblocking = previous
+                    check()
+                    remaining = deadline - clock()
+                    if remaining <= 0:
+                        raise StoreLockTimeout("deployment record store lock timed out") from None
+                    time.sleep(min(0.01, remaining))
+        finally:
+            self._lock_wait_local.nonblocking = previous
 
     @contextlib.contextmanager
     def _store_lock(self, deadline=None, monotonic_fn=None):
         """Take the shared store lock without an unbounded flock wait."""
+        budget = getattr(self._lock_wait_local, "budget", None)
+        if budget is not None and deadline is None:
+            deadline, check, monotonic_fn = budget
+        else:
+            check = None
         clock = time.monotonic if monotonic_fn is None else monotonic_fn
         if not callable(clock):
             raise ValueError("invalid store lock clock")
@@ -774,6 +833,8 @@ class DeploymentRecordStore:
         acquired = False
         try:
             while True:
+                if check is not None:
+                    check()
                 if clock() >= deadline:
                     raise StoreLockTimeout(
                         "deployment record store lock timed out")
@@ -785,10 +846,14 @@ class DeploymentRecordStore:
                         raise StoreLockTimeout(
                             "deployment record store lock timed out")
                     acquired = True
+                    if check is not None:
+                        check()
                     break
                 except (IOError, OSError) as exc:
                     if exc.errno not in (errno.EACCES, errno.EAGAIN):
                         raise
+                    if getattr(self._lock_wait_local, "nonblocking", False):
+                        raise StoreLockBusy("deployment record store is busy") from None
                     remaining = deadline - clock()
                     if remaining <= 0:
                         raise StoreLockTimeout(

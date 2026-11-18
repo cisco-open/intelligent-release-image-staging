@@ -39,17 +39,17 @@ SOURCES = {
 # This is a deliberately closed, reviewed recipe profile, not a shell parser.
 # New recipes require review; changing a pin cannot silently invent new support.
 CONTROLS = {
-    'device/container/Dockerfile': '95632059ab4d3349d2c9b401fe4dad20126b46a0e1b904efce8028289cbdf380',
+    'device/container/Dockerfile': 'ed02e67c9d97fbd522de52fd814b2e218d4ef34fab6f2b7379971288866dad84',
     'device/container/rebuild-xml.py': 'ade8d7c1006aa57b7bfdd1b0df1b1bf2096053cce0269a4e3fbc63c801671436',
-    'server/Dockerfile': '78a8d09c9ddbc4f3ed33df8c19fb7d0e79fa2981de9fe6a4bebdeb032983bfe1',
+    'server/Dockerfile': '028571a4e460d49902631fe8dd00427ee7bb0e34e11b3d704c3b3e72a3446d5f',
     'tools/build-device-image.sh': '8a0d84d2a997b4a0b3c03e99605e10b387547879f6c6322c2d130603f61f379c',
-    'tools/build-ssh-verifier.sh': 'e4b95f3ee2849f33c35557bfc26bb0a5a32990d3d4242eb05ce05ec7e0c4016b',
-    'tools/build-instruction-crypto-inner.sh': 'ff9b2fb38841661ccd5df9f1f58a1ad9ded7d66dccf92f59d69aa9fb9276a976',
+    'tools/build-ssh-verifier.sh': 'a8f41330a35fb27534abbbd3fcb2ffbfb2baeef31ede9bcb1aa79747334238ad',
+    'tools/build-instruction-crypto-inner.sh': 'e2a481cdcbe18aad12c3d3222fe5fe74aef43d2b8942b85d81b58445603026ab',
     'tools/iris-aead.c': '75fff094855d4232cd79722e0f89f499bc8f62fe64ee62eb46720b02c29bf3f4',
     'tools/licenses/musl-COPYRIGHT': 'b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b',
 }
 ALPINE = {
-    'musl': ('1.2.6-r2', 'f5640d3a10f664c9119720c60515265d3d6f6d01'),
+    'musl': ('1.2.6-r3', '8f79d39391b46d6dbf1800fb68b8212a21d5ee2e'),
     'openssl': ('3.5.9-r0', '29b9ec24b1b5b39aeef51fa2a044210e2ec5258e'),
 }
 BASE = 'sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b'
@@ -69,7 +69,7 @@ evidence/ preserves installed Python build configuration and image configuration
 as inert data: no Python module, patch, shell, Makefile or image was executed.
 
 The referenced Alpine companion must accompany this archive. Its exact musl
-1.2.6-r2 and OpenSSL 3.5.9-r0 source and port inputs are independently validated;
+1.2.6-r3 and OpenSSL 3.5.9-r0 source and port inputs are independently validated;
 they are not duplicated here. Static linkage is a declared recipe relationship,
 not proof of every linked byte. The original Python base OCI history was removed
 by flattening and is not reconstructed from its tag or installed configuration.

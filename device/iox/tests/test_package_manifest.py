@@ -72,6 +72,25 @@ def test_verify_rejects_sha256(tmp_path):
         pm.verify(source)
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_unsigned_legacy_caf_sha256_preserves_payloads(tmp_path, nested):
+    source, output = tmp_path / "input.tar", tmp_path / "output.tar"
+    envelope = _tar(_wrapper(algorithm="SHA512")) if nested else None
+    original = _tar(_wrapper(algorithm="SHA512", envelope=envelope))
+    source.write_bytes(original)
+    pm.prepare(source, output, algorithm="SHA256")
+    pm.verify(output, algorithm="SHA256")
+    assert source.read_bytes() == original
+    before, after = _read(source), _read(output)
+    for name, data in before.items():
+        if name not in ("package.mf", "envelope_package.tar.gz"):
+            assert after[name] == data
+    assert all(line.startswith(b"SHA256(") for line in after["package.mf"].splitlines())
+    if nested:
+        with tarfile.open(fileobj=io.BytesIO(after["envelope_package.tar.gz"])) as inner:
+            pm._verify(inner, pm._members(inner), required_algorithm="SHA256")
+
+
 @pytest.mark.parametrize("name", ["package.sign", "package.cert", "nested/package.sign"])
 @pytest.mark.parametrize("nested", [False, True])
 def test_signed_wrappers_are_never_rewritten(tmp_path, name, nested):

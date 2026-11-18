@@ -64,3 +64,14 @@ test('polling never sends resume and only uses the fixed same-origin swarm route
   assert.deepEqual(messages, [['MAP_RESUME', 'https://iris.test']]);
   assert.ok(requests.every(row => row.url === '/api/v1/swarm' && row.options.cache === 'no-store'));
 });
+test('a late map-ready handshake restores current visibility only for the attached frame', () => {
+  const {c, messages, visible} = fixture();
+  const ready = {data: 'MAP_READY', origin: 'https://iris.test', source: c.frame.contentWindow};
+  c.frameReady({...ready, origin: 'https://other.test'});
+  c.frameReady({...ready, source: {}});
+  assert.deepEqual(messages, []);
+  c.frameReady(ready);
+  assert.deepEqual(messages.at(-1), ['MAP_RESUME', 'https://iris.test']);
+  visible(false); c.frameReady(ready);
+  assert.deepEqual(messages.at(-1), ['MAP_PAUSE', 'https://iris.test']);
+});

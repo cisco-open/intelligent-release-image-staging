@@ -17,6 +17,31 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Recognize the IOS XE 26.2.1 HTTP-client password storage advisory during
+  IOx HTTPS downloads, while preserving actual security-policy rejections.
+
+- Renew instruction signing certificates automatically for enrolled local roots,
+  with daily checks, startup checks, and hourly failure retries. Show renewal
+  problems on Overview and verify signing and producer readiness after setup.
+  Preserve offline-key resumes, stop renewal units during uninstall, and keep
+  scheduled authority available and freshly checked during IOx preparation.
+
+- Keep IOx preparation cancellable during record-store contention, preserve
+  cancellation and timeout results, and retire abandoned preparation records.
+  Align the runtime-source profile and linked helper builds with musl 1.2.6-r3.
+
+- Keep Swarm image names available from the catalog when a seeder is inactive.
+  Resume embedded maps through a readiness handshake and retry stalled reads.
+  Reseed relocated images only after their contents match catalog checksums.
+
+- Let IOx preparation wait for the shared record lock within the remaining
+  onboarding budget, with cancellation checks. Managed onboarding allows an
+  hour for package delivery and fifteen minutes for application installation.
+
+- Support explicit SHA256 manifest preparation for unsigned packages on legacy
+  IOx CAF runtimes, and report lifecycle polling timeouts without a misleading
+  private controller protocol error.
+
 - Complete manual certificate export and separate key holder installation links,
   and use the packaged API checker after installing the Ubuntu .deb.
 

@@ -1,7 +1,10 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+import hashlib
 import json
+
+import pytest
 
 import reseed_input
 
@@ -79,9 +82,29 @@ def test_stale_source_dir_falls_back_to_the_walk(tmp_path):
     (st / "torrents" / "img.torrent").write_bytes(b"d")
     (st / "catalog.json").write_text(json.dumps({"images": {
         "img": {"filename": "img.bin",
+                "sha256": hashlib.sha256(b"x").hexdigest(),
                 "source_dir": str(tmp_path / "gone-away")}}}))
     lines = reseed_input.build(str(st), str(uploads), "/def")
     assert lines == [str(st / "torrents" / "img.torrent"), " dir=" + str(uploads)]
+
+
+@pytest.mark.parametrize("checksum", [True, False, None])
+def test_relocated_file_with_existing_old_directory_requires_checksum(tmp_path, checksum):
+    st = _state(tmp_path)
+    old = tmp_path / "images"; old.mkdir()
+    nested = old / "iosxe"; nested.mkdir()
+    (nested / "img.bin").write_bytes(b"published")
+    wrong = tmp_path / "uploads"; wrong.mkdir()
+    (wrong / "img.bin").write_bytes(b"unrelated")
+    torrent = st / "torrents" / "img.torrent"; torrent.write_bytes(b"d")
+    entry = {"filename": "img.bin", "source_dir": str(old)}
+    if checksum is not None:
+        entry["sha256"] = hashlib.sha256(b"published" if checksum else b"missing").hexdigest()
+    (st / "catalog.json").write_text(json.dumps({"images": {"img": entry}}))
+    skipped = []
+    lines = reseed_input.build(str(st), str(wrong) + ":" + str(old), str(old), skipped)
+    assert lines == ([str(torrent), " dir=" + str(nested)] if checksum else [])
+    assert bool(skipped) is not bool(checksum)
 
 
 # ---------------------------------------------------------------------------

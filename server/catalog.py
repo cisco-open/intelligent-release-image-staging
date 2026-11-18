@@ -211,6 +211,14 @@ class InstructionSigningNotInitialized(InstructionBootstrapUnavailable):
                              "complete Install > Turn on instruction signing")
 
 
+class InstructionSigningRenewalRequired(InstructionBootstrapUnavailable):
+    """A public renewal requirement, without private custody details."""
+
+    def __init__(self):
+        RuntimeError.__init__(self, 'instruction signing certificate needs renewal; '
+                             'open Settings > Certificates & keys')
+
+
 def _audit_id(value):
     """Derive a short, non-secret correlation id from a token value.
 
@@ -2433,6 +2441,13 @@ class Catalog:
             try:
                 producer.stamp_device(device_id)
             except stamper.StamperError as exc:
+                cause = exc
+                for _ in range(8):
+                    if isinstance(cause, instruction_keys.SigningUnavailable):
+                        raise InstructionSigningRenewalRequired() from exc
+                    cause = cause.__cause__
+                    if cause is None:
+                        break
                 if exc.code == "key_superseded" and attempt == 0:
                     continue
                 if exc.code == "uninitialized":

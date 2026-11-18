@@ -79,7 +79,7 @@ Automatic key setup is the default (`--key-mode automatic`). Setup has four step
 1. Review the server and Console addresses, then confirm **Start setup?**
 2. Setup creates protected local signing and recovery keys, then builds the server.
 3. It approves that server's signing request and finishes the device packages.
-4. Open the displayed Console address and create your administrator account.
+4. Setup enables daily certificate renewal for automatic local keys. Open the displayed Console address and create your administrator account.
 
 You do not choose or type signing-key passphrases. Setup generates a separate
 strong random passphrase for each signing key and stores them in mode `0600` files.

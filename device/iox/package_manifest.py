@@ -62,7 +62,7 @@ def _digest(stream, algorithm):
     return digest.hexdigest()
 
 
-def _verify(archive, members, *, sha512_only=False):
+def _verify(archive, members, *, sha512_only=False, required_algorithm=None):
     member = members["package.mf"]
     if member.size > MAX_MANIFEST_BYTES:
         raise ManifestError("package.mf exceeds size limit")
@@ -82,6 +82,8 @@ def _verify(archive, members, *, sha512_only=False):
             raise ManifestError("duplicate or missing manifest member: " + name)
         if sha512_only and algorithm != "SHA512":
             raise ManifestError("package.mf must use SHA512")
+        if required_algorithm is not None and algorithm != required_algorithm:
+            raise ManifestError("package.mf must use " + required_algorithm)
         with archive.extractfile(members[name]) as payload:
             actual = _digest(payload, algorithm)
         if actual != expected:
@@ -91,7 +93,7 @@ def _verify(archive, members, *, sha512_only=False):
         raise ManifestError("package.mf does not cover every payload member")
 
 
-def _rewrite(source, destination, depth=0):
+def _rewrite(source, destination, depth=0, algorithm="SHA512"):
     if depth > 1:
         raise ManifestError("unexpected nested IOx envelope")
     with tarfile.open(fileobj=source, mode="r:*") as archive:
@@ -103,19 +105,19 @@ def _rewrite(source, destination, depth=0):
             if "envelope_package.tar.gz" in members:
                 with archive.extractfile(members["envelope_package.tar.gz"]) as nested:
                     with gzip.GzipFile(fileobj=envelope, mode="wb", mtime=0) as gz:
-                        _rewrite(nested, gz, depth + 1)
+                        _rewrite(nested, gz, depth + 1, algorithm)
                 envelope.seek(0)
             lines = []
             for name, member in members.items():
                 if name == "package.mf":
                     continue
                 if name == "envelope_package.tar.gz":
-                    digest = _digest(envelope, "SHA512")
+                    digest = _digest(envelope, algorithm)
                     envelope.seek(0)
                 else:
                     with archive.extractfile(member) as payload:
-                        digest = _digest(payload, "SHA512")
-                lines.append(f"SHA512({name})= {digest}\n")
+                        digest = _digest(payload, algorithm)
+                lines.append(f"{algorithm}({name})= {digest}\n")
             manifest = "".join(lines).encode("ascii")
             with tarfile.open(fileobj=destination, mode="w|") as output:
                 for name, member in members.items():
@@ -132,33 +134,37 @@ def _rewrite(source, destination, depth=0):
                             output.addfile(info, payload)
 
 
-def _verify_archive(archive, depth=0):
+def _verify_archive(archive, depth=0, algorithm="SHA512"):
     if depth > 1:
         raise ManifestError("unexpected nested IOx envelope")
     members = _members(archive)
-    _verify(archive, members, sha512_only=True)
+    _verify(archive, members, required_algorithm=algorithm)
     if "envelope_package.tar.gz" in members:
         with archive.extractfile(members["envelope_package.tar.gz"]) as nested:
             with tarfile.open(fileobj=nested, mode="r:gz") as inner:
-                _verify_archive(inner, depth + 1)
+                _verify_archive(inner, depth + 1, algorithm)
 
 
-def verify(path):
-    """Verify SHA512 coverage and bytes without extracting or changing files."""
+def verify(path, algorithm="SHA512"):
+    """Verify manifest coverage and bytes without extracting or changing files."""
+    if algorithm not in ("SHA256", "SHA512"):
+        raise ManifestError("unsupported manifest algorithm")
     with tarfile.open(path, mode="r:*") as archive:
-        _verify_archive(archive)
+        _verify_archive(archive, algorithm=algorithm)
 
 
-def prepare(source, destination):
+def prepare(source, destination, algorithm="SHA512"):
     """Write a new unsigned wrapper; leave the input and existing outputs alone."""
     destination = Path(destination)
+    if algorithm not in ("SHA256", "SHA512"):
+        raise ManifestError("unsupported manifest algorithm")
     # Exclusive creation also rejects aliases/symlinks to the source package.
     with open(source, "rb") as original:
         with destination.open("xb") as output:
             try:
-                _rewrite(original, output)
+                _rewrite(original, output, algorithm=algorithm)
                 output.flush()
-                verify(destination)
+                verify(destination, algorithm)
             except BaseException:
                 destination.unlink()
                 raise
@@ -168,12 +174,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path, nargs="?")
+    parser.add_argument("--algorithm", choices=("SHA256", "SHA512"),
+                        default="SHA512",
+                        help="SHA256 for unsigned legacy CAF packages; SHA512 for signing inputs")
     args = parser.parse_args()
     try:
         if args.destination is None:
-            verify(args.source)
+            verify(args.source, args.algorithm)
         else:
-            prepare(args.source, args.destination)
+            prepare(args.source, args.destination, args.algorithm)
     except (ManifestError, OSError, tarfile.TarError) as exc:
         parser.exit(1, f"IOx manifest: {exc}\n")
 

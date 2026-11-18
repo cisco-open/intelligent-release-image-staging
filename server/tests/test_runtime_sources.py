@@ -65,11 +65,15 @@ def layer(files, member, *, links=()):
 
 
 @pytest.fixture
-def inputs(tmp_path, monkeypatch):
+def inputs(tmp_path, monkeypatch, request):
     candidate, pool = tmp_path / 'candidate', tmp_path / 'pool'
     candidate.mkdir(); pool.mkdir()
-    controls = {name: ('reviewed fixture control ' + name + '\n').encode() for name in r.CONTROLS}
-    monkeypatch.setattr(r, 'CONTROLS', {name: digest(data) for name, data in controls.items()})
+    if getattr(request, 'param', None) == 'repository-controls':
+        root = Path(__file__).resolve().parents[2]
+        controls = {name: (root / name).read_bytes() for name in r.CONTROLS}
+    else:
+        controls = {name: ('reviewed fixture control ' + name + '\n').encode() for name in r.CONTROLS}
+        monkeypatch.setattr(r, 'CONTROLS', {name: digest(data) for name, data in controls.items()})
     sources = {
         'Python-3.12.14.tar.xz': packed({'Python-3.12.14/Include/patchlevel.h': b'#define PY_VERSION "3.12.14"\n',
             'Python-3.12.14/Lib/demo.py': b'NEVER_EXECUTE = True\n',
@@ -211,6 +215,29 @@ def test_round_trip_exact_inputs_notices_configuration_and_truthful_scope(inputs
     assert (Path(result['archive']).stat().st_mode & 0o777) == 0o444
     # The deliberately false source_match flag was never promoted into authority.
     assert inputs['selection']['source_match']['canonical_source_matches'] is False
+
+
+@pytest.mark.parametrize('inputs', ['repository-controls'], indirect=True)
+def test_runtime_bundle_accepts_repository_build_controls(inputs):
+    # Exercise the public build/validate path with the actual committed recipe
+    # bytes and the closed production digest profile, not a mocked profile.
+    result = build(inputs)
+    manifest = validate(inputs, Path(result['archive']))
+    payload = entries(Path(result['archive']))
+    for name, expected in r.CONTROLS.items():
+        assert digest(payload['controls/' + name]) == expected
+    assert manifest['alpine_reference']['sources']['musl']['version'] == '1.2.6-r3'
+
+
+def test_runtime_source_musl_requirement_matches_every_linked_build_recipe():
+    import re
+    root = Path(__file__).resolve().parents[2]
+    version, revision = r.ALPINE['musl']
+    assert revision == '8f79d39391b46d6dbf1800fb68b8212a21d5ee2e'
+    for name in ('device/container/Dockerfile', 'tools/build-ssh-verifier.sh',
+                 'tools/build-instruction-crypto-inner.sh'):
+        assert re.findall(r'musl-dev=([^\s]+)', (root / name).read_text()) == [version]
+    assert version.encode() in r.README
 
 
 def test_deterministic_repeat(inputs):

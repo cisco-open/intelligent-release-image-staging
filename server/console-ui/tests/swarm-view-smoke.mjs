@@ -59,6 +59,9 @@ try {
   await page.locator('a[href="#swarm"]').click();
   await frame.waitForFunction(() => window.messages.at(-1) === 'MAP_RESUME');
   assert.equal(frameLoads, 1, 'Navigation retains the loaded frame');
+  // A listener that becomes ready after iframe load asks for visibility again.
+  await frame.evaluate(() => {window.messages = []; parent.postMessage('MAP_READY', location.origin);});
+  await frame.waitForFunction(() => window.messages.at(-1) === 'MAP_RESUME');
   const messages = await frame.evaluate(() => window.messages.length);
   await page.evaluate(() => window.irisSwarmView.refresh());
   assert.equal(await frame.evaluate(() => window.messages.length), messages, 'Summary polling must not resume a manual pause');

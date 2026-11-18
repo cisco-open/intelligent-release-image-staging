@@ -111,6 +111,7 @@ export function SwarmMap({controller: c, config}) {
     const visibility = () => c.setDocumentHidden(document.hidden);
     const message = event => {if (event.origin === location.origin && event.source === window.parent && (event.data === 'MAP_PAUSE' || event.data === 'MAP_RESUME')) c.setHostPaused(event.data === 'MAP_PAUSE');};
     document.addEventListener('visibilitychange', visibility); window.addEventListener('message', message); c.start();
+    if (window.parent !== window) window.parent.postMessage('MAP_READY', location.origin);
     return () => {document.removeEventListener('visibilitychange', visibility); window.removeEventListener('message', message); c.stop();};
   }, [c]);
   useLayoutEffect(() => {

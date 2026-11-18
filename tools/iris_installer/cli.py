@@ -35,6 +35,9 @@ def parser():
     result = argparse.ArgumentParser(
         description="Install and manage IRIS on Ubuntu with Docker or Kubernetes.")
     commands = result.add_subparsers(dest="command", required=True)
+    renewal = commands.add_parser('signing-renewal', help='automatically renew certificates for a locally managed signing root')
+    from .signing_renewal import add_arguments as renewal_arguments
+    renewal_arguments(renewal)
     maintenance = commands.add_parser("maintenance", help="check or repair this deployment from the terminal")
     from .maintenance import add_arguments as maintenance_arguments
     maintenance_arguments(maintenance)
@@ -294,6 +297,12 @@ def main(argv=None):
             args = install_questions(args, command_parser)
         from .state import InstallError
         try:
+            if args.command == 'signing-renewal':
+                from .signing_renewal import operate
+                if args.action == 'enable' and args.root_key is None:
+                    raise InstallError('Enable renewal with --root-key pointing to the existing managed root')
+                print(json.dumps(operate(args), sort_keys=True))
+                return 0
             if args.command == 'uninstall':
                 from . import uninstall
                 if args.uninstall_action in ('apply', 'recover'):
