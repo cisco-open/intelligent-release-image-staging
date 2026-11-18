@@ -17,6 +17,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Renew instruction signing certificates automatically for enrolled local roots,
+  with daily checks, startup checks, and hourly failure retries. Show renewal
+  problems on Overview and verify signing and producer readiness after setup.
+  Preserve timeout results through scheduled IOx admission guards.
+
 - Keep IOx preparation cancellable during record-store contention, preserve
   cancellation and timeout results, and retire abandoned preparation records.
   Align the runtime-source profile and linked helper builds with musl 1.2.6-r3.

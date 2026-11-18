@@ -4345,10 +4345,12 @@ class IoxController(object):
                         "instruction_bootstrap_materializer"](
                             _get(request, "device_id"))
                 except Exception as exc:
-                    from catalog import InstructionSigningNotInitialized
+                    from catalog import (InstructionSigningNotInitialized,
+                                         InstructionSigningRenewalRequired)
                     detail = ("instruction signing is not initialized; complete "
                               "Install > Turn on instruction signing"
                               if isinstance(exc, InstructionSigningNotInitialized)
+                              else str(exc) if isinstance(exc, InstructionSigningRenewalRequired)
                               else "instruction bootstrap unavailable; check "
                               "instruction signing status and producer health")
                     raise _ControllerFailure(

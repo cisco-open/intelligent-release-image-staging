@@ -519,6 +519,8 @@ def test_finish_exports_public_browser_certificate_and_leaves_owner_unclaimed(in
         commands.append(command)
         if "openssl" in command:
             return certificate
+        if any("signing_renewal.readiness" in arg for arg in command):
+            return b'{"ready": true}'
         if any("get_admin" in arg for arg in command):
             return b"False\n"
         return b""

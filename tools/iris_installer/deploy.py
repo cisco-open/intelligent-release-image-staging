@@ -753,8 +753,23 @@ class DockerInstall:
             raise InstallError("Guest Shell bundle verification failed; installation remains incomplete")
         self.journal.checkpoint("guestshell", guest)
 
+    def verify_signing_ready(self):
+        code = ("import json,time,signing_renewal; "
+                "deadline=time.monotonic()+90\n"
+                "while True:\n"
+                " result=signing_renewal.readiness()\n"
+                " if result['ready'] or time.monotonic()>=deadline: break\n"
+                " time.sleep(2)\n"
+                "print(json.dumps(result))")
+        result = json.loads(self.python(code))
+        if result.get('ready') is not True:
+            raise InstallError('IRIS is running, but instruction signing or its producer is not ready. '
+                               'Check Certificates & keys before onboarding devices')
+        print('Instruction signing and producer readiness verified.')
+
     def finish(self):
         self.compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "180", "console")
+        self.verify_signing_ready()
         public_certificate = self.execute("openssl", "x509", "-in", "/run/iris/tls/console-fallback.pem",
                                           "-outform", "PEM", capture=True)
         if not public_certificate.startswith(b"-----BEGIN CERTIFICATE-----"):

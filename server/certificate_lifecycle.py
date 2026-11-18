@@ -163,8 +163,11 @@ def inventory(*, now=None, paths=None):
         except (keys.InstructionKeyError, OSError, ValueError):
             pass
         items.append(row)
+    import signing_renewal
     return {"observed_at": now, "scope": "server-certificate-files",
             "items": items,
+            "automatic_renewal": signing_renewal.status(paths=paths, now=now),
+            "signing_readiness": signing_renewal.readiness(paths=paths, now=now),
             "custody": keys.read_status_file(paths.status, now=now),
             "note": "Validity dates do not prove trust, key availability or the certificate loaded by a listener."}
 

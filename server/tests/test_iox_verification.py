@@ -1738,7 +1738,7 @@ def test_production_bash_recipe_accepts_exact_two_revision_instruction_commit(
     assert _command_calls(factory, "app_start")
 
 
-@pytest.mark.parametrize("outcome", ["raises", "uninitialized", "empty", "oversize"])
+@pytest.mark.parametrize("outcome", ["raises", "uninitialized", "renewal", "empty", "oversize"])
 def test_instruction_materialization_failure_precedes_prepare_journal_and_mutation(
         tmp_path, outcome):
     timeline = []
@@ -1751,6 +1751,9 @@ def test_instruction_materialization_failure_precedes_prepare_journal_and_mutati
         if outcome == "uninitialized":
             from catalog import InstructionSigningNotInitialized
             raise InstructionSigningNotInitialized()
+        if outcome == "renewal":
+            from catalog import InstructionSigningRenewalRequired
+            raise InstructionSigningRenewalRequired()
         if outcome == "raises":
             raise RuntimeError("sensitive materialization detail")
         if outcome == "empty":
@@ -1772,6 +1775,7 @@ def test_instruction_materialization_failure_precedes_prepare_journal_and_mutati
     expected = {
         "uninitialized": "instruction signing is not initialized; complete "
                          "Install > Turn on instruction signing",
+        "renewal": "instruction signing certificate needs renewal; open Settings > Certificates & keys",
         "raises": "instruction bootstrap unavailable; check "
                   "instruction signing status and producer health",
     }.get(outcome, "IOx install controller failed")

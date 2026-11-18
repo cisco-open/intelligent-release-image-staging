@@ -664,6 +664,7 @@ class SplitDockerInstall(DockerInstall):
     lifecycle_consumer_proof = verify_console_management
 
     def finish(self):
+        self.verify_signing_ready()
         self.sync_console_credentials()
         certificate = self.remote('browser', host=self.config['console_bind'])
         atomic_write(self.base / 'requests/console-cert.pem', certificate, 0o644)

@@ -249,6 +249,13 @@ def run_setup(args):
             raise InstallError("Installer stopped with code " + str(result) + ". Keep your files, fix the reported error and rerun setup")
         status = controller(["setup-status", "--state-dir", str(args.state_dir)], capture=True)
         config = status["config"]
+        if args.key_mode == 'automatic':
+            folder = folder or choose_key_folder(args)
+            print('Enabling automatic signing-certificate renewal with the existing local root.')
+            renewed = controller(['signing-renewal', 'enable', '--state-dir', str(args.state_dir),
+                                  '--root-key', str(folder / 'root-a/root-a')])
+            if renewed:
+                raise InstallError('Installation is kept, but automatic renewal needs attention. Check the managed key folder and rerun setup')
         print("\n[4/4] Open the Console")
         print("Open https://" + config["console_bind"] + ":" + str(config["console_port"]) + "/ and check its certificate.")
         print("Create your own administrator account if asked. No account was created or signed in for you.")

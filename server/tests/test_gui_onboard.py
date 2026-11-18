@@ -5170,8 +5170,24 @@ def test_iox_preparation_contention_preserves_abort_authority_and_results(
             resolved={'platform': 'iox', 'device_identity': spec._BOARD}
         ))['record_id']
 
+    guard = None
+    if outcome == 'timeout':
+        # Exercise the actual production scheduled guard, which previously
+        # translated StoreLockTimeout into execution_failed/rejected/2.
+        import contextlib
+        import management_api
+        from types import SimpleNamespace
+        executor = object.__new__(management_api._ScheduledExecutor)
+        executor._authority = lambda *args: contextlib.nullcontext((None, None))
+        executor.submission = SimpleNamespace(_owned_resources=lambda _resolved: {})
+        guard = executor._onboard_callbacks(
+            {}, {}, 'd1', {'attempt': 1}, {},
+            {'inventory_revision': 1, 'plan_hash': 'fixture', 'resolved': {}},
+            None, 1)[0]
+
     try:
         jid = service.start('d1', prepare=prepare, pre_apply=lambda _e: None,
+                            authority_guard=guard,
                             authority_check=authority_check,
                             schedule_context=_schedule_context('d1'))
         if outcome != 'timeout':

@@ -167,14 +167,14 @@ def test_initial_setup_runs_install_then_explicit_approval_then_resume(tmp_path,
 
     def controller(command, capture=False):
         calls.append(command)
-        return next(states) if capture else (20 if command[0] == "install" else 21)
+        return next(states) if capture else (20 if command[0] == "install" else 0 if command[0] == "signing-renewal" else 21)
 
     monkeypatch.setattr(setup, "controller", controller)
     monkeypatch.setattr(setup, "choose_key_folder", lambda args: tmp_path / "keys")
     monkeypatch.setattr(setup, "prepare_keys", lambda folder, **kw: (folder / "public/roots", "age1fixture"))
     monkeypatch.setattr(setup, "sign_request", lambda status, folder, **kw: tmp_path / "approval.pub")
     assert setup.run_setup(args) == 0
-    assert [call[0] for call in calls] == ["setup-status", "install", "setup-status", "resume", "setup-status"]
+    assert [call[0] for call in calls] == ["setup-status", "install", "setup-status", "resume", "setup-status", "signing-renewal"]
     assert "--certificate" in calls[3]
     assert "--key-directory" not in calls[1]
     output = capsys.readouterr().out
@@ -192,11 +192,11 @@ def test_existing_installation_never_recreates_keys_or_overrides_config(tmp_path
 
     def controller(command, capture=False):
         calls.append(command)
-        return status if capture else result
+        return status if capture else 0 if command[0] == "signing-renewal" else result
 
     monkeypatch.setattr(setup, "controller", controller)
     monkeypatch.setattr(setup, "prepare_keys", lambda *a: pytest.fail("must not create keys"))
-    monkeypatch.setattr(setup, "choose_key_folder", lambda *a: pytest.fail("keys not needed"))
+    monkeypatch.setattr(setup, "choose_key_folder", lambda args: args.key_directory)
     if result == 1:
         with pytest.raises(InstallError, match="stopped with code 1"):
             setup.run_setup(args)
@@ -239,7 +239,7 @@ def test_automatic_key_creation_and_signing_receive_selected_mode(tmp_path, term
                "request": "fixture", "config": {"instance": "example", "console_bind": "192.0.2.10", "console_port": 8080}}
     statuses = iter([{"present": False}, waiting, waiting])
     monkeypatch.setattr(setup, "controller", lambda command, capture=False:
-                        next(statuses) if capture else 20 if command[0] == "install" else 21)
+                        next(statuses) if capture else 20 if command[0] == "install" else 0 if command[0] == "signing-renewal" else 21)
     monkeypatch.setattr(setup, "choose_key_folder", lambda args: args.key_directory)
     modes = []
     def prepare(folder, *, mode):

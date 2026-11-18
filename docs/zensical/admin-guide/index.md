@@ -21,6 +21,7 @@ breaks. Day-to-day staging work is in the [User Guide](../user-guide/index.md).
 | Back up the server, or restore it | [Back up and restore](backups.md) |
 | Export the audit trail, set the API request budget, reset the admin account | [Routine maintenance tasks](maintenance.md) |
 | Rotate a credential or a certificate | [Rotate credentials and certificates](rotations.md) |
+| Renew signing certificates automatically | [Automatic signing renewal](automatic-signing-renewal.md) |
 | Replace or recover the signing keys | [Replace or recover signing keys](instruction-keys.md) |
 | Replace and revoke the online signing key | [Rotate the online signer](signer-rotation.md) |
 | Schedule rotations, approvals and credential reviews | [Schedule key maintenance](key-maintenance.md) |

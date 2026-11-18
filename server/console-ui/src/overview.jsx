@@ -87,6 +87,11 @@ function Overview() {
       <span id="telemetry-health" className={`badge ${telemetryClass}`} title={telemetry?.detail || ''}
         hidden={!telemetry}>{telemetry && `Telemetry export: ${telemetry.state}`}</span></h2></div>
     <Deployment data={deployment} />
+    {overview?.signing_attention && <div className="card" role="alert" id="overview-signing-attention">
+      <strong>Instruction signing needs attention</strong>
+      <p>{overview.signing_attention.message}</p>
+      <a className="btn" href="#settings/certificates">Open Certificates &amp; keys</a>
+    </div>}
     <div className="ov-band"><h3>Needs attention</h3><div className="attention-cards" id="ov-attention"><Attention data={attention} /></div></div>
     <div className="ov-band"><h3>Fleet totals</h3><div className="cards" id="ov-cards">
       {overview && fleetCards(overview).map(card => <div className="card" key={card.label}>

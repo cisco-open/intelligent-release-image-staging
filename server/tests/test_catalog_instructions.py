@@ -1271,6 +1271,16 @@ def test_bootstrap_materializer_identifies_uninitialized_signing():
         instance.materialize_bootstrap_instruction("device-a")
 
 
+def test_bootstrap_materializer_reports_renewal_without_private_cause():
+    error = _BootstrapStamperError('role_unavailable')
+    error.__cause__ = instruction_keys.SigningUnavailable('private signing diagnostic')
+    instance = _bootstrap_catalog([error], [])
+    with pytest.raises(catalog.InstructionSigningRenewalRequired) as caught:
+        instance.materialize_bootstrap_instruction('device-a')
+    assert 'Settings > Certificates & keys' in str(caught.value)
+    assert 'private' not in str(caught.value)
+
+
 def test_bootstrap_materializer_stamps_then_reuses_catalog_envelope():
     timeline = []
     instance = _bootstrap_catalog(["updated"], timeline)
