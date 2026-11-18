@@ -63,7 +63,8 @@ jobs:
         run: npm run test:swagger
 
   test:
-    runs-on: ubuntu-latest
+    # Installer dependency tests exercise the supported host's real apt tools.
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
