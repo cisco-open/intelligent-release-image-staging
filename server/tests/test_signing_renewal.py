@@ -201,3 +201,43 @@ def test_overview_warns_before_signing_cutoff_when_renewal_checks_are_stale(cust
     warning = evidence.attention(paths=paths, now=NOW)
     assert warning['href'] == '#settings/certificates'
     assert 'before the signing cutoff' in warning['message']
+
+
+def test_enable_starts_timer_only_after_releasing_installation_lock(custody, tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from iris_installer import deploy, managed_worker
+    paths, _ = custody
+    current = evidence.snapshot(paths=paths)
+    state = tmp_path / 'installation'; state.mkdir()
+    units = tmp_path / 'units'; units.mkdir()
+    root = tmp_path / 'existing-root'; root.write_text('fixture path; holder mocked')
+    identifier = '11111111-1111-4111-8111-111111111111'
+    locked = [False]
+    class Journal:
+        directory = state
+        document = {'id': identifier}
+        def __init__(self, _path): pass
+        @contextmanager
+        def locked(self):
+            locked[0] = True
+            try: yield self
+            finally: locked[0] = False
+    install = SimpleNamespace(verify_resource_ownership=lambda: None, source=tmp_path/'source', config={})
+    commands = []
+    def command(args):
+        commands.append(args)
+        if args[:2] == ['systemctl', 'start']:
+            assert not locked[0], 'Immediate timer trigger must be able to lock the installation'
+    monkeypatch.setattr(host, 'Journal', Journal)
+    monkeypatch.setattr(deploy, 'installation', lambda _j: install)
+    monkeypatch.setattr(managed_worker, '_root', lambda: None)
+    monkeypatch.setattr(managed_worker, 'command', command)
+    monkeypatch.setattr(host, 'UNITS', units)
+    monkeypatch.setattr(host, 'install_runtime', lambda _: '/root-owned/runtime')
+    monkeypatch.setattr(host, 'holder', lambda _r: {'public': current['roots']['root-a']})
+    monkeypatch.setattr(host.time, 'time', lambda: NOW)
+    monkeypatch.setattr(host, 'server', lambda _i, action, payload=None: current if action == 'snapshot' else {})
+    host.operate(SimpleNamespace(action='enable', state_dir=state, root_key=root))
+    assert ['systemctl', 'enable', 'iris-signing-renewal-' + identifier + '.timer'] in commands
+    assert commands[-1] == ['systemctl', 'start', 'iris-signing-renewal-' + identifier + '.timer']

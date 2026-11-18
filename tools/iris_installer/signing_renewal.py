@@ -267,7 +267,7 @@ def operate(args):
                 atomic_write(destination, data, mode=0o644)
             save(record)
             command(['systemctl', 'daemon-reload'])
-            command(['systemctl', 'enable', '--now', 'iris-signing-renewal-' + identifier + '.timer'])
+            command(['systemctl', 'enable', 'iris-signing-renewal-' + identifier + '.timer'])
         else:
             record = checked_record(state, identifier)
         if args.action == 'disable':
@@ -291,7 +291,12 @@ def operate(args):
                 raise
         if args.action != 'status':
             server(install, 'publish', public_status(record))
-        return dict(public_status(record), readiness=server(install, 'status'))
+        result = dict(public_status(record), readiness=server(install, 'status'))
+    if args.action == 'enable':
+        # An overdue boot/calendar trigger can start the service immediately.
+        # Release the installation journal before allowing that first check.
+        command(['systemctl', 'start', 'iris-signing-renewal-' + identifier + '.timer'])
+    return result
 
 
 def add_arguments(parser):
