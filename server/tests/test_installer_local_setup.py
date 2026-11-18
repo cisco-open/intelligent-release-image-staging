@@ -358,3 +358,24 @@ def test_public_status_allowlists_data_and_binds_public_roots(tmp_path, keys):
     (state / "roots/root-a.pub").write_bytes((state / "roots/root-a.pub").read_bytes() + b"\n")
     with pytest.raises(InstallError, match="roots changed"):
         setup.public_status(state)
+
+
+@pytest.mark.parametrize('automatic', [False, True])
+def test_resume_only_enrolls_verified_automatic_custody(tmp_path, terminal, monkeypatch, automatic):
+    from iris_installer import automatic_keys
+    args = arguments(tmp_path)
+    status = {'present': True, 'id': 'existing', 'config': {
+        'instance': 'recorded', 'console_bind': '192.0.2.11', 'console_port': 8445}}
+    calls = []
+    def controller(command, capture=False):
+        calls.append(command)
+        return status if capture else 0
+    def custody(root):
+        assert root == args.key_directory / 'root-a/root-a'
+        if not automatic: raise InstallError('Offline or manually protected root')
+        return b'verified public root'
+    monkeypatch.setattr(setup, 'controller', controller)
+    monkeypatch.setattr(setup, 'choose_key_folder', lambda args: args.key_directory)
+    monkeypatch.setattr(automatic_keys, 'root_public', custody)
+    assert setup.run_setup(args) == 0
+    assert any(call[0] == 'signing-renewal' for call in calls) is automatic

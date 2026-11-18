@@ -2490,51 +2490,55 @@ class OnboardService:
 
                 def controller_prepare(_request, identity):
                     del identity
-                    with self._authority(j, "iox_prepare"):
+                    import deployment_records
+
+                    def check():
                         with self._condition:
                             current = self._jobs.get(job_id)
                             if (current is None or current["state"] != "running"
                                     or current.get("_abort_requested")):
                                 raise ValueError("window_closed")
                             self._check_authority(j, "iox_prepare")
-                        # Store contention must not prevent abort(), job reads,
-                        # or unrelated submissions from acquiring the job lock.
+
+                    def authorized(operation):
+                        def write():
+                            check()
+                            result = operation()
+                            check()
+                            return result
+                        guard = lambda: self._authority(j, "iox_prepare")
+                        if isinstance(self.record_store, deployment_records.DeploymentRecordStore):
+                            return self.record_store.authorized_write(guard, write)
+                        with guard():
+                            return write()
+
+                    def create():
                         prepared = prepare() if prepare else j.get("record_id")
                         if action == "onboard" and prepared:
                             unclaimed_plan[0] = prepared
-                        with self._condition:
-                            current = self._jobs.get(job_id)
-                            if (current is None or current["state"] != "running"
-                                    or current.get("_abort_requested")):
-                                raise ValueError("window_closed")
-                            self._check_authority(j, "iox_prepare")
-                            if (j.get("record_id") is not None and prepared !=
-                                    j.get("record_id")):
-                                raise ValueError("prepared record does not match request")
-                            if prepared:
-                                current["record_id"] = prepared
-                    if (action == "onboard" and
-                            preflight_evidence[0] is not None):
-                        final_resolved = (
-                            pre_apply(preflight_evidence[0])
-                            if pre_apply else bind_preflight(
+                        return prepared
+
+                    prepared = authorized(create)
+                    with self._condition:
+                        if j.get("record_id") is not None and prepared != j.get("record_id"):
+                            raise ValueError("prepared record does not match request")
+                        if prepared:
+                            j["record_id"] = prepared
+                    if action == "onboard" and preflight_evidence[0] is not None:
+                        final_resolved = authorized(lambda: (
+                            pre_apply(preflight_evidence[0]) if pre_apply else bind_preflight(
                                 j.get("resolved") or resolved or dev,
-                                preflight_evidence[0], platform="iox"))
+                                preflight_evidence[0], platform="iox")))
                         if final_resolved is not None:
                             with self._lock:
-                                current = self._jobs.get(job_id)
-                                if current is not None:
-                                    current["resolved"] = final_resolved
+                                j["resolved"] = final_resolved
                     if prepared and self.record_store is not None:
-                        # Preserve structured cancellation/timeout exceptions
-                        # for the controller instead of downgrading them.
-                        self.record_store.transition(prepared, "applying")
-                    # The production controller owns the one credential mint.
-                    # Small injected controller fakes do not; retain the
-                    # service's historical mint callback for those callers.
+                        # Every retry reacquires and revalidates authority. A
+                        # closed window or revocation while waiting cannot
+                        # advance the plan to device-capable work.
+                        authorized(lambda: self.record_store.transition(prepared, "applying"))
                     if (action == "onboard" and not getattr(
-                            self._iox_controller,
-                            "_mints_enrollment_token", False)):
+                            self._iox_controller, "_mints_enrollment_token", False)):
                         self._mint(device_id)
                     unclaimed_plan[0] = None
                     return prepared

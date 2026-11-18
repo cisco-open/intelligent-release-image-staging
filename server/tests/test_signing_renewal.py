@@ -85,6 +85,8 @@ def test_changed_identity_requires_explicit_reenrollment(custody, change):
     with pytest.raises(InstallError, match='identity changed'):
         host.cycle(record, lambda: current, forbidden, forbidden, lambda _: None, now=NOW + 20 * DAY)
     assert record['state'] == 'review-required'
+    with pytest.raises(InstallError, match='enable renewal again'):
+        host.cycle(record, lambda: evidence.snapshot(paths=paths), forbidden, forbidden, lambda _: None, now=NOW + 20 * DAY)
 
 
 def test_pending_import_retry_reuses_approval(custody):
@@ -134,7 +136,7 @@ def test_readiness_requires_fresh_producer_and_signing(custody, monkeypatch):
     paths, _ = custody
     monkeypatch.setattr(keys, 'read_status_file', lambda *a, **k: {'enabled': True, 'signing_refused': False, 'state': 'keylist_missing'})
     path = Path(paths.state_dir) / 'instruction-stamper-status.json'
-    path.write_text(json.dumps({'state': 'ok', 'updated_at': NOW, 'counts': {'failed': 0}}))
+    path.write_text(json.dumps({'state': 'ok', 'updated_at': NOW, 'counts': {'failed': 0}, 'producer_ready': True}))
     assert evidence.readiness(paths=paths, now=NOW)['ready']
     assert not evidence.readiness(paths=paths, now=NOW + 181)['ready']
     monkeypatch.setattr(keys, 'read_status_file', lambda *a, **k: {'enabled': True, 'signing_refused': True, 'state': 'signing_refused'})
@@ -148,7 +150,13 @@ def test_pinned_holder_runtime_can_renew_with_existing_automatic_root(tmp_path, 
     root = automatic_keys.create_root('root-a', tmp_path / 'holder' / 'root-a').with_suffix('')
     monkeypatch.setattr(host, 'RUNTIME', tmp_path / 'runtime')
     monkeypatch.setattr(managed_worker, '_path', lambda path: path)
-    runtime = host.install_runtime('fixture')
+    previous_umask = os.umask(0o077)
+    try:
+        runtime = host.install_runtime('fixture')
+    finally:
+        os.umask(previous_umask)
+    for directory in (host.RUNTIME, host.RUNTIME/'fixture', Path(runtime), Path(runtime)/'iris_installer'):
+        assert directory.stat().st_mode & 0o777 == 0o755
     assert (Path(runtime) / 'iris_installer/automatic_askpass.py').stat().st_mode & 0o111
     record = {'root_key': str(root), 'holder_uid': os.getuid(), 'runtime': runtime}
     public = host.holder(record)['public']
@@ -219,11 +227,11 @@ def test_enable_starts_timer_only_after_releasing_installation_lock(custody, tmp
         document = {'id': identifier}
         def __init__(self, _path): pass
         @contextmanager
-        def locked(self):
+        def locked(self, **kw):
             locked[0] = True
             try: yield self
             finally: locked[0] = False
-    install = SimpleNamespace(verify_resource_ownership=lambda: None, source=tmp_path/'source', config={})
+    install = SimpleNamespace(verify_signing_ownership=lambda: None, source=tmp_path/'source', config={})
     commands = []
     def command(args):
         commands.append(args)
@@ -241,3 +249,68 @@ def test_enable_starts_timer_only_after_releasing_installation_lock(custody, tmp
     host.operate(SimpleNamespace(action='enable', state_dir=state, root_key=root))
     assert ['systemctl', 'enable', 'iris-signing-renewal-' + identifier + '.timer'] in commands
     assert commands[-1] == ['systemctl', 'start', 'iris-signing-renewal-' + identifier + '.timer']
+
+
+def test_readiness_crosses_cutoff_between_custody_refreshes(custody):
+    paths, _ = custody
+    cutoff = NOW - 3600 + 23 * DAY
+    keys.refresh_custody_status(paths, now=cutoff - 1)
+    producer = Path(paths.state_dir) / 'instruction-stamper-status.json'
+    producer.write_text(json.dumps({'updated_at': cutoff, 'producer_ready': True}))
+    # A float clock is normal in the production HTTP handler.
+    assert evidence.readiness(paths=paths, now=float(cutoff - 1))['signing_ready']
+    assert not evidence.readiness(paths=paths, now=float(cutoff))['signing_ready']
+
+
+def test_default_overview_clock_uses_integer_signing_status(custody, monkeypatch):
+    import time
+    from types import SimpleNamespace
+    import management_api
+    paths, roots = custody
+    now = int(time.time())
+    payload = keys.online_renewal_request(paths)
+    payload.pop('public_key')
+    payload['certificate'] = _issue(roots['root-a'], Path(paths.public_key), now, now + 30*DAY).read_text()
+    certificate_lifecycle.renew(payload, paths=paths, now=now)
+    keys.refresh_custody_status(paths, now=now)
+    (Path(paths.state_dir)/'instruction-stamper-status.json').write_text(json.dumps(
+        {'updated_at': now, 'producer_ready': True, 'state': 'degraded', 'counts': {'failed': 1}}))
+    monkeypatch.setattr(management_api, '_ConsoleServer', lambda address, handler:
+                        SimpleNamespace(RequestHandlerClass=handler))
+    server = management_api.make_server('127.0.0.1', 0, SimpleNamespace())
+    handler = object.__new__(server.RequestHandlerClass)
+    monkeypatch.setattr(handler, '_staging_view', lambda: [])
+    assert handler._overview()['signing_attention'] is None
+
+
+def test_split_signing_ownership_does_not_contact_console(monkeypatch):
+    from iris_installer.deploy import DockerInstall
+    from iris_installer.split_deploy import SplitDockerInstall
+    install = object.__new__(SplitDockerInstall)
+    checked = []
+    monkeypatch.setattr(DockerInstall, 'verify_resource_ownership', lambda self: checked.append('local'))
+    install.remote = lambda *_a, **_k: pytest.fail('Console outage must not prevent signer renewal')
+    install.verify_signing_ownership()
+    assert checked == ['local']
+
+
+def test_disable_stops_both_units_when_runtime_is_unavailable(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from iris_installer import deploy, managed_worker
+    record = {'instance_id': 'fixture', 'runtime': '/safe/runtime', 'state_dir': str(tmp_path),
+              'enabled': True, 'state': 'waiting'}
+    units = tmp_path / 'units'; units.mkdir()
+    monkeypatch.setattr(host, 'UNITS', units)
+    monkeypatch.setattr(host, 'checked_record', lambda *a: record)
+    for name, content in host.unit_files(record).items():
+        (units/name).write_bytes(content)
+    monkeypatch.setattr(managed_worker, '_file', lambda path, **kw: path.read_bytes())
+    calls = []
+    monkeypatch.setattr(managed_worker, 'command', lambda args: calls.append(args))
+    def offline(_journal): raise InstallError('Docker/Kubernetes unavailable')
+    monkeypatch.setattr(deploy, 'installation', offline)
+    result = host.disable(SimpleNamespace(directory=tmp_path, document={'id': 'fixture'}))
+    assert result['enabled'] is False and result['state'] == 'disabled'
+    assert ['systemctl', 'disable', '--now', 'iris-signing-renewal-fixture.timer'] in calls
+    assert ['systemctl', 'stop', 'iris-signing-renewal-fixture.service'] in calls
+    assert json.loads((tmp_path/host.RECORD).read_text())['enabled'] is False

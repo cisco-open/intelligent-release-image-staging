@@ -7,6 +7,8 @@
 import json
 import os
 import time
+import tempfile
+from pathlib import Path
 
 import instruction_keys as keys
 
@@ -18,7 +20,7 @@ STATES = {'disabled', 'waiting', 'renewing', 'renewed', 'error', 'review-require
 def readiness(*, paths=None, now=None):
     """Signing readiness is separate from listener/container health."""
     paths = paths or keys.InstructionPaths.from_env()
-    now = int(time.time()) if now is None else now
+    now = int(time.time() if now is None else now)
     custody = keys.read_status_file(paths.status, now=now)
     producer = None
     try:
@@ -30,11 +32,22 @@ def readiness(*, paths=None, now=None):
     signing = (isinstance(custody, dict) and custody.get('enabled') is True
                and custody.get('signing_refused') is False
                and custody.get('state') in ('ready', 'renewal_due', 'keylist_missing'))
-    producing = (isinstance(producer, dict) and producer.get('state') == 'ok'
+    # Custody refreshes hourly; the signer enforces the cutoff on every call.
+    # Read an immutable public snapshot so crossing the cutoff cannot be hidden
+    # by an otherwise fresh cached custody status.
+    try:
+        raw = keys._read_regular(paths.certificate, keys.MAX_CERTIFICATE_BYTES,
+                                 unavailable='certificate unavailable', too_large='certificate too large')
+        with tempfile.TemporaryDirectory() as directory:
+            certificate = Path(directory) / 'certificate.pub'
+            certificate.write_bytes(raw)
+            start, end, _ = keys._certificate_fields(certificate)
+        signing = signing and start <= now < end - keys.CERTIFICATE_REFUSE_SECONDS
+    except (keys.InstructionKeyError, OSError, ValueError):
+        signing = False
+    producing = (isinstance(producer, dict) and producer.get('producer_ready') is True
                  and type(producer.get('updated_at')) is int
-                 and 0 <= now - producer['updated_at'] <= 180
-                 and isinstance(producer.get('counts'), dict)
-                 and producer.get('counts', {}).get('failed') == 0)
+                 and 0 <= now - producer['updated_at'] <= 180)
     return {'ready': bool(signing and producing), 'signing_ready': bool(signing),
             'producer_ready': bool(producing),
             'custody_state': custody.get('state') if isinstance(custody, dict) else 'unavailable',
@@ -71,6 +84,7 @@ def validate_status(value):
 
 def attention(*, paths=None, now=None):
     paths = paths or keys.InstructionPaths.from_env()
+    now = int(time.time() if now is None else now)
     ready = readiness(paths=paths, now=now)
     automatic = status(paths=paths, now=now)
     if not ready['signing_ready']:
@@ -95,7 +109,7 @@ def publish_status(value, *, paths=None):
 
 def status(*, paths=None, now=None):
     paths = paths or keys.InstructionPaths.from_env()
-    now = int(time.time()) if now is None else now
+    now = int(time.time() if now is None else now)
     try:
         value = validate_status(json.loads(keys._read_regular(
             os.path.join(paths.state_dir, STATUS_NAME), 4096,

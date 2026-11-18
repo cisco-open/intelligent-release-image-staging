@@ -518,6 +518,9 @@ class SplitDockerInstall(DockerInstall):
                 provision(self)
         self.remote('provision')
 
+    def verify_signing_ownership(self):
+        super().verify_resource_ownership()
+
     def verify_resource_ownership(self):
         super().verify_resource_ownership()
         if 'split-prepared' in self.journal.document['completed']:

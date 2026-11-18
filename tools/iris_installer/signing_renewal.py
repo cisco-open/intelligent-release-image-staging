@@ -31,6 +31,8 @@ ENV = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', '
 
 def cycle(record, snapshot, sign, apply, save, *, now):
     """Retry only a guarded approval, reconciling lost import acknowledgments."""
+    if record['state'] == 'review-required':
+        raise InstallError('Signing identity changed. Review and enable renewal again for this identity')
     current = snapshot()
     request = current['request']
     roots = {normalize_public(value) for value in current['roots'].values()}
@@ -190,6 +192,8 @@ def install_runtime(identifier):
     for path in (RUNTIME, RUNTIME / identifier, root, root / 'iris_installer'):
         _path(path)
         path.mkdir(mode=0o755, exist_ok=True)
+        _path(path)
+        path.chmod(0o755)
     for name, content in files.items():
         p = root / 'iris_installer' / name
         if p.exists() or p.is_symlink():
@@ -223,14 +227,16 @@ def operate(args):
     from .deploy import installation
     from .managed_worker import _root, command, _file
     _root()
-    with Journal(args.state_dir).locked() as journal:
+    with Journal(args.state_dir).locked(allow_uninstall=args.action in ('disable', 'status')) as journal:
         if journal.document is None:
             raise InstallError('Choose an existing managed installation')
-        install = installation(journal)
-        install.verify_resource_ownership()
         state, identifier = journal.directory, journal.document['id']
         if str(uuid.UUID(identifier)) != identifier:
             raise InstallError('Installation identity is invalid')
+        if args.action == 'disable':
+            return disable(journal)
+        install = installation(journal)
+        install.verify_signing_ownership()
         save = lambda record: atomic_write(state / RECORD, (json.dumps(record, sort_keys=True) + '\n').encode())
         if args.action == 'enable':
             root = Path(args.root_key).absolute()
@@ -270,10 +276,6 @@ def operate(args):
             command(['systemctl', 'enable', 'iris-signing-renewal-' + identifier + '.timer'])
         else:
             record = checked_record(state, identifier)
-        if args.action == 'disable':
-            record.update(enabled=False, state='disabled', checked_at=int(time.time()))
-            save(record)
-            command(['systemctl', 'disable', '--now', 'iris-signing-renewal-' + identifier + '.timer'])
         if args.action in ('run', 'enable') and record['enabled']:
             try:
                 cycle(record, lambda: server(install, 'snapshot'),
@@ -296,6 +298,32 @@ def operate(args):
         # An overdue boot/calendar trigger can start the service immediately.
         # Release the installation journal before allowing that first check.
         command(['systemctl', 'start', 'iris-signing-renewal-' + identifier + '.timer'])
+    return result
+
+
+def disable(journal):
+    from .managed_worker import command, _file
+    record = checked_record(journal.directory, journal.document['id'])
+    for name, data in unit_files(record).items():
+        path = UNITS / name
+        if path.exists() or path.is_symlink():
+            if _file(path, mode=0o644) != data:
+                raise InstallError('Renewal unit changed; preserve it for review')
+    name = 'iris-signing-renewal-' + record['instance_id']
+    if (UNITS / (name + '.timer')).exists():
+        command(['systemctl', 'disable', '--now', name + '.timer'])
+    if (UNITS / (name + '.service')).exists():
+        command(['systemctl', 'stop', name + '.service'])
+    record.update(enabled=False, state='disabled', checked_at=int(time.time()))
+    atomic_write(journal.directory / RECORD, (json.dumps(record, sort_keys=True) + '\n').encode())
+    result = public_status(record)
+    try:
+        from .deploy import installation
+        install = installation(journal)
+        install.verify_signing_ownership()
+        server(install, 'publish', result)
+    except (InstallError, OSError, ValueError):
+        pass  # Disabling the host service must work during a runtime outage.
     return result
 
 

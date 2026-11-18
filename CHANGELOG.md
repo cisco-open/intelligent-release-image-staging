@@ -20,7 +20,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Renew instruction signing certificates automatically for enrolled local roots,
   with daily checks, startup checks, and hourly failure retries. Show renewal
   problems on Overview and verify signing and producer readiness after setup.
-  Preserve timeout results through scheduled IOx admission guards.
+  Preserve offline-key resumes, stop renewal units during uninstall, and keep
+  scheduled authority available and freshly checked during IOx preparation.
 
 - Keep IOx preparation cancellable during record-store contention, preserve
   cancellation and timeout results, and retire abandoned preparation records.

@@ -4973,7 +4973,7 @@ def test_iox_deferred_authority_recheck_releases_locks_for_controller_and_probe(
             valid[0] = not revoke_at_prepare
         release.set()
         job = _wait(service, jid)
-        assert phases == ["admission", "execution", "iox_prepare"]
+        assert phases == ["admission", "execution"] + ["iox_prepare"] * (1 if revoke_at_prepare else 2)
         if revoke_at_prepare:
             assert prepared == []
             assert job["state"] == "error"
@@ -5097,6 +5097,9 @@ def test_build_env_inherits_saved_peer_mode_over_process_default(tmp_path, monke
 @pytest.mark.parametrize('phase,outcome', [
     ('create', 'cancelled'), ('applying', 'cancelled'),
     ('committed', 'cancelled'), ('committed', 'revoked'),
+    ('create', 'revoked'), ('applying', 'revoked'),
+    ('pre_apply', 'revoked'), ('pre_apply', 'window_closed'),
+    ('applying', 'window_closed'),
     ('create', 'timeout'), ('applying', 'timeout'),
 ])
 def test_iox_preparation_contention_preserves_abort_authority_and_results(
@@ -5123,7 +5126,11 @@ def test_iox_preparation_contention_preserves_abort_authority_and_results(
     valid = [True]
     original_create, original_transition = store.create, store.transition
 
+    stalled = [False]
     def stall():
+        if stalled[0]:
+            return
+        stalled[0] = True
         if outcome == 'timeout':
             # Expire the ordinary budget while the later session budget is open.
             clock[0] = store._lock_wait_local.budget[0]
@@ -5162,7 +5169,8 @@ def test_iox_preparation_contention_preserves_abort_authority_and_results(
     def authority_check(stage):
         authority_checks.append(stage)
         if not valid[0]:
-            raise gui_onboard.ScheduledAdmissionError('device_revoked')
+            raise gui_onboard.ScheduledAdmissionError(
+                'window_closed' if outcome == 'window_closed' else 'device_revoked')
 
     def prepare():
         return store.create(records_spec._record(
@@ -5170,7 +5178,19 @@ def test_iox_preparation_contention_preserves_abort_authority_and_results(
             resolved={'platform': 'iox', 'device_identity': spec._BOARD}
         ))['record_id']
 
-    guard = None
+    def pre_apply(_evidence):
+        if phase == 'pre_apply':
+            stall()
+            row = store.get('prepared')
+            store.update_planned('prepared', **{key: row[key] for key in (
+                'plan_hash', 'resolved', 'preflight', 'resources')})
+
+    import contextlib
+    shared_authority = threading.Lock()
+    @contextlib.contextmanager
+    def guard(_phase):
+        with shared_authority:
+            yield
     if outcome == 'timeout':
         # Exercise the actual production scheduled guard, which previously
         # translated StoreLockTimeout into execution_failed/rejected/2.
@@ -5186,7 +5206,7 @@ def test_iox_preparation_contention_preserves_abort_authority_and_results(
             None, 1)[0]
 
     try:
-        jid = service.start('d1', prepare=prepare, pre_apply=lambda _e: None,
+        jid = service.start('d1', prepare=prepare, pre_apply=pre_apply,
                             authority_guard=guard,
                             authority_check=authority_check,
                             schedule_context=_schedule_context('d1'))
@@ -5199,19 +5219,24 @@ def test_iox_preparation_contention_preserves_abort_authority_and_results(
                 assert not aborter.is_alive(), 'abort blocked behind record preparation'
                 assert result == [True]
             else:
-                valid[0] = False
+                if phase != 'committed':
+                    assert shared_authority.acquire(timeout=1), 'Record wait retained shared authority'
+                    valid[0] = False
+                    shared_authority.release()
+                else:
+                    valid[0] = False
             # Status reads must also stay responsive while preparation waits.
             assert service.get_job(jid)['state'] in ('running', 'cancelled')
             release.set()
         job = _wait(service, jid)
-        expected = {'cancelled': 130, 'timeout': 4, 'revoked': 2}[outcome]
+        expected = {'cancelled': 130, 'timeout': 4, 'revoked': 2, 'window_closed': 2}[outcome]
         assert job['result_code'] == expected, job['lines']
         assert job['state'] == ('cancelled' if outcome == 'cancelled' else 'error')
-        if outcome != 'revoked':
+        if outcome not in ('revoked', 'window_closed'):
             assert job['error_category'] == outcome
         else:
-            assert job['admission_reason'] == 'device_revoked'
-            assert authority_checks.count('iox_prepare') == 2
+            assert job['admission_reason'] == ('window_closed' if outcome == 'window_closed' else 'device_revoked')
+            assert authority_checks.count('iox_prepare') >= 2
         record = store.get('prepared')
         if phase == 'create':
             assert record is None

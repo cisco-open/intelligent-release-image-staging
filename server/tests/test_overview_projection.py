@@ -83,6 +83,8 @@ def test_overview_light_projection_matches_detailed_rows_and_expected_totals(pro
     for row in light:
         assert row == {key: rows[row["device_id"]][key] for key in row}
         assert "instruction" not in row and "install_options" not in row
+    import signing_renewal
+    monkeypatch.setattr(signing_renewal, "attention", lambda **kw: None)
     actual = handler._overview()
     assert actual == {
         "images": 3, "devices": 48, "assigned": 40, "staged": 12,
@@ -92,7 +94,7 @@ def test_overview_light_projection_matches_detailed_rows_and_expected_totals(pro
             {"image_id": "b", "filename": "b.bin", "assigned": 16, "staged": 8},
             {"image_id": "c", "filename": "c.bin", "assigned": 0, "staged": 0},
         ],
-        "swarm_map_url": "/swarmmap",
+        "swarm_map_url": "/swarmmap", "signing_attention": None,
     }
     # Compare the entire result against the former full-detail input path.
     # Compare the former detailed computation, not a second admission inside

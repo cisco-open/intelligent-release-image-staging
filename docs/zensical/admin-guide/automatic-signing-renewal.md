@@ -23,7 +23,9 @@ retries after an hour. Missed daily checks run when the host returns.
 
 An interrupted import is reconciled against the installed certificate. A changed
 online key or signing root requires explicit enrollment again. The service
-never creates a replacement root or changes the signing cutoff.
+never creates a replacement root or changes the signing cutoff. Once identity
+review is required, restoring the old identity does not resume automatic
+signing: an operator must explicitly enable renewal again.
 
 ## Check its status
 
@@ -35,7 +37,9 @@ attention. A check older than 26 hours is reported as overdue.
 Signing readiness is separate from container and listener health. Deployment
 completion checks both signing and the instruction producer before reporting
 that their checks passed. Other custody work, such as root attestations and
-revocation-list maintenance, remains visible separately.
+revocation-list maintenance, remains visible separately. Inventory-only devices
+without enrollment keys do not make the producer unavailable. Its status records
+scan progress and completion separately from per-device stamping failures.
 
 ## Enable it for an existing installation
 
@@ -65,5 +69,8 @@ sudo irisctl signing-renewal disable --state-dir /var/lib/iris-installer/my-iris
 ```
 
 `run` checks the due date immediately. `disable` stops future scheduled renewal
-without changing the current certificate. A missing key, changed identity, or
+without changing the current certificate, including while the server runtime is
+unavailable. Split-host renewal does not depend on Console availability. Managed
+uninstall reviews and removes both renewal units, retaining the enrollment
+history, public runtime and holder keys. A missing key, changed identity, or
 unavailable runtime leaves the current deployment intact and reports a problem.

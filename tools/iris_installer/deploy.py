@@ -505,6 +505,10 @@ class DockerInstall:
         atomic_write(self.compose_file, json.dumps(compose, sort_keys=True, indent=2).encode())
         self.journal.checkpoint("prepared", digest(self.compose_file))
 
+    def verify_signing_ownership(self):
+        """Renewal needs authority over the signer, not a remote Console."""
+        self.verify_resource_ownership()
+
     def verify_resource_ownership(self):
         for kind in ("container", "volume", "network"):
             command = ["docker", kind, "ls", "-q"]

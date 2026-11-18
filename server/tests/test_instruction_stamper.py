@@ -1156,7 +1156,8 @@ def test_role_gc_refuses_corrupt_reference_snapshot_and_serializes_reappearance(
         stamp["role_gen"]]["unreferenced_at"] is None
 
 
-def test_status_loop_is_failure_isolated_and_secret_free(tmp_path):
+def test_status_loop_is_failure_isolated_and_secret_free(tmp_path, monkeypatch):
+    monkeypatch.setattr(stamper.time, "time", lambda: NOW)
     paths, *_ = _setup(tmp_path)
     canaries = ["device-secret", "10.23.45.67", "/private/path", "signature"]
 
@@ -1167,7 +1168,8 @@ def test_status_loop_is_failure_isolated_and_secret_free(tmp_path):
         def now(self):
             return NOW
 
-        def run_once(self):
+        def run_once(self, progress=None):
+            self.now()
             raise RuntimeError(" ".join(canaries))
 
     class Stop:
@@ -1181,7 +1183,7 @@ def test_status_loop_is_failure_isolated_and_secret_free(tmp_path):
         "schema": stamper.STATUS_SCHEMA, "updated_at": NOW,
         "last_success_at": None, "state": "degraded",
         "counts": {"seen": 0, "updated": 0, "unchanged": 0, "failed": 1},
-        "errors": {"stamp_commit": 1}}
+        "errors": {"stamp_commit": 1}, "producer_ready": False}
 
     clock_calls = []
     clock_canary = "clock private-path-canary"
@@ -1242,7 +1244,7 @@ def test_role_device_and_status_write_failures_do_not_suppress_next_work(
 
     monkeypatch.setattr(stamper, "_atomic_json", fail_first_status)
     stamper.status_loop(TwoPasses(), stamper=producer, interval=0)
-    assert len(calls) == 2
+    assert len(calls) == 4
     status = json.loads(Path(paths.status).read_text())
     assert status["counts"] == {
         "seen": 2, "updated": 0, "unchanged": 1, "failed": 1}
@@ -2777,3 +2779,28 @@ def test_task14_role_snapshot_rejects_corrupt_identity_signature_and_state(
         read(paths, stamp)
     assert not isinstance(error.value, missing_type)
     assert error.value.code == "role_unavailable"
+
+
+def test_long_scan_publishes_progress_and_completion_time(tmp_path, monkeypatch):
+    paths, fleet, _cat, producer, *_ = _setup(tmp_path)
+    clock = [NOW]
+    producer.now = lambda: clock[0]
+    for index in range(5):
+        fleet.rows['inventory-%d' % index] = {'device_id': 'inventory-%d' % index}
+    observed = []
+    def stamp(device):
+        if Path(paths.status).exists():
+            value = json.loads(Path(paths.status).read_text())
+            observed.append(value)
+            assert clock[0] - value['updated_at'] < 180
+        clock[0] += 70
+        raise stamper.StamperError('key_unavailable')
+    monkeypatch.setattr(producer, 'stamp_device', stamp)
+    class Stop:
+        def wait(self, _interval): return True
+    stamper.status_loop(Stop(), stamper=producer)
+    status = json.loads(Path(paths.status).read_text())
+    assert len(observed) == 6 and clock[0] - NOW > 180
+    assert status['updated_at'] == clock[0]
+    assert status['producer_ready'] is True
+    assert status['state'] == 'degraded' and status['counts']['failed'] == 6

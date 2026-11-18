@@ -5658,7 +5658,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            if self._awaiting_heartbeat(row))
             import signing_renewal
             return {
-                "signing_attention": signing_renewal.attention(now=now),
+                "signing_attention": signing_renewal.attention(now=int(now)),
                 "images": len(imgs), "devices": len(rows),
                 "assigned": assigned_total, "staged": staged_total,
                 "staging_now": staging_now,

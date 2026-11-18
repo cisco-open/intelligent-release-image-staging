@@ -203,6 +203,7 @@ def run_setup(args):
         print("Your system may ask for your sudo password; this is not a certificate password.")
         status = controller(["setup-status", "--state-dir", str(args.state_dir)], capture=True)
         folder = None
+        existing = status["present"]
         if status["present"]:
             from .prebuilt_install import assert_setup_selection
             assert_setup_selection(args, status)
@@ -250,12 +251,27 @@ def run_setup(args):
         status = controller(["setup-status", "--state-dir", str(args.state_dir)], capture=True)
         config = status["config"]
         if args.key_mode == 'automatic':
-            folder = folder or choose_key_folder(args)
-            print('Enabling automatic signing-certificate renewal with the existing local root.')
-            renewed = controller(['signing-renewal', 'enable', '--state-dir', str(args.state_dir),
-                                  '--root-key', str(folder / 'root-a/root-a')])
-            if renewed:
-                raise InstallError('Installation is kept, but automatic renewal needs attention. Check the managed key folder and rerun setup')
+            if folder is None:
+                # Resume must not create a key folder or require private-root
+                # access for an installation using offline custody.
+                default = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.local/share/iris-setup-keys' / args.instance
+                folder = Path(args.key_directory or default).expanduser()
+            from . import automatic_keys
+            root = folder / 'root-a/root-a'
+            automatic = not existing
+            if existing:
+                # A default CLI mode is not evidence of this install's custody.
+                try:
+                    automatic_keys.root_public(root)
+                    automatic = True
+                except (InstallError, OSError, ValueError):
+                    print('Local automatic custody is unavailable. Keep using the existing manual renewal workflow.')
+            if automatic:
+                print('Enabling automatic signing-certificate renewal with the existing local root.')
+                renewed = controller(['signing-renewal', 'enable', '--state-dir', str(args.state_dir),
+                                      '--root-key', str(folder / 'root-a/root-a')])
+                if renewed:
+                    raise InstallError('Installation is kept, but automatic renewal needs attention. Check the managed key folder and rerun setup')
         print("\n[4/4] Open the Console")
         print("Open https://" + config["console_bind"] + ":" + str(config["console_port"]) + "/ and check its certificate.")
         print("Create your own administrator account if asked. No account was created or signed in for you.")
