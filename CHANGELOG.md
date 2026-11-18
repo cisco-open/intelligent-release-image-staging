@@ -17,6 +17,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+- Recognize the IOS XE 26.2.1 HTTP-client password storage advisory during
+  IOx HTTPS downloads, while preserving actual security-policy rejections.
+
 - Renew instruction signing certificates automatically for enrolled local roots,
   with daily checks, startup checks, and hourly failure retries. Show renewal
   problems on Overview and verify signing and producer readiness after setup.

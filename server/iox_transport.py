@@ -1657,6 +1657,24 @@ def _only_ios_warnings(payload):
         line.lstrip().startswith(b"Warning:") for line in lines)
 
 
+def _http_password_advisory(purpose, command, payload):
+    """The recorded XE 26.2.1 storage warning does not reject HTTPS auth.
+
+    This exception belongs only to our temporary HTTP-client password command.
+    Match the whole advisory: a policy refusal, unrelated warning, or extra
+    output must still fail through the normal transport checks.
+    """
+    if (purpose != "http_client_credentials" or
+            re.fullmatch(br"ip http client password 0 [^\s]+", command) is None):
+        return False
+    return payload.strip() == (
+        b"SECURITY WARNING - Module: HTTP, Command: ip http client password 0 *"
+        b" - Reason: Sensitive information like passwords and keys are stored"
+        b" using weak or no protection - Remediation: Please consider migrating"
+        b" to a secure alternative such as Type-6 or Type-9 - The configuration"
+        b" is inconsistent with secure network operation and is not recommended")
+
+
 # The lifecycle steps that CLEAR prior application state. Both recipes run
 # them before doing anything else -- the installer to make a re-install
 # idempotent, the teardown to remove what is there -- so for all three the
@@ -2686,6 +2704,7 @@ class IoxTransport(object):
                     elif (in_config and question is None and payload and
                           payload_error is None and
                           not _only_ios_warnings(payload) and
+                          not _http_password_advisory(purpose, line, payload) and
                           not _cleanup_absent(purpose, payload) and
                           not _cleanup_removal_advisory(purpose, line, payload) and
                           not _vlan_already_absent(purpose, line, payload)):

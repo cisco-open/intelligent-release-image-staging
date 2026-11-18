@@ -82,6 +82,9 @@ controller's private channel; they are not meant to run standalone.
    validated against that trustpoint. Each copy authenticates with the device's
    enrollment credential, which the server sets as `ip http client username` and
    `ip http client password` for one copy and then removes.
+   IOS XE 26.2.x may display a security advisory about temporary password
+   storage. IRIS recognizes the recorded HTTP-client advisory and continues the
+   HTTPS copy; actual security-policy refusals still stop onboarding.
 3. After the app reaches `ACTIVATED`, the installer copies the certificate and
    the device's first instruction, the signed message that says which images to
    stage, into app-hosting application data and starts the app.
